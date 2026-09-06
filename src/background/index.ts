@@ -21,6 +21,7 @@ import {
 import { persistReshieldedNote, recoverReshields } from "~lib/paraloom/reshieldRecovery"
 import { reconcileSwapOutputs } from "~lib/paraloom/swapReconcile"
 import { assetIdForMint, NATIVE_ASSET_HEX } from "~lib/prover"
+import { openWalletWindow, POPUP_PAGE } from "~lib/extension/openWalletWindow"
 
 // Private swaps are mainnet-only (Jupiter liquidity) and rebuilding the v3 tree
 // needs an archival RPC, so the swap always runs against the node's archival
@@ -81,9 +82,126 @@ async function maybeAutoLock(): Promise<void> {
 // backstop for a worker that was terminated past the lock threshold.
 chrome.alarms.create(AUTO_LOCK_ALARM, { periodInMinutes: 1 })
 chrome.alarms.onAlarm.addListener((alarm) => {
-  if (alarm.name === AUTO_LOCK_ALARM) void maybeAutoLock()
+  if (alarm.name === AUTO_LOCK_ALARM) {
+    void maybeAutoLock()
+    // Re-syncs the popup toggle in case a worker restart missed a port disconnect.
+    void syncActionPopup()
+  }
 })
 void maybeAutoLock()
+
+// Windows whose action popup has been overridden and needs re-syncing.
+const touchedWindowIds = new Set<number>()
+// Windows to exclude from a sync even if getContexts() hasn't caught up to their panel closing.
+const closingWindowIds = new Set<number>()
+
+async function getLastSurface(): Promise<"popup" | "sidepanel"> {
+  const r = await chrome.storage.local.get("lastSurface")
+  return r.lastSurface === "sidepanel" ? "sidepanel" : "popup"
+}
+
+async function setLastSurface(surface: "popup" | "sidepanel"): Promise<void> {
+  await chrome.storage.local.set({ lastSurface: surface }).catch(() => {})
+}
+
+// setPopup/enable/disable have no per-window scope, so each window's tabs are set individually.
+async function applyPopupOverride(windowId: number, hasPanel: boolean, baseline: string): Promise<void> {
+  let tabs: chrome.tabs.Tab[]
+  try {
+    tabs = await chrome.tabs.query({ windowId })
+  } catch {
+    // Window closed concurrently with this sync; nothing to update.
+    return
+  }
+  await Promise.all(
+    tabs
+      .filter((t) => t.id !== undefined)
+      .map(async (t) => {
+        const tabId = t.id!
+        try {
+          if (hasPanel) {
+            await chrome.action.disable(tabId)
+          } else {
+            await chrome.action.enable(tabId)
+            await chrome.action.setPopup({ tabId, popup: baseline })
+          }
+        } catch (err) {
+          console.error("[paraloom] applyPopupOverride failed:", err)
+        }
+      })
+  )
+}
+
+// Disables immediately, ahead of the slower syncActionPopup round trip.
+async function disableWindowNow(windowId: number): Promise<void> {
+  touchedWindowIds.add(windowId)
+  await applyPopupOverride(windowId, true, "")
+}
+
+async function syncActionPopup(): Promise<void> {
+  try {
+    const [panels, lastSurface] = await Promise.all([
+      chrome.runtime.getContexts({ contextTypes: [chrome.runtime.ContextType.SIDE_PANEL] }),
+      getLastSurface()
+    ])
+    const baseline = lastSurface === "sidepanel" ? "" : POPUP_PAGE
+    await chrome.action.setPopup({ popup: baseline }).catch(() => {})
+    await chrome.action.enable().catch(() => {})
+
+    const openWindowIds = new Set(
+      panels.map((p) => p.windowId).filter((id) => id >= 0 && !closingWindowIds.has(id))
+    )
+    for (const id of openWindowIds) touchedWindowIds.add(id)
+
+    await Promise.all(
+      [...touchedWindowIds].map((id) => applyPopupOverride(id, openWindowIds.has(id), baseline))
+    )
+  } catch (err) {
+    console.error("[paraloom] syncActionPopup failed:", err)
+  }
+}
+void syncActionPopup()
+
+chrome.runtime.onConnect.addListener((port) => {
+  if (port.name !== "sidepanel") return
+  let windowId: number | undefined
+  port.onMessage.addListener((msg) => {
+    if (typeof msg?.windowId !== "number") return
+    windowId = msg.windowId
+    // A fresh connection means this window's panel is open again, overriding any pending exclusion.
+    closingWindowIds.delete(windowId)
+    void syncActionPopup()
+  })
+  void setLastSurface("sidepanel").then(syncActionPopup)
+  port.onDisconnect.addListener(() => {
+    if (windowId !== undefined) closingWindowIds.add(windowId)
+    void syncActionPopup().finally(() => {
+      if (windowId !== undefined) closingWindowIds.delete(windowId)
+    })
+  })
+})
+
+chrome.windows.onRemoved.addListener((windowId) => {
+  touchedWindowIds.delete(windowId)
+})
+
+// New tabs start on the global default, wrong if this window's panel is open.
+chrome.tabs.onCreated.addListener((tab) => {
+  if (tab.windowId !== undefined && touchedWindowIds.has(tab.windowId)) {
+    void syncActionPopup()
+  }
+})
+
+chrome.action.onClicked.addListener((tab) => {
+  if (tab.windowId === undefined) return
+  const windowId = tab.windowId
+  // Must run synchronously off the click, or Chrome drops the user-gesture requirement.
+  chrome.sidePanel
+    .open({ windowId })
+    .catch((err) => console.error("[paraloom] sidePanel open failed:", err))
+  void disableWindowNow(windowId)
+  void setLastSurface("sidepanel")
+})
 
 // A connection request awaiting the user's explicit approval in the popup
 // (Phantom-style). At most one is outstanding at a time.
@@ -122,16 +240,8 @@ let pendingSwap:
 let swapIdCounter = 0
 
 
-// Message types the popup UI is the only legitimate sender of. A page relayed
-// through the content script must never reach these: `GET_PENDING_CONNECTION`
-// leaks the id of a connection awaiting approval, and `APPROVE_CONNECTION` /
-// `REJECT_CONNECTION` resolve it — so a page that could send them would read
-// the pending id and approve its own connection, defeating the consent screen
-// entirely.
-//
-// A popup message carries no `sender.tab` (it originates from the extension's
-// own context); a content-script message always carries the tab it came from.
-// That is the distinction, and it needs no extra permission to read.
+// Only an extension page (popup/panel) may send these: a content-script
+// relay could otherwise approve its own pending connection or swap.
 const POPUP_ONLY_TYPES = new Set([
   "ACTIVITY",
   "GET_WALLET_STATE",
@@ -144,17 +254,15 @@ const POPUP_ONLY_TYPES = new Set([
   // defeating the per-request consent screen.
   "GET_PENDING_SWAP",
   "APPROVE_SWAP",
-  "REJECT_SWAP"
+  "REJECT_SWAP",
+  // Surface-switch messages: only the popup/panel's own buttons send these.
+  "SIDE_PANEL_CLOSE",
+  "POPUP_OPENED",
+  "SIDE_PANEL_OPENING"
 ])
 
-function isFromPopup(sender: chrome.runtime.MessageSender): boolean {
-  // A message from the extension's OWN pages (the popup) carries a
-  // chrome-extension:// URL; a page relay (content script) carries the web
-  // page's https:// URL. The old `sender.tab === undefined` heuristic was WRONG:
-  // openWalletWindow opens the popup via chrome.windows.create, which IS a tab,
-  // so every popup-only message (GET_PENDING_CONNECTION / APPROVE_CONNECTION /
-  // GET_PENDING_SWAP / APPROVE_SWAP) was rejected as "not permitted" — the
-  // approval popup could never read or resolve its own request.
+function isFromExtensionPage(sender: chrome.runtime.MessageSender): boolean {
+  // Extension pages carry a chrome-extension:// URL; a content-script relay carries the page's https:// URL.
   return !!sender.url && sender.url.startsWith(chrome.runtime.getURL(""))
 }
 
@@ -163,12 +271,36 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   // Without this the approval screen is decorative: a script on any injected
   // origin approves its own connection and reads the visitor's shielded
   // balance with no interaction.
-  if (POPUP_ONLY_TYPES.has(message.type) && !isFromPopup(sender)) {
+  if (POPUP_ONLY_TYPES.has(message.type) && !isFromExtensionPage(sender)) {
     sendResponse({ success: false, error: "not permitted" })
     return false
   }
 
   // Popup messages
+  if (message.type === "SIDE_PANEL_OPENING") {
+    const windowId = typeof message.windowId === "number" ? message.windowId : undefined
+    if (windowId !== undefined) void disableWindowNow(windowId)
+    sendResponse({ success: true })
+    return false
+  }
+
+  if (message.type === "POPUP_OPENED") {
+    void setLastSurface("popup").then(syncActionPopup)
+    sendResponse({ success: true })
+    return false
+  }
+
+  if (message.type === "SIDE_PANEL_CLOSE") {
+    // No per-window close exists; toggling `enabled` globally is the only thing that
+    // actually closes an open panel (confirmed by testing), at the cost of blipping every window's.
+    chrome.sidePanel
+      .setOptions({ enabled: false })
+      .then(() => chrome.sidePanel.setOptions({ enabled: true }))
+      .catch(() => {})
+    sendResponse({ success: true })
+    return false
+  }
+
   if (message.type === "ACTIVITY") {
     void recordActivity(Date.now())
     sendResponse({ success: true })
@@ -498,21 +630,22 @@ function requestApproval(origin: string, timeoutMs: number): Promise<boolean> {
     const id = ++connectionIdCounter
     const clearPersisted = () =>
       void chrome.storage.session.remove("pendingConn").catch(() => {})
+    // Broadcast so another surface showing this same request can dismiss it too.
+    const settle = (approved: boolean) => {
+      pendingConnection = null
+      clearPersisted()
+      chrome.runtime.sendMessage({ type: "CONNECTION_RESOLVED", id }).catch(() => {})
+      resolve(approved)
+    }
     const timer = setTimeout(() => {
-      if (pendingConnection?.id === id) {
-        pendingConnection = null
-        clearPersisted()
-        resolve(false)
-      }
+      if (pendingConnection?.id === id) settle(false)
     }, timeoutMs)
     pendingConnection = {
       id,
       origin,
       resolve: (approved: boolean) => {
         clearTimeout(timer)
-        pendingConnection = null
-        clearPersisted()
-        resolve(approved)
+        settle(approved)
       }
     }
     // Persist so the pending approval survives an MV3 worker eviction during the
@@ -522,9 +655,6 @@ function requestApproval(origin: string, timeoutMs: number): Promise<boolean> {
   })
 }
 
-// Open the wallet UI in a popup window so the user can unlock to approve a
-// connection. chrome.action.openPopup() is unreliable in MV3, so we open the
-// popup page as its own window.
 // MV3 keep-alive. A connect/swap approval waits on the user (unlock + approve),
 // which can take longer than Chrome's ~30s idle eviction of the service worker.
 // If the worker is evicted mid-wait, the in-memory pending request AND the held
@@ -537,42 +667,6 @@ function withKeepAlive<T>(p: Promise<T>): Promise<T> {
     void chrome.runtime.getPlatformInfo().catch(() => {})
   }, 20_000)
   return p.finally(() => clearInterval(timer))
-}
-
-let openingWindow = false
-async function openWalletWindow() {
-  if (openingWindow) return
-  openingWindow = true
-  const WIDTH = 400
-  const HEIGHT = 620
-  try {
-    // Anchor the popup to the top-right of the focused browser window, like
-    // Phantom — otherwise Chrome drops it at the top-left of the screen.
-    let left: number | undefined
-    let top: number | undefined
-    try {
-      const win = await chrome.windows.getLastFocused()
-      if (typeof win.left === "number" && typeof win.width === "number") {
-        left = Math.max(0, win.left + win.width - WIDTH - 24)
-        top = (win.top ?? 0) + 24
-      }
-    } catch {
-      // Fall back to Chrome's default placement.
-    }
-    await chrome.windows.create({
-      url: chrome.runtime.getURL("popup.html"),
-      type: "popup",
-      width: WIDTH,
-      height: HEIGHT,
-      left,
-      top,
-      focused: true
-    })
-  } catch {
-    // Ignore — the user can still open the wallet manually from the toolbar.
-  } finally {
-    openingWindow = false
-  }
 }
 
 // Poll the lock state until the wallet is unlocked or the timeout elapses.

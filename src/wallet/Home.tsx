@@ -6,6 +6,7 @@ import { getApprovedOrigins, removeApprovedOrigin } from "~lib/storage/connectio
 import { useWalletStore } from "~lib/store/walletStore"
 import { deriveKeypairFromSeed, decryptWallet, decryptSeedPhrase, deriveBoxKeypair, KDF_VERSION_SCRYPT } from "~lib/crypto/keyManagement"
 import { getStoredWallet } from "~lib/storage/secure"
+import { POPUP_PAGE } from "~lib/extension/openWalletWindow"
 import type { Account } from "~lib/store/walletStore"
 import { getConnection, deposit, getSolBalance, solanaAddress, solanaAddressToBytes } from "~lib/paraloom/bridge"
 import { addNote, getNotes, markNoteSpent, shieldedBalance, shieldedTokenBalances, type ShieldedNote } from "~lib/paraloom/notes"
@@ -99,6 +100,20 @@ function Toast({ message, type, onClose }: { message: string; type: "success" | 
   return <div className={`toast ${type}`} onClick={onClose}>{message}</div>
 }
 
+const isSidePanel = typeof window !== "undefined" && window.location.pathname.includes("sidepanel")
+
+// getContexts() can lag right after openPopup() resolves, so retry once.
+async function confirmPopupOpened(): Promise<boolean> {
+  for (const delay of [0, 150]) {
+    if (delay) await new Promise((resolve) => setTimeout(resolve, delay))
+    const popups = await chrome.runtime.getContexts({
+      contextTypes: [chrome.runtime.ContextType.POPUP]
+    })
+    if (popups.length > 0) return true
+  }
+  return false
+}
+
 export function Home({ onLock }: HomeProps) {
   const { wallet, balance, lock, seedPhrase, accounts, addAccount, switchAccount, currentAccountIndex, clear } = useWalletStore()
   const [bottomTab, setBottomTab] = useState<"home" | "activity" | "settings">("home")
@@ -146,6 +161,8 @@ export function Home({ onLock }: HomeProps) {
 
   // Settings state
   const [network, setNetworkState] = useState<"mainnet-beta" | "devnet">("mainnet-beta")
+  // Gates the balance fetch until getNetwork() resolves.
+  const [networkLoaded, setNetworkLoaded] = useState(false)
   const [autoLock, setAutoLock] = useState(DEFAULT_AUTO_LOCK_MINUTES)
   const [autoLockOpen, setAutoLockOpen] = useState(false)
   const [showPKModal, setShowPKModal] = useState(false)
@@ -158,14 +175,55 @@ export function Home({ onLock }: HomeProps) {
   const [showRemoveConfirm, setShowRemoveConfirm] = useState(false)
   const [removeConfirmText, setRemoveConfirmText] = useState("")
   const [connectedSites, setConnectedSites] = useState<string[]>([])
+  // Hides the surface-switch button inside an openWalletWindow approval popup.
+  const [isFloatingWindow, setIsFloatingWindow] = useState(false)
 
   const autoLockRef = useRef<HTMLDivElement>(null)
+  // Cached so the click handlers can call sidePanel.open()/openPopup() with no preceding await.
+  const currentWindowIdRef = useRef<number | null>(null)
+  const activeTabRef = useRef<{ tabId: number; windowId: number } | null>(null)
 
   // Load settings on mount
   useEffect(() => {
-    getNetwork().then(setNetworkState)
+    getNetwork().then((net) => {
+      setNetworkState(net)
+      setNetworkLoaded(true)
+    })
     getAutoLockMinutes().then(setAutoLock)
     getApprovedOrigins().then(setConnectedSites)
+
+    if (!isSidePanel) {
+      chrome.windows
+        .getCurrent()
+        .then((win) => {
+          setIsFloatingWindow(win.type === "popup")
+          if (win.id !== undefined) currentWindowIdRef.current = win.id
+        })
+        .catch(() => {})
+      return
+    }
+
+    function refreshActiveTab() {
+      const windowId = currentWindowIdRef.current
+      if (windowId === null) return
+      chrome.tabs
+        .query({ active: true, windowId })
+        .then(([tab]) => {
+          if (tab?.id !== undefined && tab.windowId !== undefined) {
+            activeTabRef.current = { tabId: tab.id, windowId: tab.windowId }
+          }
+        })
+        .catch(() => {})
+    }
+    chrome.windows
+      .getCurrent()
+      .then((win) => {
+        if (win.id !== undefined) currentWindowIdRef.current = win.id
+        refreshActiveTab()
+      })
+      .catch(() => {})
+    chrome.tabs.onActivated.addListener(refreshActiveTab)
+    return () => chrome.tabs.onActivated.removeListener(refreshActiveTab)
   }, [])
 
   // Load the private-swap outputs (tokens bought at fresh unlinkable addresses);
@@ -217,10 +275,52 @@ export function Home({ onLock }: HomeProps) {
   }
 
   async function handleLock() {
+    // Swap to the lock screen before clearing the store, so this component never re-renders with wallet === null.
+    onLock()
     lock()
     await setLockState(true)
     await clearSession()
-    onLock()
+  }
+
+  function handleOpenSidePanel() {
+    const windowId = currentWindowIdRef.current
+    if (windowId === null) {
+      showToast("Couldn't open the side panel", "error")
+      return
+    }
+    chrome.runtime.sendMessage({ type: "SIDE_PANEL_OPENING", windowId }).catch(() => {})
+    // Fired with no preceding await: sidePanel.open() needs a recent user gesture.
+    // Chrome only, on a gecko target Plasmo emits sidebar_action and chrome.sidePanel is
+    // undefined, so this throws synchronously and the .catch() below never sees it.
+    // Adding Firefox support will need a presence check or try/catch here, not another .catch()
+    chrome.sidePanel
+      .open({ windowId })
+      .then(() => window.close())
+      .catch(() => showToast("Couldn't open the side panel", "error"))
+  }
+
+  function handleOpenPopup() {
+    const active = activeTabRef.current
+    if (!active) {
+      showToast("Couldn't open the popup", "error")
+      return
+    }
+    const { tabId } = active
+    // Fired with no preceding await: openPopup() needs a recent user gesture.
+    // A disabled action has no popup regardless of setPopup, so re-enable first.
+    chrome.action.enable(tabId).catch(() => {})
+    chrome.action.setPopup({ tabId, popup: POPUP_PAGE }).catch(() => {})
+    chrome.action
+      .openPopup()
+      .then(() => confirmPopupOpened())
+      .then((opened) => {
+        if (!opened) throw new Error("Couldn't open the popup")
+        chrome.runtime.sendMessage({ type: "SIDE_PANEL_CLOSE" }).catch(() => {})
+      })
+      .catch((err) => {
+        chrome.action.disable(tabId).catch(() => {})
+        showToast(err instanceof Error ? err.message : "Couldn't open the popup", "error")
+      })
   }
 
   function handleCopyAddress() {
@@ -341,9 +441,10 @@ export function Home({ onLock }: HomeProps) {
   }
 
   useEffect(() => {
+    if (!networkLoaded) return
     loadBalances()
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [wallet, network])
+  }, [wallet, network, networkLoaded])
 
   // Clear a stale "pending" swap row the reconciler could not account for. The
   // funds are already safe (re-shielded into the pool, or the input note was
@@ -699,6 +800,23 @@ export function Home({ onLock }: HomeProps) {
                 <path d="M7 11V7a5 5 0 0 1 10 0v4"></path>
               </svg>
             </button>
+            {!isFloatingWindow &&
+              (isSidePanel ? (
+                <button className="header-btn" onClick={handleOpenPopup} title="Open as popup">
+                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                    <path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"></path>
+                    <polyline points="15 3 21 3 21 9"></polyline>
+                    <line x1="10" y1="14" x2="21" y2="3"></line>
+                  </svg>
+                </button>
+              ) : (
+                <button className="header-btn" onClick={handleOpenSidePanel} title="Open in side panel">
+                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                    <rect x="3" y="3" width="18" height="18" rx="2" ry="2"></rect>
+                    <line x1="15" y1="3" x2="15" y2="21"></line>
+                  </svg>
+                </button>
+              ))}
           </div>
         </div>
 

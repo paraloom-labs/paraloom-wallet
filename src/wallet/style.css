@@ -142,6 +142,23 @@ h1, h2, h3, h4,
   overflow: hidden;
 }
 
+/* Fills the resizable side panel instead of the popup's fixed 380x600 size. */
+body.sidepanel-mode {
+  display: block;
+}
+
+body.sidepanel-mode .app {
+  width: 100%;
+  height: 100vh;
+  min-height: 0;
+}
+
+body.sidepanel-mode .wallet-layout,
+body.sidepanel-mode .unlock-layout,
+body.sidepanel-mode .loading {
+  height: 100%;
+}
+
 /* ─── Loading ─── */
 .loading {
   display: flex;

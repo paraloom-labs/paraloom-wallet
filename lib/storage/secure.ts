@@ -27,7 +27,7 @@ export interface WalletStorage {
   network?: "mainnet-beta" | "devnet"
 }
 
-const STORAGE_KEY = "paraloom_wallet"
+export const STORAGE_KEY = "paraloom_wallet"
 
 export async function saveEncryptedWallet(
   encryptedWallet: EncryptedWallet,

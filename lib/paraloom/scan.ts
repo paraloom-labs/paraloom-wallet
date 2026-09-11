@@ -34,12 +34,21 @@ const REJECT = Symbol("reject")
 /**
  * Resolve the mint to store as base58, or REJECT.
  *
- * A native note must carry no mint, and an SPL note must carry one that hashes
- * to the assetId the verified commitment binds. An SPL note delivered without a
- * mint is dropped rather than stored mintless: `shieldedBalance` filters on
- * `!n.mint`, so a token note with no mint would be counted as SOL, and a wrong
- * number the user acts on is worse than an invisible one. Dropping it is also
- * exactly what a node that has not shipped #23 yet produces today.
+ * An SPL note must carry a mint that hashes to the assetId the verified
+ * commitment binds. One delivered without a mint is dropped rather than stored
+ * mintless: `shieldedBalance` filters on `!n.mint`, so a token note with no
+ * mint would be counted as SOL, and a wrong number the user acts on is worse
+ * than an invisible one. Dropping it is also exactly what a node that has not
+ * shipped #23 yet produces today.
+ *
+ * A NATIVE note that arrives carrying a mint is stored as native and the field
+ * is ignored, rather than rejected as a contradiction. The verified commitment
+ * binds the all-zero asset, so it has already settled what the note is; the
+ * extra field decides nothing and binding it protects nothing. Rejecting cost
+ * the whole native balance for one node build that populated the field —
+ * silently, since every rejection here is a silent `continue` — against no
+ * gain. The mismatch is still worth surfacing, because it more likely means
+ * this wallet is misreading the feed than that the node is wrong.
  *
  * The wire carries hex; `ShieldedNote.mint` is base58, which is what the spend
  * path feeds to `new PublicKey` and what token metadata is keyed by. Storing
@@ -51,7 +60,10 @@ async function verifiedMint(
   isNative: boolean
 ): Promise<string | undefined | typeof REJECT> {
   if (isNative) {
-    return mintHex == null ? undefined : REJECT
+    if (mintHex != null) {
+      console.warn("[scan] ignoring a mint on a note whose commitment binds the native asset")
+    }
+    return undefined
   }
   if (mintHex == null) {
     return REJECT

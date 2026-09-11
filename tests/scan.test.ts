@@ -344,10 +344,32 @@ describe("received SPL notes (#23)", () => {
     expect(await shieldedBalance(ACCOUNT)).toBe(100n)
   })
 
-  it("drops a native note that arrives carrying a mint", async () => {
-    // The commitment binds the all-zero asset, so the mint contradicts it.
-    respondWith([{ ...honest(100n), mint: MINT }])
-    expect(await scan()).toBe(0)
+  it("stores a native note that arrives carrying a mint, ignoring the field", async () => {
+    // The verified commitment binds the all-zero asset, so it has already
+    // settled what this note is and the extra field decides nothing. Rejecting
+    // would cost every native note to one node build that populated it —
+    // silently, since each rejection here is a bare `continue`.
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {})
+    respondWith([{ ...honest(100n), mint: MINT_HEX }])
+
+    expect(await scan()).toBe(1)
+    expect(await shieldedBalance(ACCOUNT)).toBe(100n)
+    // Ignored, not stored: a stored mint would move it out of the native
+    // balance and into a token that was never received.
+    expect((await getNotes(ACCOUNT))[0].mint).toBeUndefined()
+    expect(await shieldedTokenBalances(ACCOUNT)).toEqual({})
+    expect(warn).toHaveBeenCalled()
+    warn.mockRestore()
+  })
+
+  it("does not warn about a native note with no mint", async () => {
+    // The ordinary case must stay quiet, or the warning is noise and stops
+    // being read.
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {})
+    respondWith([honest(100n)])
+    await scan()
+    expect(warn).not.toHaveBeenCalled()
+    warn.mockRestore()
   })
 
   it.each([

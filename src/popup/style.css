@@ -1480,7 +1480,7 @@ textarea.input {
   border-radius: var(--plm-radius-xl);
   width: 100%;
   max-width: 340px;
-  max-height: 90vh;
+  max-height: calc(100vh - 32px);
   overflow-y: auto;
   box-shadow: 0 16px 48px rgba(0, 0, 0, 0.6);
   animation: slideUp 0.25s var(--plm-ease-in-out);
@@ -1544,11 +1544,11 @@ textarea.input {
 
 /* ─── QR / Receive ─── */
 .receive-body {
-  padding: 20px;
+  padding: 16px 20px;
   display: flex;
   flex-direction: column;
   align-items: center;
-  gap: 16px;
+  gap: 12px;
 }
 
 .qr-code-wrapper {
@@ -1645,8 +1645,11 @@ textarea.input {
 .form-input[type="number"] { -moz-appearance: textfield; }
 
 .amount-input-wrapper { position: relative; display: flex; align-items: center; }
-.amount-input { flex: 1; padding-right: 120px; }
+.amount-input { flex: 1; min-width: 0; padding-right: 120px; }
 .input-suffix { position: absolute; right: 70px; font-size: 13px; font-weight: 600; color: var(--gold); pointer-events: none; }
+
+.amount-input-wrapper:not(:has(.max-button)) .amount-input { padding-right: 56px; }
+.amount-input-wrapper:not(:has(.max-button)) .input-suffix { right: 14px; }
 
 .max-button {
   position: absolute; right: 8px; top: 50%; transform: translateY(-50%);

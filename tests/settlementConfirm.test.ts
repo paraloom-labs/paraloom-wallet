@@ -89,4 +89,26 @@ describe("confirmCommitmentInTree", () => {
     expect(settled).toBe(true)
     expect(calls).toBe(2)
   })
+
+  it("does not report settled when unrelated leaves arrive but target commitment is absent (#839)", async () => {
+    let calls = 0
+    const clock = fakeClock(1000)
+    const UNRELATED_1 = "cc".repeat(32)
+    const UNRELATED_2 = "dd".repeat(32)
+    const settled = await confirmCommitmentInTree(
+      async () => {
+        calls += 1
+        // Tree is growing with unrelated transactions, but our target commitment never landed
+        return calls === 1
+          ? [{ commitmentHex: OTHER }]
+          : [{ commitmentHex: OTHER }, { commitmentHex: UNRELATED_1 }, { commitmentHex: UNRELATED_2 }]
+      },
+      TARGET,
+      3000,
+      1000,
+      clock
+    )
+    expect(settled).toBe(false)
+    expect(calls).toBe(4)
+  })
 })

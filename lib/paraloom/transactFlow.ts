@@ -43,10 +43,9 @@ const SETTLE_CONFIRM_POLL_MS = 6_000
 // in the on-chain tree. Settlement is atomic — the transact instruction records
 // the input nullifiers and appends both output commitments together — so the
 // output commitment appearing is proof the nullifiers were consumed and the
-// inputs are truly spent. Used as the settlement signal for a shielded transfer,
-// which has no external recipient balance to watch (a withdraw's caller passes a
-// cheaper `confirmSettled` that polls the funded address instead). The polling
-// logic lives in settlementConfirm.ts so it can be unit-tested without the prover.
+// inputs are truly spent. Used as the universal settlement signal for spends (transfers
+// and withdraws) to ensure notes are only marked spent upon on-chain commitment (#792, #839).
+// The polling logic lives in settlementConfirm.ts so it can be unit-tested without the prover.
 function confirmSettledByTree(
   connection: Connection,
   commitmentHex: string,
@@ -345,7 +344,8 @@ export async function spendV3(
   // funds as spent and showed a change note whose commitment never landed
   // on-chain — corrupting the balance in both directions with no self-healing
   // path (paraloom-core#792). The signal is the first output commitment landing
-  // in the tree; a withdraw caller supplies a cheaper recipient-funded check.
+  // in the tree (#792, #839); custom confirmSettled can be passed if needed
+  // (e.g. for ephemeral single-use accounts).
   const settleCommitmentHex = await noteCommitment(
     outputs[0].amount,
     outputs[0].pubkeyHex,

@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react"
 import { createRoot } from "react-dom/client"
+import { startActivityHeartbeat } from "~lib/popup/activityHeartbeat"
 import { getStoredWallet, isWalletLocked, setLockState } from "~lib/storage/secure"
 import { loadSession } from "~lib/storage/session"
 import { useWalletStore } from "~lib/store/walletStore"
@@ -42,6 +43,16 @@ function Popup() {
       void checkWalletState().catch(() => setLoading(false))
     })
   }, [])
+
+  // While unlocked, real interaction with the popup defers the idle auto-lock
+  // (paraloom-core#724, B1). Unlock alone used to be the only ACTIVITY signal.
+  useEffect(() => {
+    if (!hasWallet || locked) return
+    return startActivityHeartbeat({
+      target: window,
+      report: () => void sendMessage({ type: "ACTIVITY" })
+    })
+  }, [hasWallet, locked])
 
   async function initWallet() {
     const wallet = await getStoredWallet()

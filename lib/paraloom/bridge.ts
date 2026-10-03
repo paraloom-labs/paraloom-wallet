@@ -22,6 +22,7 @@ import {
   MERKLE_TREE_SEED,
   PROGRAM_ID,
   RPC_URLS,
+  TOKEN_2022_PROGRAM_ID,
   TOKEN_PROGRAM_ID
 } from "./constants"
 
@@ -139,6 +140,24 @@ function assetConfigPda(mint: PublicKey): PublicKey {
     [Buffer.from(ASSET_CONFIG_SEED), mint.toBytes()],
     programId
   )[0]
+}
+
+// Detect whether a mint is owned by Token-2022 or classic SPL Token.
+// Falls back to classic SPL Token on missing account, RPC error, or other owners.
+export async function resolveTokenProgram(
+  connection: Connection,
+  mint: PublicKey | string
+): Promise<PublicKey> {
+  const mintPk = typeof mint === "string" ? new PublicKey(mint) : mint
+  try {
+    const acc = await connection.getAccountInfo(mintPk, "confirmed")
+    if (acc && acc.owner.toBase58() === TOKEN_2022_PROGRAM_ID) {
+      return new PublicKey(TOKEN_2022_PROGRAM_ID)
+    }
+  } catch {
+    // fallback to classic
+  }
+  return new PublicKey(TOKEN_PROGRAM_ID)
 }
 
 // The associated token account of `owner` for `mint`, derived without

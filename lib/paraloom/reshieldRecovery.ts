@@ -9,8 +9,10 @@ import { Connection, Keypair, PublicKey } from "@solana/web3.js"
 import {
   associatedTokenAddress,
   depositSpl,
-  recoverReshieldedNote
+  recoverReshieldedNote,
+  resolveTokenProgram
 } from "~lib/paraloom/bridge"
+import { TOKEN_2022_PROGRAM_ID, TOKEN_PROGRAM_ID } from "~lib/paraloom/constants"
 import { addNote } from "~lib/paraloom/notes"
 import type { ReshieldedNote } from "~lib/paraloom/privateSwap"
 import { listSwapOutputs, saveSwapOutput } from "~lib/paraloom/swapOutputs"
@@ -77,9 +79,26 @@ export async function recoverReshields(
       const fresh = Keypair.fromSecretKey(
         Uint8Array.from(Buffer.from(o.freshSecretKeyHex, "hex"))
       )
-      const ata = associatedTokenAddress(fresh.publicKey, mint)
-      const bal = await connection.getTokenAccountBalance(ata).catch(() => null)
-      const tokenAmount = bal ? BigInt(bal.value.amount) : 0n
+      let tokenProgram = await resolveTokenProgram(connection, mint)
+      let ata = associatedTokenAddress(fresh.publicKey, mint, tokenProgram)
+      let bal = await connection.getTokenAccountBalance(ata).catch(() => null)
+      let tokenAmount = bal ? BigInt(bal.value.amount) : 0n
+
+      // If no balance in primary ATA, inspect alternate token program ATA
+      if (tokenAmount === 0n) {
+        const altProgram =
+          tokenProgram.toBase58() === TOKEN_2022_PROGRAM_ID
+            ? new PublicKey(TOKEN_PROGRAM_ID)
+            : new PublicKey(TOKEN_2022_PROGRAM_ID)
+        const altAta = associatedTokenAddress(fresh.publicKey, mint, altProgram)
+        const altBal = await connection.getTokenAccountBalance(altAta).catch(() => null)
+        if (altBal && BigInt(altBal.value.amount) > 0n) {
+          tokenProgram = altProgram
+          ata = altAta
+          tokenAmount = BigInt(altBal.value.amount)
+        }
+      }
+
       if (tokenAmount > 0n) {
         const assetId = await assetIdForMint(mintHex)
         await depositSpl(
@@ -89,7 +108,7 @@ export async function recoverReshields(
           mint,
           tokenAmount,
           assetId,
-          undefined,
+          tokenProgram,
           (note) =>
             persistReshieldedNote(shieldedAddress, {
               assetId,

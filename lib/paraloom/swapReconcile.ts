@@ -48,8 +48,31 @@ export async function reconcileSwapOutputs(
     const outputs = await listSwapOutputs()
     const now = Date.now()
     for (const o of outputs) {
-      if (o.swapSignature) continue
+      if (o.swapSignature) {
+        // If swapSignature is set, check if it's actually confirmed or legacy unconfirmed row
+        continue
+      }
       if (now - o.createdAt < RESUME_GRACE_MS) continue
+
+      // If there is a submittedSignature, check if it actually confirmed on-chain
+      if (o.submittedSignature) {
+        try {
+          const st = await connection.getSignatureStatus(o.submittedSignature, {
+            searchTransactionHistory: true
+          })
+          const v = st?.value
+          if (v && !v.err && (v.confirmationStatus === "confirmed" || v.confirmationStatus === "finalized")) {
+            await saveSwapOutput({
+              ...o,
+              swapSignature: o.submittedSignature
+            })
+            resolved++
+            continue
+          }
+        } catch {
+          // RPC check failed, proceed to balance-based reconciliation
+        }
+      }
 
       const freshPub = new PublicKey(o.freshAddress)
       let solLamports = 0n

@@ -380,17 +380,16 @@ export async function privateSwap(
     maxRetries: 5
   })
 
-  // Persist the fresh key + output NOW, the instant the swap is submitted and
-  // BEFORE waiting for confirmation. The bought token lives at this fresh
-  // address and is only spendable with this key, so it must never be lost to a
-  // later throw (a confirm timeout used to strand it). Saving here also makes it
-  // show up under "Private buys" immediately.
+  // Persist the fresh key + submitted signature NOW, the instant the swap is submitted.
+  // We keep swapSignature empty until confirmation succeeds so that if the tx drops,
+  // the row is not falsely treated as completed and normal recovery remains enabled (paraloom-core#856).
   await saveSwapOutput({
     freshAddress: fresh.publicKey.toBase58(),
     freshSecretKeyHex: Buffer.from(fresh.secretKey).toString("hex"),
     outputMint: params.outputMint,
     outAmount: out_amount,
-    swapSignature,
+    swapSignature: "",
+    submittedSignature: swapSignature,
     createdAt: Date.now()
   })
 
@@ -399,6 +398,17 @@ export async function privateSwap(
   // when the swap actually lands. We wait up to ~90s and only fail on a real
   // on-chain error (or if it truly never confirms).
   await waitForSwapConfirmation(connection, swapSignature)
+
+  // Once confirmed, mark the swap confirmed by durably recording swapSignature
+  await saveSwapOutput({
+    freshAddress: fresh.publicKey.toBase58(),
+    freshSecretKeyHex: Buffer.from(fresh.secretKey).toString("hex"),
+    outputMint: params.outputMint,
+    outAmount: out_amount,
+    swapSignature,
+    submittedSignature: swapSignature,
+    createdAt: Date.now()
+  })
 
   // 7. Optional round trip: re-shield the swapped token back into the pool. The
   //    token is already safely at the fresh address (persisted above), so this
@@ -596,10 +606,21 @@ export async function privateSwapFromToken(
     freshSecretKeyHex: Buffer.from(fresh.secretKey).toString("hex"),
     outputMint: params.outputMint,
     outAmount: out_amount,
-    swapSignature,
+    swapSignature: "",
+    submittedSignature: swapSignature,
     createdAt: Date.now()
   })
   await waitForSwapConfirmation(connection, swapSignature)
+
+  await saveSwapOutput({
+    freshAddress: fresh.publicKey.toBase58(),
+    freshSecretKeyHex: Buffer.from(fresh.secretKey).toString("hex"),
+    outputMint: params.outputMint,
+    outAmount: out_amount,
+    swapSignature,
+    submittedSignature: swapSignature,
+    createdAt: Date.now()
+  })
 
   // 5. Round trip: sweep the swapped output back into the shielded pool. For a
   //    "SOL" output this is a native deposit_note (depositV3 persists the note

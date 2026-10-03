@@ -75,6 +75,7 @@ export interface ReshieldedNote {
   amount: string
   blindingHex: string
   depositSignature: string
+  pending?: boolean
 }
 
 export interface PrivateSwapResult {
@@ -244,7 +245,7 @@ async function reshieldToken(
       tokenAmount,
       assetId,
       undefined,
-      // onSubmitted: note is now known + on-chain; persist immediately.
+      // onSubmitted: note is now known + on-chain; persist immediately as pending.
       async (r) => {
         if (persistNote) {
           await persistNote({
@@ -252,7 +253,8 @@ async function reshieldToken(
             mint: mintBase58,
             amount: tokenAmount.toString(),
             blindingHex: Buffer.from(r.blinding).toString("hex"),
-            depositSignature: r.signature
+            depositSignature: r.signature,
+            pending: true
           })
         }
       }
@@ -262,7 +264,8 @@ async function reshieldToken(
       mint: mintBase58,
       amount: tokenAmount.toString(),
       blindingHex: Buffer.from(dep.blinding).toString("hex"),
-      depositSignature: dep.signature
+      depositSignature: dep.signature,
+      pending: false
     }
   } catch {
     return undefined

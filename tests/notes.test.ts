@@ -200,3 +200,24 @@ describe("note storage", () => {
     expect(await shieldedBalance(ACCOUNT)).toBe(1000n)
   })
 })
+
+describe("transfer note asset isolation (paraloom-core#852)", () => {
+  it("filters notes for native SOL transfers", async () => {
+    const NATIVE_ASSET_HEX = "00".repeat(32)
+    const USDC_ASSET_HEX = "aa".repeat(32)
+    const USDC_MINT = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"
+
+    const nativeNote = deposit({ amount: "100000000", assetId: NATIVE_ASSET_HEX, signature: "s1" })
+    const splNote = deposit({ amount: "500000000", assetId: USDC_ASSET_HEX, mint: USDC_MINT, signature: "s2" })
+
+    await addNote(ACCOUNT, nativeNote)
+    await addNote(ACCOUNT, splNote)
+
+    const notes = await getNotes(ACCOUNT)
+    const nativeUnspent = notes.filter((n) => !n.spent && (!n.assetId || n.assetId === NATIVE_ASSET_HEX))
+
+    expect(nativeUnspent).toHaveLength(1)
+    expect(nativeUnspent[0].signature).toBe("s1")
+    expect(nativeUnspent[0].assetId).toBe(NATIVE_ASSET_HEX)
+  })
+})

@@ -84,7 +84,8 @@ export async function sendDepositNote(
   // the on-chain instruction, so persisting the note now means a worker eviction
   // or crash during confirmation can never orphan a landed deposit with its
   // secret gone (paraloom-core#791). Mirrors depositSpl's on-submit persist.
-  onSubmitted?: (signature: string) => Promise<void>
+  onSubmitted?: (signature: string) => Promise<void>,
+  confirmTimeoutMs = 90_000
 ): Promise<string> {
   const tx = new Transaction().add(
     depositNoteInstruction(payer.publicKey, amountLamports, pubkey, blinding)
@@ -108,7 +109,10 @@ export async function sendDepositNote(
       // swallow — confirmation proceeds regardless
     }
   }
-  await confirmBySignatureStatus(connection, signature)
+  const confirmed = await confirmBySignatureStatus(connection, signature, confirmTimeoutMs)
+  if (!confirmed) {
+    throw new Error(`deposit transaction ${signature} was not confirmed within the timeout`)
+  }
   return signature
 }
 

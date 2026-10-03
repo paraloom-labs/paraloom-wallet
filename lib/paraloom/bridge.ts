@@ -216,7 +216,8 @@ export async function depositSpl(
   // and in the on-chain tx, so persisting the note now means a confirmation
   // timeout or a worker eviction can never lose a shielded balance that already
   // landed on-chain (#reshield-note-loss).
-  onSubmitted?: (result: DepositResult) => Promise<void>
+  onSubmitted?: (result: DepositResult) => Promise<void>,
+  confirmTimeoutMs = 90_000
 ): Promise<DepositResult> {
   const recipient = hexToBytes(addressSpendPubHex(shieldedAddress))
   const blinding = new Uint8Array(32)
@@ -253,7 +254,10 @@ export async function depositSpl(
   }
   // Tolerant confirm (not the hard blockhash deadline): a busy mainnet must not
   // throw "block height exceeded" on a deposit that actually lands.
-  await confirmBySignatureStatus(connection, signature)
+  const confirmed = await confirmBySignatureStatus(connection, signature, confirmTimeoutMs)
+  if (!confirmed) {
+    throw new Error(`deposit transaction ${signature} was not confirmed within the timeout`)
+  }
 
   return result
 }
@@ -315,7 +319,9 @@ export async function confirmBySignatureStatus(
         throw e
       }
     }
-    await new Promise((r) => setTimeout(r, 2000))
+    const remaining = deadline - Date.now()
+    if (remaining <= 0) break
+    await new Promise((r) => setTimeout(r, Math.min(2000, remaining)))
   }
   return false
 }

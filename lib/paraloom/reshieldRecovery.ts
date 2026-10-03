@@ -32,7 +32,8 @@ export async function persistReshieldedNote(
     signature: note.depositSignature,
     createdAt: Date.now(),
     spent: false,
-    source: "deposit"
+    source: "deposit",
+    pending: note.pending ?? false
   })
 }
 
@@ -44,7 +45,8 @@ export async function persistReshieldedNote(
 // skips settled ones) so it is safe to run on every popup open / connect.
 export async function recoverReshields(
   connection: Connection,
-  shieldedAddress: string
+  shieldedAddress: string,
+  confirmTimeoutMs = 90_000
 ): Promise<number> {
   let recovered = 0
   const outputs = await listSwapOutputs()
@@ -64,7 +66,8 @@ export async function recoverReshields(
           mint: o.outputMint,
           amount: rec.amount,
           blindingHex: rec.blindingHex,
-          depositSignature: rec.signature
+          depositSignature: rec.signature,
+          pending: false
         })
         await saveSwapOutput({ ...o, reshieldRecovered: true })
         recovered++
@@ -82,7 +85,7 @@ export async function recoverReshields(
       const tokenAmount = bal ? BigInt(bal.value.amount) : 0n
       if (tokenAmount > 0n) {
         const assetId = await assetIdForMint(mintHex)
-        await depositSpl(
+        const dep = await depositSpl(
           connection,
           fresh,
           shieldedAddress,
@@ -96,9 +99,19 @@ export async function recoverReshields(
               mint: o.outputMint,
               amount: tokenAmount.toString(),
               blindingHex: Buffer.from(note.blinding).toString("hex"),
-              depositSignature: note.signature
-            })
+              depositSignature: note.signature,
+              pending: true
+            }),
+          confirmTimeoutMs
         )
+        await persistReshieldedNote(shieldedAddress, {
+          assetId,
+          mint: o.outputMint,
+          amount: tokenAmount.toString(),
+          blindingHex: Buffer.from(dep.blinding).toString("hex"),
+          depositSignature: dep.signature,
+          pending: false
+        })
         await saveSwapOutput({ ...o, reshieldRecovered: true })
         recovered++
         console.log(`[paraloom] finished pending reshield at ${o.freshAddress}`)

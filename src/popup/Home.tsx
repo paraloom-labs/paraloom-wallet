@@ -896,7 +896,7 @@ export function Home({ onLock }: HomeProps) {
               // filler notes a transact emits carry an empty signature, so
               // rendering them all under key="" collided React keys.
               const deposits = notes.filter(
-                (n) => n.source === "deposit" && Number(n.amount) > 0
+                (n) => n.source === "deposit" && !n.pending && Number(n.amount) > 0
               )
               const USDC_MINT = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"
               // Wrapped-SOL mint: the swaps app sends this as the outputMint for a
@@ -1821,18 +1821,18 @@ export function Home({ onLock }: HomeProps) {
                 <div className="balance-info">
                   Spends your 2 largest notes; the remainder returns as change. Shielded total:{" "}
                   {(Number(shieldedLamports) / 1e9).toFixed(4)} SOL across{" "}
-                  {notes.filter((n) => !n.spent).length} note(s)
+                  {notes.filter((n) => !n.spent && !n.pending).length} note(s)
                 </div>
               </div>
 
               <button
                 className="button send-button"
-                disabled={transferring || !transferAddress.trim() || !transferAmount.trim() || notes.filter((n) => !n.spent).length < 2}
+                disabled={transferring || !transferAddress.trim() || !transferAmount.trim() || notes.filter((n) => !n.spent && !n.pending).length < 2}
                 onClick={handleTransfer}
               >
                 {transferring ? "Proving & sending…" : "Send shielded transfer"}
               </button>
-              {notes.filter((n) => !n.spent).length < 2 && (
+              {notes.filter((n) => !n.spent && !n.pending).length < 2 && (
                 <div className="balance-info">Needs at least 2 unspent notes (deposit again to split).</div>
               )}
             </div>

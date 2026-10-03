@@ -102,7 +102,8 @@ export async function depositV3(
         createdAt: Date.now(),
         spent: false,
         source: "deposit",
-        commitment
+        commitment,
+        pending: true
       })
     }
   )

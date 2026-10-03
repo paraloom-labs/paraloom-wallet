@@ -27,6 +27,10 @@ export interface ShieldedNote {
   // recorded at deposit (from DepositNoteEvent) or located by commitment for
   // received notes. Spending needs it for the membership path.
   leafIndex?: number
+  // Pending deposit note whose submission is recorded (to preserve blinding
+  // randomness against crashes/evictions, paraloom-core#791) but whose on-chain
+  // confirmation has not yet succeeded (paraloom-core#853). Excluded from spendable balance.
+  pending?: boolean
 }
 
 const NOTES_KEY = "paraloom_notes"
@@ -54,7 +58,13 @@ export async function addNote(account: string, note: ShieldedNote): Promise<void
   // persisted more than once — the early on-submit persist AND the end-of-flow
   // persist AND the recovery scan all target the same deposit — so dedupe here
   // rather than double-counting the balance.
-  if (note.signature && existing.some((n) => n.signature === note.signature)) {
+  const idx = note.signature ? existing.findIndex((n) => n.signature === note.signature) : -1
+  if (idx >= 0) {
+    // If the existing record was pending and the new write is confirmed, update it.
+    if (existing[idx].pending && !note.pending) {
+      all[account][idx] = { ...existing[idx], ...note, pending: false }
+      await writeAll(all)
+    }
     return
   }
   all[account] = [...existing, note]
@@ -86,6 +96,7 @@ export async function addDiscoveredNote(account: string, note: ShieldedNote): Pr
 // persisted at submit time (before the index can be resolved) so its blinding is
 // never orphaned (#791); this finalizes it by commitment. A no-op if the note is
 // gone. Only writes when the index actually changes, to avoid a redundant store.
+// Also marks the note confirmed (pending: false, paraloom-core#853).
 export async function setNoteLeafIndex(
   account: string,
   commitment: string,
@@ -95,13 +106,36 @@ export async function setNoteLeafIndex(
   const notes = all[account] ?? []
   let changed = false
   all[account] = notes.map((n) => {
-    if (n.commitment === commitment && n.leafIndex !== leafIndex) {
+    if (n.commitment === commitment && (n.leafIndex !== leafIndex || n.pending)) {
       changed = true
-      return { ...n, leafIndex }
+      return { ...n, leafIndex, pending: false }
     }
     return n
   })
   if (changed) await writeAll(all)
+}
+
+// Mark an early-persisted deposit note confirmed once on-chain confirmation succeeds (#853).
+export async function markNoteConfirmed(account: string, signature: string): Promise<void> {
+  const all = await readAll()
+  const notes = all[account] ?? []
+  let changed = false
+  all[account] = notes.map((n) => {
+    if (n.signature === signature && n.pending) {
+      changed = true
+      return { ...n, pending: false }
+    }
+    return n
+  })
+  if (changed) await writeAll(all)
+}
+
+// Remove or retire an unconfirmed pending note that was superseded by a retry (#853).
+export async function removePendingNote(account: string, signature: string): Promise<void> {
+  const all = await readAll()
+  const notes = all[account] ?? []
+  all[account] = notes.filter((n) => !(n.signature === signature && n.pending))
+  await writeAll(all)
 }
 
 // Mark a note spent by its commitment (used for transfer inputs/outputs, which
@@ -133,23 +167,25 @@ export async function markNoteSpentByIdentity(account: string, note: ShieldedNot
 // Native SOL shielded balance, in lamports. SPL notes (#779) are EXCLUDED:
 // their `amount` is in the token's own base units (e.g. 6-decimal USDC), so
 // summing them as lamports would corrupt the SOL figure. A note is native iff
-// it carries no `mint`. Use shieldedTokenBalances() for the SPL side.
+// it carries no `mint`. Unconfirmed pending notes (#853) are EXCLUDED.
+// Use shieldedTokenBalances() for the SPL side.
 export async function shieldedBalance(account: string): Promise<bigint> {
   const notes = await getNotes(account)
   return notes
-    .filter((n) => !n.spent && !n.mint)
+    .filter((n) => !n.spent && !n.mint && !n.pending)
     .reduce((sum, n) => sum + BigInt(n.amount), 0n)
 }
 
 // Unspent shielded SPL balances keyed by base58 mint (#779). Each amount is in
 // that mint's own base units, kept separate from the native lamports sum.
+// Unconfirmed pending notes (#853) are EXCLUDED.
 export async function shieldedTokenBalances(
   account: string
 ): Promise<Record<string, bigint>> {
   const notes = await getNotes(account)
   const byMint: Record<string, bigint> = {}
   for (const n of notes) {
-    if (n.spent || !n.mint) continue
+    if (n.spent || !n.mint || n.pending) continue
     byMint[n.mint] = (byMint[n.mint] ?? 0n) + BigInt(n.amount)
   }
   return byMint

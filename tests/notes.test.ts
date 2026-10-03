@@ -2,7 +2,10 @@ import {
   addDiscoveredNote,
   addNote,
   getNotes,
+  markNoteConfirmed,
   markNoteSpentByIdentity,
+  removePendingNote,
+  setNoteLeafIndex,
   shieldedBalance,
   shieldedTokenBalances,
   type ShieldedNote
@@ -198,5 +201,72 @@ describe("note storage", () => {
     await addNote(ACCOUNT, deposit({ signature: "s1" }))
     await addNote(ACCOUNT, deposit({ signature: "s2", spent: true }))
     expect(await shieldedBalance(ACCOUNT)).toBe(1000n)
+  })
+})
+
+describe("pending deposit notes (#853)", () => {
+  const USDC = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"
+
+  it("excludes pending native notes from shieldedBalance", async () => {
+    await addNote(ACCOUNT, deposit({ signature: "s-pending", amount: "5000", pending: true }))
+    expect(await shieldedBalance(ACCOUNT)).toBe(0n)
+
+    const [note] = await getNotes(ACCOUNT)
+    expect(note.pending).toBe(true)
+    expect(note.amount).toBe("5000")
+  })
+
+  it("excludes pending SPL notes from shieldedTokenBalances", async () => {
+    await addNote(
+      ACCOUNT,
+      deposit({ signature: "s-spl-pending", mint: USDC, amount: "1000000", pending: true })
+    )
+    expect(await shieldedTokenBalances(ACCOUNT)).toEqual({})
+  })
+
+  it("promotes pending note to confirmed via markNoteConfirmed", async () => {
+    await addNote(
+      ACCOUNT,
+      deposit({ signature: "s-spl", mint: USDC, amount: "1000000", pending: true })
+    )
+    expect(await shieldedTokenBalances(ACCOUNT)).toEqual({})
+
+    await markNoteConfirmed(ACCOUNT, "s-spl")
+    expect(await shieldedTokenBalances(ACCOUNT)).toEqual({ [USDC]: 1000000n })
+  })
+
+  it("promotes pending note to confirmed via setNoteLeafIndex", async () => {
+    const commitment = "cc".repeat(32)
+    await addNote(
+      ACCOUNT,
+      deposit({ signature: "s-native", amount: "5000", commitment, pending: true })
+    )
+    expect(await shieldedBalance(ACCOUNT)).toBe(0n)
+
+    await setNoteLeafIndex(ACCOUNT, commitment, 42)
+    expect(await shieldedBalance(ACCOUNT)).toBe(5000n)
+    const [note] = await getNotes(ACCOUNT)
+    expect(note.pending).toBe(false)
+    expect(note.leafIndex).toBe(42)
+  })
+
+  it("updates existing pending note when confirmed note with same signature is added", async () => {
+    await addNote(ACCOUNT, deposit({ signature: "s-dup", amount: "3000", pending: true }))
+    expect(await shieldedBalance(ACCOUNT)).toBe(0n)
+
+    // Re-adding with pending: false updates the existing entry rather than adding a duplicate
+    await addNote(ACCOUNT, deposit({ signature: "s-dup", amount: "3000", pending: false }))
+    const notes = await getNotes(ACCOUNT)
+    expect(notes).toHaveLength(1)
+    expect(notes[0].pending).toBe(false)
+    expect(await shieldedBalance(ACCOUNT)).toBe(3000n)
+  })
+
+  it("removes unconfirmed pending note via removePendingNote", async () => {
+    await addNote(ACCOUNT, deposit({ signature: "s-drop", amount: "2000", pending: true }))
+    expect(await getNotes(ACCOUNT)).toHaveLength(1)
+
+    await removePendingNote(ACCOUNT, "s-drop")
+    expect(await getNotes(ACCOUNT)).toHaveLength(0)
   })
 })

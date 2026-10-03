@@ -142,6 +142,17 @@ describe("shielded token notes (#779)", () => {
     expect(await shieldedTokenBalances(ACCOUNT)).toEqual({})
   })
 
+  it("excludes unconfirmed deposits and upgrades them when the same signature confirms", async () => {
+    const pending = deposit({ signature: "pending-signature", mint: USDC, confirmed: false })
+    await addNote(ACCOUNT, pending)
+    expect(await shieldedTokenBalances(ACCOUNT)).toEqual({})
+
+    await addNote(ACCOUNT, { ...pending, confirmed: true })
+
+    expect(await shieldedTokenBalances(ACCOUNT)).toEqual({ [USDC]: 1000n })
+    expect(await getNotes(ACCOUNT)).toHaveLength(1)
+  })
+
   it("spends an SPL note without touching a native one of the same amount", async () => {
     const spl = received("c0".repeat(32), { mint: USDC })
     await addDiscoveredNote(ACCOUNT, spl)

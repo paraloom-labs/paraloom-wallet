@@ -59,7 +59,7 @@ async function retryingFetch(
 export function getConnection(network: Network): Connection {
   return new Connection(RPC_URLS[network], {
     commitment: "confirmed",
-    fetch: retryingFetch
+    fetch: retryingFetch as typeof globalThis.fetch
   })
 }
 
@@ -216,7 +216,8 @@ export async function depositSpl(
   // and in the on-chain tx, so persisting the note now means a confirmation
   // timeout or a worker eviction can never lose a shielded balance that already
   // landed on-chain (#reshield-note-loss).
-  onSubmitted?: (result: DepositResult) => Promise<void>
+  onSubmitted?: (result: DepositResult) => Promise<void>,
+  onConfirmed?: (result: DepositResult) => Promise<void>
 ): Promise<DepositResult> {
   const recipient = hexToBytes(addressSpendPubHex(shieldedAddress))
   const blinding = new Uint8Array(32)
@@ -253,7 +254,17 @@ export async function depositSpl(
   }
   // Tolerant confirm (not the hard blockhash deadline): a busy mainnet must not
   // throw "block height exceeded" on a deposit that actually lands.
-  await confirmBySignatureStatus(connection, signature)
+  const confirmed = await confirmBySignatureStatus(connection, signature)
+  if (!confirmed) {
+    throw new Error(`transaction confirmation timed out: ${signature}`)
+  }
+  if (onConfirmed) {
+    try {
+      await onConfirmed(result)
+    } catch {
+      // A later recovery scan can restore the confirmed local note.
+    }
+  }
 
   return result
 }

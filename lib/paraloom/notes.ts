@@ -18,6 +18,8 @@ export interface ShieldedNote {
   signature: string // deposit transaction (empty for discovered transfer notes)
   createdAt: number
   spent: boolean
+  // Older notes omit this field and are treated as confirmed.
+  confirmed?: boolean
   // Set for notes discovered by scanning transfer ciphertexts (#196). The
   // commitment is the stable identity for received notes (which have no
   // deposit signature) and the de-dup key when re-scanning.
@@ -54,8 +56,17 @@ export async function addNote(account: string, note: ShieldedNote): Promise<void
   // persisted more than once — the early on-submit persist AND the end-of-flow
   // persist AND the recovery scan all target the same deposit — so dedupe here
   // rather than double-counting the balance.
-  if (note.signature && existing.some((n) => n.signature === note.signature)) {
-    return
+  if (note.signature) {
+    const index = existing.findIndex((n) => n.signature === note.signature)
+    if (index >= 0) {
+      const current = existing[index]
+      if (current.confirmed === false && note.confirmed !== false) {
+        existing[index] = { ...current, ...note, spent: current.spent }
+        all[account] = existing
+        await writeAll(all)
+      }
+      return
+    }
   }
   all[account] = [...existing, note]
   await writeAll(all)
@@ -137,7 +148,7 @@ export async function markNoteSpentByIdentity(account: string, note: ShieldedNot
 export async function shieldedBalance(account: string): Promise<bigint> {
   const notes = await getNotes(account)
   return notes
-    .filter((n) => !n.spent && !n.mint)
+    .filter((n) => !n.spent && n.confirmed !== false && !n.mint)
     .reduce((sum, n) => sum + BigInt(n.amount), 0n)
 }
 
@@ -149,7 +160,7 @@ export async function shieldedTokenBalances(
   const notes = await getNotes(account)
   const byMint: Record<string, bigint> = {}
   for (const n of notes) {
-    if (n.spent || !n.mint) continue
+    if (n.spent || n.confirmed === false || !n.mint) continue
     byMint[n.mint] = (byMint[n.mint] ?? 0n) + BigInt(n.amount)
   }
   return byMint

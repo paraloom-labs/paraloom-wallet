@@ -12,9 +12,12 @@ export interface SwapOutput {
   outputMint: string
   /** Output amount the route reported, in the out mint's base units. */
   outAmount: number
-  /** The swap transaction signature. Empty until the swap leg completes; a
-   *  non-empty value marks the swap done (used to find resumable strands). */
+  /** The swap transaction signature. Recorded only once the swap transaction
+   *  is confirmed on-chain (paraloom-core#856). */
   swapSignature: string
+  /** Transaction signature returned upon broadcast (pre-confirmation). Preserved
+   *  so the fresh key and submitted state are durable if the worker drops (paraloom-core#856). */
+  submittedSignature?: string
   /** Whether the user asked to re-shield the bought token (a round trip). Saved
    *  so a resumed/recovered swap honors the original intent. */
   reshield?: boolean

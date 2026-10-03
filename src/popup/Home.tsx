@@ -345,14 +345,14 @@ export function Home({ onLock }: HomeProps) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [wallet, network])
 
-  // Clear a stale "pending" swap row the reconciler could not account for. The
-  // funds are already safe (re-shielded into the pool, or the input note was
-  // never spent), so this only removes the misleading Activity entry.
+  // Hide a stale pending row from Activity while retaining its recovery key.
   async function dismissActivity() {
     if (!activityDetail || activityDetail.kind !== "buy") return
     const addr = activityDetail.address
     await dismissSwapOutput(addr)
-    setSwapOutputs((prev) => prev.filter((o) => o.freshAddress !== addr))
+    setSwapOutputs((prev) =>
+      prev.map((o) => (o.freshAddress === addr ? { ...o, dismissed: true } : o))
+    )
     setActivityDetail(null)
   }
 
@@ -892,6 +892,7 @@ export function Home({ onLock }: HomeProps) {
         ) : bottomTab === "activity" ? (
           <div className="activity-content">
             {(() => {
+              const visibleSwapOutputs = swapOutputs.filter((s) => !s.dismissed)
               // Only real deposits belong in the feed. The zero-value change/
               // filler notes a transact emits carry an empty signature, so
               // rendering them all under key="" collided React keys.
@@ -903,7 +904,7 @@ export function Home({ onLock }: HomeProps) {
               // SOL output, so a token->SOL buy must be shown (and scaled) as SOL.
               const WSOL_MINT = "So11111111111111111111111111111111111111112"
 
-              if (deposits.length === 0 && swapOutputs.length === 0) {
+              if (deposits.length === 0 && visibleSwapOutputs.length === 0) {
                 return (
                   <div className="empty-state">
                     <svg width="64" height="64" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" opacity="0.2">
@@ -925,7 +926,7 @@ export function Home({ onLock }: HomeProps) {
                 | { kind: "buy"; ts: number; s: SwapOutput }
                 | { kind: "deposit"; ts: number; n: ShieldedNote }
               const entries: Entry[] = [
-                ...swapOutputs.map((s) => ({ kind: "buy" as const, ts: s.createdAt, s })),
+                ...visibleSwapOutputs.map((s) => ({ kind: "buy" as const, ts: s.createdAt, s })),
                 ...deposits.map((n) => ({ kind: "deposit" as const, ts: n.createdAt, n }))
               ].sort((a, b) => b.ts - a.ts)
 
@@ -1179,8 +1180,8 @@ export function Home({ onLock }: HomeProps) {
 
                   {activityDetail.kind === "buy" && activityDetail.pending && (
                     <p className="detail-note">
-                      Still pending after a while? Your funds are safe in your shielded
-                      balance. Dismissing only clears this row.
+                      Still pending? Dismissing hides this row, while the wallet keeps its
+                      recovery key and will continue retrying later.
                     </p>
                   )}
 

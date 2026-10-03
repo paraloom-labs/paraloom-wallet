@@ -12,9 +12,19 @@ export interface SwapOutput {
   outputMint: string
   /** Output amount the route reported, in the out mint's base units. */
   outAmount: number
-  /** The swap transaction signature. Empty until the swap leg completes; a
-   *  non-empty value marks the swap done (used to find resumable strands). */
+  /** Confirmed swap transaction signature. */
   swapSignature: string
+  /** A submitted transaction is not complete until confirmed. */
+  submittedSignature?: string
+  /** Recent blockhash used by the submitted transaction, for safe retry gating. */
+  submittedBlockhash?: string
+  /** Router quote retained while the submitted signature is pending. */
+  submittedOutAmount?: number
+  /** Input asset used to recover an unconfirmed submission. */
+  inputMint?: string
+  inputAmount?: string
+  /** Set only after confirmation is observed locally or by reconciliation. */
+  confirmedAt?: number
   /** Whether the user asked to re-shield the bought token (a round trip). Saved
    *  so a resumed/recovered swap honors the original intent. */
   reshield?: boolean
@@ -22,6 +32,10 @@ export interface SwapOutput {
    *  recovery scan), so recovery does not re-scan a settled reshield each connect. */
   reshieldRecovered?: boolean
   createdAt: number
+}
+
+export function isSwapOutputConfirmed(output: SwapOutput): boolean {
+  return output.outAmount > 0 && !!output.swapSignature && !!output.confirmedAt
 }
 
 const KEY = "paraloom_swap_outputs"

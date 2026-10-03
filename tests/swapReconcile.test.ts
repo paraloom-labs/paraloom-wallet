@@ -1,5 +1,4 @@
 import { describe, expect, it } from "vitest"
-
 import {
   classifyStrand,
   isNativeSolOutput,
@@ -88,6 +87,44 @@ describe("classifyStrand", () => {
         tokenAmount: 0n
       })
     ).toBe("unresolved")
+  })
+
+  it("does not retry while a submitted transaction has produced output tokens", () => {
+    expect(
+      classifyStrand({
+        hasSignature: false,
+        hasSubmittedSignature: true,
+        ageMs: OLD,
+        solLamports: RESUME_MIN_LAMPORTS + 2_000_000n,
+        tokenAmount: 50n,
+        inputMint: "SOL"
+      })
+    ).toBe("landed")
+  })
+
+  it("does not infer a safe retry for legacy rows with unknown input asset", () => {
+    expect(
+      classifyStrand({
+        hasSignature: false,
+        ageMs: OLD,
+        solLamports: RESUME_MIN_LAMPORTS + 1n,
+        tokenAmount: 0n,
+        inputMint: "unknown"
+      })
+    ).toBe("unresolved")
+  })
+
+  it("allows recovery once a submitted transaction is no longer found and inputs remain", () => {
+    expect(
+      classifyStrand({
+        hasSignature: false,
+        hasSubmittedSignature: true,
+        ageMs: OLD,
+        solLamports: RESUME_MIN_LAMPORTS + 1n,
+        tokenAmount: 0n,
+        inputMint: "SOL"
+      })
+    ).toBe("resume")
   })
 })
 

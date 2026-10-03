@@ -5,15 +5,10 @@
 // asleep), and opening the popup itself keeps the context alive.
 
 import { Connection, Keypair, PublicKey } from "@solana/web3.js"
-
-import {
-  associatedTokenAddress,
-  depositSpl,
-  recoverReshieldedNote
-} from "~lib/paraloom/bridge"
+import { associatedTokenAddress, depositSpl, recoverReshieldedNote } from "~lib/paraloom/bridge"
 import { addNote } from "~lib/paraloom/notes"
 import type { ReshieldedNote } from "~lib/paraloom/privateSwap"
-import { listSwapOutputs, saveSwapOutput } from "~lib/paraloom/swapOutputs"
+import { isSwapOutputConfirmed, listSwapOutputs, saveSwapOutput } from "~lib/paraloom/swapOutputs"
 import { assetIdForMint } from "~lib/prover"
 
 // Persist a re-shielded SPL note against the wallet's shielded account. Called
@@ -49,7 +44,7 @@ export async function recoverReshields(
   let recovered = 0
   const outputs = await listSwapOutputs()
   for (const o of outputs) {
-    if (!o.reshield || !o.swapSignature || o.outputMint === "SOL") continue
+    if (!o.reshield || !isSwapOutputConfirmed(o) || o.outputMint === "SOL") continue
     if (o.reshieldRecovered) continue
     try {
       const mint = new PublicKey(o.outputMint)
@@ -74,9 +69,7 @@ export async function recoverReshields(
 
       // Case B: the deposit never ran but the token is still at the fresh
       // address — finish the re-shield now.
-      const fresh = Keypair.fromSecretKey(
-        Uint8Array.from(Buffer.from(o.freshSecretKeyHex, "hex"))
-      )
+      const fresh = Keypair.fromSecretKey(Uint8Array.from(Buffer.from(o.freshSecretKeyHex, "hex")))
       const ata = associatedTokenAddress(fresh.publicKey, mint)
       const bal = await connection.getTokenAccountBalance(ata).catch(() => null)
       const tokenAmount = bal ? BigInt(bal.value.amount) : 0n

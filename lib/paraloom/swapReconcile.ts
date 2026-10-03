@@ -103,7 +103,7 @@ export async function reconcileSwapOutputs(
             o.freshSecretKeyHex,
             o.outputMint,
             o.reshield ?? false,
-            (note) => persistReshieldedNote(shieldedAddress, note)
+            (note, confirmed) => persistReshieldedNote(shieldedAddress, note, confirmed)
           )
           await saveSwapOutput({
             ...o,

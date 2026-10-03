@@ -224,7 +224,7 @@ async function reshieldToken(
   // confirmation. The blinding is random and unrecoverable if lost, so this must
   // not wait for the flow to finish (a worker eviction after the deposit lands
   // would otherwise orphan a real shielded balance).
-  persistNote?: (note: ReshieldedNote) => Promise<void>
+  persistNote?: (note: ReshieldedNote, confirmed?: boolean) => Promise<void>
 ): Promise<ReshieldedNote | undefined> {
   try {
     const mint = new PublicKey(outputMint)
@@ -253,7 +253,18 @@ async function reshieldToken(
             amount: tokenAmount.toString(),
             blindingHex: Buffer.from(r.blinding).toString("hex"),
             depositSignature: r.signature
-          })
+          }, false)
+        }
+      },
+      async (r) => {
+        if (persistNote) {
+          await persistNote({
+            assetId,
+            mint: mintBase58,
+            amount: tokenAmount.toString(),
+            blindingHex: Buffer.from(r.blinding).toString("hex"),
+            depositSignature: r.signature
+          }, true)
         }
       }
     )
@@ -299,7 +310,7 @@ export async function privateSwap(
   ingressToken?: string,
   // Persist the re-shielded note the instant its deposit is submitted, so a
   // late failure can never orphan a shielded balance that landed on-chain.
-  onReshielded?: (note: ReshieldedNote) => Promise<void>
+  onReshielded?: (note: ReshieldedNote, confirmed?: boolean) => Promise<void>
 ): Promise<PrivateSwapResult> {
   if (params.amountLamports <= 0n) throw new Error("amount must be > 0")
 
@@ -490,7 +501,7 @@ export async function privateSwapFromToken(
   gasInputs: ShieldedNote[],
   params: PrivateSwapFromTokenParams,
   ingressToken?: string,
-  onReshielded?: (note: ReshieldedNote) => Promise<void>
+  onReshielded?: (note: ReshieldedNote, confirmed?: boolean) => Promise<void>
 ): Promise<PrivateSwapResult> {
   if (params.amountTokenUnits <= 0n) throw new Error("amount must be > 0")
 
@@ -665,7 +676,7 @@ export async function resumeSwapAtFreshAddress(
   freshSecretKeyHex: string,
   outputMint: string,
   reshield: boolean,
-  onReshielded?: (note: ReshieldedNote) => Promise<void>
+  onReshielded?: (note: ReshieldedNote, confirmed?: boolean) => Promise<void>
 ): Promise<ResumeSwapResult> {
   const fresh = Keypair.fromSecretKey(
     Uint8Array.from(Buffer.from(freshSecretKeyHex, "hex"))

@@ -22,7 +22,8 @@ import { assetIdForMint } from "~lib/prover"
 // recovery scan; addNote dedupes by deposit signature so double-persisting is safe.
 export async function persistReshieldedNote(
   shieldedAddress: string,
-  note: ReshieldedNote
+  note: ReshieldedNote,
+  confirmed = true
 ): Promise<void> {
   await addNote(shieldedAddress, {
     amount: note.amount,
@@ -32,6 +33,7 @@ export async function persistReshieldedNote(
     signature: note.depositSignature,
     createdAt: Date.now(),
     spent: false,
+    confirmed,
     source: "deposit"
   })
 }
@@ -82,6 +84,14 @@ export async function recoverReshields(
       const tokenAmount = bal ? BigInt(bal.value.amount) : 0n
       if (tokenAmount > 0n) {
         const assetId = await assetIdForMint(mintHex)
+        const persist = (note: { blinding: Uint8Array; signature: string }, confirmed: boolean) =>
+          persistReshieldedNote(shieldedAddress, {
+            assetId,
+            mint: o.outputMint,
+            amount: tokenAmount.toString(),
+            blindingHex: Buffer.from(note.blinding).toString("hex"),
+            depositSignature: note.signature
+          }, confirmed)
         await depositSpl(
           connection,
           fresh,
@@ -90,14 +100,8 @@ export async function recoverReshields(
           tokenAmount,
           assetId,
           undefined,
-          (note) =>
-            persistReshieldedNote(shieldedAddress, {
-              assetId,
-              mint: o.outputMint,
-              amount: tokenAmount.toString(),
-              blindingHex: Buffer.from(note.blinding).toString("hex"),
-              depositSignature: note.signature
-            })
+          (note) => persist(note, false),
+          (note) => persist(note, true)
         )
         await saveSwapOutput({ ...o, reshieldRecovered: true })
         recovered++

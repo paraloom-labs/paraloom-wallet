@@ -496,8 +496,10 @@ export function Home({ onLock }: HomeProps) {
 
     // Circuit v3 (#350): spend 1 or 2 notes; change comes back as a new note
     // (audit #16), so partial amounts work from a single note.
+    // Shielded SOL transfers must only select native SOL notes, not SPL token notes
+    // (paraloom-core#852).
     const unspent = notes
-      .filter((n) => !n.spent)
+      .filter((n) => !n.spent && (!n.assetId || n.assetId === NATIVE_ASSET_HEX))
       .sort((a, b) => Number(BigInt(b.amount) - BigInt(a.amount)))
     const inputs: ShieldedNote[] = []
     let covered = 0n
@@ -1821,18 +1823,18 @@ export function Home({ onLock }: HomeProps) {
                 <div className="balance-info">
                   Spends your 2 largest notes; the remainder returns as change. Shielded total:{" "}
                   {(Number(shieldedLamports) / 1e9).toFixed(4)} SOL across{" "}
-                  {notes.filter((n) => !n.spent).length} note(s)
+                  {notes.filter((n) => !n.spent && (!n.assetId || n.assetId === NATIVE_ASSET_HEX)).length} note(s)
                 </div>
               </div>
 
               <button
                 className="button send-button"
-                disabled={transferring || !transferAddress.trim() || !transferAmount.trim() || notes.filter((n) => !n.spent).length < 2}
+                disabled={transferring || !transferAddress.trim() || !transferAmount.trim() || notes.filter((n) => !n.spent && (!n.assetId || n.assetId === NATIVE_ASSET_HEX)).length < 2}
                 onClick={handleTransfer}
               >
                 {transferring ? "Proving & sending…" : "Send shielded transfer"}
               </button>
-              {notes.filter((n) => !n.spent).length < 2 && (
+              {notes.filter((n) => !n.spent && (!n.assetId || n.assetId === NATIVE_ASSET_HEX)).length < 2 && (
                 <div className="balance-info">Needs at least 2 unspent notes (deposit again to split).</div>
               )}
             </div>

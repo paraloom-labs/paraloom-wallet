@@ -108,7 +108,8 @@ export async function reconcileSwapOutputs(
           await saveSwapOutput({
             ...o,
             outAmount: r.outAmount,
-            swapSignature: r.swapSignature
+            swapSignature: r.swapSignature,
+            dismissed: false
           })
           if (r.reshielded) {
             await persistReshieldedNote(shieldedAddress, r.reshielded)
@@ -134,7 +135,8 @@ export async function reconcileSwapOutputs(
           await saveSwapOutput({
             ...o,
             outAmount: Number(tokenAmount),
-            swapSignature: sig
+            swapSignature: sig,
+            dismissed: false
           })
           resolved++
         } catch (e) {

@@ -345,14 +345,17 @@ export function Home({ onLock }: HomeProps) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [wallet, network])
 
-  // Clear a stale "pending" swap row the reconciler could not account for. The
-  // funds are already safe (re-shielded into the pool, or the input note was
-  // never spent), so this only removes the misleading Activity entry.
+  // Clear a stale "pending" swap row from the Activity list.
+  // Instead of permanently deleting the record and key, dismissSwapOutput
+  // marks it dismissed so it is hidden from the Activity list while
+  // preserving the key for background reconciliation and recovery.
   async function dismissActivity() {
     if (!activityDetail || activityDetail.kind !== "buy") return
     const addr = activityDetail.address
     await dismissSwapOutput(addr)
-    setSwapOutputs((prev) => prev.filter((o) => o.freshAddress !== addr))
+    setSwapOutputs((prev) =>
+      prev.map((o) => (o.freshAddress === addr ? { ...o, dismissed: true } : o))
+    )
     setActivityDetail(null)
   }
 
@@ -925,7 +928,9 @@ export function Home({ onLock }: HomeProps) {
                 | { kind: "buy"; ts: number; s: SwapOutput }
                 | { kind: "deposit"; ts: number; n: ShieldedNote }
               const entries: Entry[] = [
-                ...swapOutputs.map((s) => ({ kind: "buy" as const, ts: s.createdAt, s })),
+                ...swapOutputs
+                  .filter((s) => !s.dismissed)
+                  .map((s) => ({ kind: "buy" as const, ts: s.createdAt, s })),
                 ...deposits.map((n) => ({ kind: "deposit" as const, ts: n.createdAt, n }))
               ].sort((a, b) => b.ts - a.ts)
 
@@ -1179,8 +1184,8 @@ export function Home({ onLock }: HomeProps) {
 
                   {activityDetail.kind === "buy" && activityDetail.pending && (
                     <p className="detail-note">
-                      Still pending after a while? Your funds are safe in your shielded
-                      balance. Dismissing only clears this row.
+                      Still pending after a while? Dismissing hides this row from
+                      Activity while keeping recovery keys safe for reconciliation.
                     </p>
                   )}
 

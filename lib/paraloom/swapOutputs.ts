@@ -21,6 +21,10 @@ export interface SwapOutput {
   /** Set once the re-shield note has been persisted (either normally or via the
    *  recovery scan), so recovery does not re-scan a settled reshield each connect. */
   reshieldRecovered?: boolean
+  /** Whether the user dismissed this pending row from their Activity list.
+   *  Kept in storage so freshSecretKeyHex is preserved and stranded funds
+   *  remain recoverable by reconciliation. */
+  dismissed?: boolean
   createdAt: number
 }
 
@@ -44,13 +48,17 @@ export async function listSwapOutputs(): Promise<SwapOutput[]> {
   return (stored[KEY] as SwapOutput[]) ?? []
 }
 
-// Drop a swap row by its fresh address. Used to clear a stale "pending" row the
-// reconciler could not positively account for — the funds are already safe (the
-// swap either re-shielded into the pool or its input note was never spent), so
-// this only removes the misleading Activity entry, never any money.
+// Mark a swap row as dismissed by its fresh address. Instead of permanently
+// deleting the row (which destroys the freshSecretKeyHex needed to recover
+// stranded funds if the withdraw settled but the swap leg failed), mark it as
+// dismissed. This hides it from the user's Activity list while preserving the
+// key for background reconciliation and recovery.
 export async function dismissSwapOutput(freshAddress: string): Promise<void> {
   const stored = await chrome.storage.local.get(KEY)
   const current = (stored[KEY] as SwapOutput[]) ?? []
-  const next = current.filter((o) => o.freshAddress !== freshAddress)
-  await chrome.storage.local.set({ [KEY]: next })
+  const i = current.findIndex((o) => o.freshAddress === freshAddress)
+  if (i >= 0) {
+    current[i] = { ...current[i], dismissed: true }
+    await chrome.storage.local.set({ [KEY]: current })
+  }
 }

@@ -22,21 +22,34 @@ export function isNativeSolOutput(mint: string): boolean {
   return mint === "SOL" || mint === WSOL_MINT
 }
 
+/** True when `mint` denotes an SPL token (neither the literal "SOL" nor WSOL). */
+export function isTokenInput(mint?: string): boolean {
+  if (!mint) return false
+  return !isNativeSolOutput(mint)
+}
+
 export type StrandAction = "skip" | "resume" | "landed" | "unresolved"
 
 /// Decide what to do with a stranded swap row from its on-chain footprint.
 ///  - skip:       already recorded, or still inside the in-flight grace window.
-///  - resume:     the fresh address holds swappable SOL → finish the swap leg.
-///  - landed:     SOL is gone but the bought token sits there → record it done.
+///  - resume:     the fresh address holds swappable funds (SOL or input token) → finish the swap leg.
+///  - landed:     input is gone but the bought token sits there → record it done.
 ///  - unresolved: nothing recoverable → leave for the user to dismiss manually.
 export function classifyStrand(args: {
   hasSignature: boolean
   ageMs: number
   solLamports: bigint
   tokenAmount: bigint
+  isTokenInput?: boolean
+  inputTokenAmount?: bigint
 }): StrandAction {
   if (args.hasSignature) return "skip"
   if (args.ageMs < RESUME_GRACE_MS) return "skip"
+  if (args.isTokenInput) {
+    if ((args.inputTokenAmount ?? 0n) > 0n) return "resume"
+    if (args.tokenAmount > 0n) return "landed"
+    return "unresolved"
+  }
   if (args.solLamports > RESUME_MIN_LAMPORTS) return "resume"
   if (args.tokenAmount > 0n) return "landed"
   return "unresolved"

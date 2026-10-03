@@ -20,16 +20,21 @@
 
 import { Connection, PublicKey } from "@solana/web3.js"
 
-import { isNativeSolOutput, resumeSwapAtFreshAddress } from "./privateSwap"
+import {
+  isNativeSolOutput,
+  resumeSwapAtFreshAddress,
+  resumeTokenSwapAtFreshAddress
+} from "./privateSwap"
 import { persistReshieldedNote } from "./reshieldRecovery"
 import {
   classifyStrand,
+  isTokenInput,
   RESUME_GRACE_MS,
   RESUME_MIN_LAMPORTS
 } from "./swapReconcileClassify"
 import { listSwapOutputs, saveSwapOutput } from "./swapOutputs"
 
-export { classifyStrand, RESUME_GRACE_MS, RESUME_MIN_LAMPORTS }
+export { classifyStrand, isTokenInput, RESUME_GRACE_MS, RESUME_MIN_LAMPORTS }
 export type { StrandAction } from "./swapReconcileClassify"
 
 let reconcileInFlight = false
@@ -59,13 +64,14 @@ export async function reconcileSwapOutputs(
         continue // RPC blip: retry on the next open rather than guess
       }
 
-      let tokenAmount = 0n
-      if (solLamports <= RESUME_MIN_LAMPORTS && !isNativeSolOutput(o.outputMint)) {
+      const tokenInput = isTokenInput(o.inputMint)
+      let inputTokenAmount = 0n
+      if (tokenInput && o.inputMint) {
         try {
-          const accts = await connection.getParsedTokenAccountsByOwner(freshPub, {
-            mint: new PublicKey(o.outputMint)
+          const inAccts = await connection.getParsedTokenAccountsByOwner(freshPub, {
+            mint: new PublicKey(o.inputMint)
           })
-          tokenAmount = accts.value.reduce(
+          inputTokenAmount = inAccts.value.reduce(
             (s, a) =>
               s +
               BigInt(
@@ -75,7 +81,33 @@ export async function reconcileSwapOutputs(
             0n
           )
         } catch {
-          // no token account yet — leave as unresolved below
+          // no token account yet or RPC error
+        }
+      }
+
+      let tokenAmount = 0n
+      if (!isNativeSolOutput(o.outputMint)) {
+        const shouldCheckOutputToken = tokenInput
+          ? inputTokenAmount === 0n
+          : solLamports <= RESUME_MIN_LAMPORTS
+
+        if (shouldCheckOutputToken) {
+          try {
+            const accts = await connection.getParsedTokenAccountsByOwner(freshPub, {
+              mint: new PublicKey(o.outputMint)
+            })
+            tokenAmount = accts.value.reduce(
+              (s, a) =>
+                s +
+                BigInt(
+                  (a.account.data as { parsed: { info: { tokenAmount: { amount: string } } } })
+                    .parsed.info.tokenAmount.amount
+                ),
+              0n
+            )
+          } catch {
+            // no token account yet — leave as unresolved below
+          }
         }
       }
 
@@ -83,37 +115,60 @@ export async function reconcileSwapOutputs(
         hasSignature: false,
         ageMs: now - o.createdAt,
         solLamports,
-        tokenAmount
+        tokenAmount,
+        isTokenInput: tokenInput,
+        inputTokenAmount
       })
 
-      // A "SOL" output means this was a token -> SOL swap (or its stranded gas
-      // leg): the SOL at the fresh address is the OUTPUT, never a SOL input to
-      // swap again, so never resume it (that would route SOL -> SOL). Record the
-      // SOL as landed instead; it is real and recoverable with the saved key.
-      if (action === "resume" && isNativeSolOutput(o.outputMint)) {
+      // For legacy SOL-input swaps missing inputMint: A "SOL" output means this was a
+      // token -> SOL swap: the SOL at the fresh address is the OUTPUT, never a SOL input to
+      // swap again, so never resume it. (For token-input swaps, leftover gas SOL is NEVER
+      // mistaken for landed output).
+      if (!tokenInput && action === "resume" && isNativeSolOutput(o.outputMint)) {
         action = "landed"
         tokenAmount = solLamports
       }
 
       if (action === "resume") {
         try {
-          const r = await resumeSwapAtFreshAddress(
-            connection,
-            shieldedAddress,
-            o.freshSecretKeyHex,
-            o.outputMint,
-            o.reshield ?? false,
-            (note) => persistReshieldedNote(shieldedAddress, note)
-          )
-          await saveSwapOutput({
-            ...o,
-            outAmount: r.outAmount,
-            swapSignature: r.swapSignature
-          })
-          if (r.reshielded) {
-            await persistReshieldedNote(shieldedAddress, r.reshielded)
+          if (tokenInput && o.inputMint) {
+            const r = await resumeTokenSwapAtFreshAddress(
+              connection,
+              shieldedAddress,
+              o.freshSecretKeyHex,
+              o.inputMint,
+              o.outputMint,
+              o.reshield ?? false,
+              (note) => persistReshieldedNote(shieldedAddress, note)
+            )
+            await saveSwapOutput({
+              ...o,
+              outAmount: r.outAmount,
+              swapSignature: r.swapSignature
+            })
+            if (r.reshielded) {
+              await persistReshieldedNote(shieldedAddress, r.reshielded)
+            }
+            resolved++
+          } else {
+            const r = await resumeSwapAtFreshAddress(
+              connection,
+              shieldedAddress,
+              o.freshSecretKeyHex,
+              o.outputMint,
+              o.reshield ?? false,
+              (note) => persistReshieldedNote(shieldedAddress, note)
+            )
+            await saveSwapOutput({
+              ...o,
+              outAmount: r.outAmount,
+              swapSignature: r.swapSignature
+            })
+            if (r.reshielded) {
+              await persistReshieldedNote(shieldedAddress, r.reshielded)
+            }
+            resolved++
           }
-          resolved++
         } catch (e) {
           console.log(
             `[paraloom] could not resume swap at ${o.freshAddress}: ${

@@ -23,16 +23,14 @@ import {
   PublicKey,
   VersionedTransaction
 } from "@solana/web3.js"
-
 import { assetIdForMint } from "~lib/prover"
-
 import { associatedTokenAddress, createTokenAccount, depositSpl } from "./bridge"
 import { SWAP_ROUTER_URL } from "./constants"
 import type { ShieldedNote } from "./notes"
 import { saveSwapOutput } from "./swapOutputs"
+import { isNativeSolOutput, WSOL_MINT } from "./swapReconcileClassify"
 import { depositV3, spendV3 } from "./transactFlow"
 
-import { WSOL_MINT, isNativeSolOutput } from "./swapReconcileClassify"
 export { WSOL_MINT, isNativeSolOutput }
 
 /** Lamports left at the fresh address to cover the swap's own costs: the output
@@ -169,9 +167,7 @@ async function routeSwap(
         ROUTE_TIMEOUT_MS
       )
       if (!res.ok) {
-        lastErr = new Error(
-          `swap routing failed (${res.status}): ${await res.text()}`
-        )
+        lastErr = new Error(`swap routing failed (${res.status}): ${await res.text()}`)
       } else {
         return (await res.json()) as {
           out_amount: number
@@ -194,7 +190,8 @@ async function executeSwapLeg(
   connection: Connection,
   fresh: Keypair,
   outputMint: string,
-  swapLamports: bigint
+  swapLamports: bigint,
+  onSubmitted?: (signature: string, outAmount: number, blockhash: string) => Promise<void>
 ): Promise<{ swapSignature: string; outAmount: number }> {
   const { out_amount, swap_transaction } = await routeSwap(
     fresh.publicKey.toBase58(),
@@ -208,6 +205,7 @@ async function executeSwapLeg(
   const swapSignature = await connection.sendRawTransaction(tx.serialize(), {
     maxRetries: 5
   })
+  await onSubmitted?.(swapSignature, out_amount, tx.message.recentBlockhash)
   await waitForSwapConfirmation(connection, swapSignature)
   return { swapSignature, outAmount: out_amount }
 }
@@ -232,9 +230,7 @@ async function reshieldToken(
     const bal = await connection.getTokenAccountBalance(ata)
     const tokenAmount = BigInt(bal.value.amount)
     if (tokenAmount <= 0n) return undefined
-    const assetId = await assetIdForMint(
-      Buffer.from(mint.toBytes()).toString("hex")
-    )
+    const assetId = await assetIdForMint(Buffer.from(mint.toBytes()).toString("hex"))
     const mintBase58 = mint.toBase58()
     const dep = await depositSpl(
       connection,
@@ -306,6 +302,7 @@ export async function privateSwap(
   // 1. Fresh ephemeral key — generated here, never sent anywhere.
   const fresh = Keypair.generate()
   const freshHex = Buffer.from(fresh.publicKey.toBytes()).toString("hex")
+  const createdAt = Date.now()
 
   // Persist the fresh key up front, BEFORE the withdraw funds it. The withdrawn
   // SOL (and later the bought token) live at this address and are spendable only
@@ -318,8 +315,11 @@ export async function privateSwap(
     outputMint: params.outputMint,
     outAmount: 0,
     swapSignature: "",
+    inputMint: "SOL",
+    inputAmount: params.amountLamports.toString(),
+    confirmedAt: 0,
     reshield: params.reshield ?? false,
-    createdAt: Date.now()
+    createdAt
   })
 
   // 2. Withdraw the note value to the fresh address via the 2-of-2 quorum. The
@@ -380,18 +380,21 @@ export async function privateSwap(
     maxRetries: 5
   })
 
-  // Persist the fresh key + output NOW, the instant the swap is submitted and
-  // BEFORE waiting for confirmation. The bought token lives at this fresh
-  // address and is only spendable with this key, so it must never be lost to a
-  // later throw (a confirm timeout used to strand it). Saving here also makes it
-  // show up under "Private buys" immediately.
+  // Persist the submitted signature separately; a router quote is not proof the
+  // swap landed, but the fresh key must survive a confirmation timeout.
   await saveSwapOutput({
     freshAddress: fresh.publicKey.toBase58(),
     freshSecretKeyHex: Buffer.from(fresh.secretKey).toString("hex"),
     outputMint: params.outputMint,
-    outAmount: out_amount,
-    swapSignature,
-    createdAt: Date.now()
+    outAmount: 0,
+    swapSignature: "",
+    submittedSignature: swapSignature,
+    submittedBlockhash: tx.message.recentBlockhash,
+    submittedOutAmount: out_amount,
+    inputMint: "SOL",
+    inputAmount: params.amountLamports.toString(),
+    confirmedAt: 0,
+    createdAt
   })
 
   // Poll the signature status rather than connection.confirmTransaction, whose
@@ -399,6 +402,20 @@ export async function privateSwap(
   // when the swap actually lands. We wait up to ~90s and only fail on a real
   // on-chain error (or if it truly never confirms).
   await waitForSwapConfirmation(connection, swapSignature)
+  await saveSwapOutput({
+    freshAddress: fresh.publicKey.toBase58(),
+    freshSecretKeyHex: Buffer.from(fresh.secretKey).toString("hex"),
+    outputMint: params.outputMint,
+    outAmount: out_amount,
+    swapSignature,
+    submittedSignature: "",
+    submittedBlockhash: "",
+    submittedOutAmount: 0,
+    inputMint: "SOL",
+    inputAmount: params.amountLamports.toString(),
+    confirmedAt: Date.now(),
+    createdAt
+  })
 
   // 7. Optional round trip: re-shield the swapped token back into the pool. The
   //    token is already safely at the fresh address (persisted above), so this
@@ -436,10 +453,7 @@ export const GAS_LAMPORTS = 9_000_000n
 const RESHIELD_FEE_RESERVE = 1_000_000n
 
 // Poll an SPL token account until the withdrawn balance actually lands.
-async function waitForTokenFunding(
-  connection: Connection,
-  ata: PublicKey
-): Promise<bigint> {
+async function waitForTokenFunding(connection: Connection, ata: PublicKey): Promise<bigint> {
   const deadline = Date.now() + SETTLE_TIMEOUT_MS
   while (Date.now() < deadline) {
     await new Promise((r) => setTimeout(r, SETTLE_POLL_MS))
@@ -497,6 +511,7 @@ export async function privateSwapFromToken(
   const inputMintPk = new PublicKey(params.inputMint)
   const fresh = Keypair.generate()
   const freshHex = Buffer.from(fresh.publicKey.toBytes()).toString("hex")
+  const createdAt = Date.now()
   const ata = associatedTokenAddress(fresh.publicKey, inputMintPk)
 
   // Persist the fresh key up front — the gas SOL, the withdrawn token, and the
@@ -507,8 +522,11 @@ export async function privateSwapFromToken(
     outputMint: params.outputMint,
     outAmount: 0,
     swapSignature: "",
+    inputMint: params.inputMint,
+    inputAmount: params.amountTokenUnits.toString(),
+    confirmedAt: 0,
     reshield: params.reshield ?? false,
-    createdAt: Date.now()
+    createdAt
   })
 
   // 1. Self-fund gas from the user's own shielded SOL (native withdraw). The gas
@@ -595,11 +613,31 @@ export async function privateSwapFromToken(
     freshAddress: fresh.publicKey.toBase58(),
     freshSecretKeyHex: Buffer.from(fresh.secretKey).toString("hex"),
     outputMint: params.outputMint,
-    outAmount: out_amount,
-    swapSignature,
-    createdAt: Date.now()
+    outAmount: 0,
+    swapSignature: "",
+    submittedSignature: swapSignature,
+    submittedBlockhash: tx.message.recentBlockhash,
+    submittedOutAmount: out_amount,
+    inputMint: params.inputMint,
+    inputAmount: params.amountTokenUnits.toString(),
+    confirmedAt: 0,
+    createdAt
   })
   await waitForSwapConfirmation(connection, swapSignature)
+  await saveSwapOutput({
+    freshAddress: fresh.publicKey.toBase58(),
+    freshSecretKeyHex: Buffer.from(fresh.secretKey).toString("hex"),
+    outputMint: params.outputMint,
+    outAmount: out_amount,
+    swapSignature,
+    submittedSignature: "",
+    submittedBlockhash: "",
+    submittedOutAmount: 0,
+    inputMint: params.inputMint,
+    inputAmount: params.amountTokenUnits.toString(),
+    confirmedAt: Date.now(),
+    createdAt
+  })
 
   // 5. Round trip: sweep the swapped output back into the shielded pool. For a
   //    "SOL" output this is a native deposit_note (depositV3 persists the note
@@ -665,11 +703,10 @@ export async function resumeSwapAtFreshAddress(
   freshSecretKeyHex: string,
   outputMint: string,
   reshield: boolean,
-  onReshielded?: (note: ReshieldedNote) => Promise<void>
+  onReshielded?: (note: ReshieldedNote) => Promise<void>,
+  onSubmitted?: (signature: string, outAmount: number, blockhash: string) => Promise<void>
 ): Promise<ResumeSwapResult> {
-  const fresh = Keypair.fromSecretKey(
-    Uint8Array.from(Buffer.from(freshSecretKeyHex, "hex"))
-  )
+  const fresh = Keypair.fromSecretKey(Uint8Array.from(Buffer.from(freshSecretKeyHex, "hex")))
   const funded = BigInt(await connection.getBalance(fresh.publicKey))
   const swapLamports = funded - SWAP_OVERHEAD_LAMPORTS
   if (swapLamports <= 0n) {
@@ -680,19 +717,46 @@ export async function resumeSwapAtFreshAddress(
     connection,
     fresh,
     outputMint,
-    swapLamports
+    swapLamports,
+    onSubmitted
   )
 
   let reshielded: ReshieldedNote | undefined
   if (reshield && outputMint !== "SOL") {
-    reshielded = await reshieldToken(
-      connection,
-      fresh,
-      shieldedAddress,
-      outputMint,
-      onReshielded
-    )
+    reshielded = await reshieldToken(connection, fresh, shieldedAddress, outputMint, onReshielded)
   }
 
   return { swapSignature, outAmount, reshielded }
+}
+
+/** Resume a token-input swap when its submitted transaction is confirmed absent. */
+export async function resumeTokenSwapAtFreshAddress(
+  connection: Connection,
+  freshSecretKeyHex: string,
+  inputMint: string,
+  outputMint: string,
+  onSubmitted?: (signature: string, outAmount: number, blockhash: string) => Promise<void>
+): Promise<ResumeSwapResult> {
+  const fresh = Keypair.fromSecretKey(Uint8Array.from(Buffer.from(freshSecretKeyHex, "hex")))
+  const inputMintPk = new PublicKey(inputMint)
+  const ata = associatedTokenAddress(fresh.publicKey, inputMintPk)
+  const balance = await connection.getTokenAccountBalance(ata)
+  const inputAmount = BigInt(balance.value.amount)
+  if (inputAmount <= 0n) throw new Error("fresh address has no input tokens to resume")
+  const { out_amount, swap_transaction } = await routeSwap(
+    fresh.publicKey.toBase58(),
+    outputMint,
+    inputAmount,
+    inputMint
+  )
+  const tx = VersionedTransaction.deserialize(
+    Uint8Array.from(Buffer.from(swap_transaction, "base64"))
+  )
+  tx.sign([fresh])
+  const swapSignature = await connection.sendRawTransaction(tx.serialize(), {
+    maxRetries: 5
+  })
+  await onSubmitted?.(swapSignature, out_amount, tx.message.recentBlockhash)
+  await waitForSwapConfirmation(connection, swapSignature)
+  return { swapSignature, outAmount: out_amount }
 }

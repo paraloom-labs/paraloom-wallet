@@ -22,7 +22,7 @@ import { NATIVE_ASSET_HEX } from "~lib/prover"
 import { addressBoxPubHex } from "~lib/crypto/keyManagement"
 import { isValidShieldedAddress } from "~lib/crypto/addressChecksum"
 import { scanForNotes } from "~lib/paraloom/scan"
-import { dismissSwapOutput, listSwapOutputs, type SwapOutput } from "~lib/paraloom/swapOutputs"
+import { dismissSwapOutput, isSwapOutputConfirmed, listSwapOutputs, type SwapOutput } from "~lib/paraloom/swapOutputs"
 import { recoverReshields } from "~lib/paraloom/reshieldRecovery"
 import { reconcileSwapOutputs } from "~lib/paraloom/swapReconcile"
 import { fetchPrices, SOL_MINT, type TokenPrice } from "~lib/paraloom/prices"
@@ -946,7 +946,7 @@ export function Home({ onLock }: HomeProps) {
                         {g.items.map((e, i) => {
                           if (e.kind === "buy") {
                             const s = e.s
-                            const done = s.outAmount > 0 && !!s.swapSignature
+                            const done = isSwapOutputConfirmed(s)
                             const isSolOut =
                               s.outputMint === "SOL" || s.outputMint === WSOL_MINT
                             const sym = isSolOut

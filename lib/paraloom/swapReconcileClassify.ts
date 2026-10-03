@@ -22,7 +22,7 @@ export function isNativeSolOutput(mint: string): boolean {
   return mint === "SOL" || mint === WSOL_MINT
 }
 
-export type StrandAction = "skip" | "resume" | "landed" | "unresolved"
+export type StrandAction = "skip" | "resume" | "resume-token" | "landed" | "unresolved"
 
 /// Decide what to do with a stranded swap row from its on-chain footprint.
 ///  - skip:       already recorded, or still inside the in-flight grace window.
@@ -31,12 +31,24 @@ export type StrandAction = "skip" | "resume" | "landed" | "unresolved"
 ///  - unresolved: nothing recoverable → leave for the user to dismiss manually.
 export function classifyStrand(args: {
   hasSignature: boolean
+  hasSubmittedSignature?: boolean
   ageMs: number
   solLamports: bigint
   tokenAmount: bigint
+  inputMint?: string
+  inputTokenAmount?: bigint
 }): StrandAction {
   if (args.hasSignature) return "skip"
   if (args.ageMs < RESUME_GRACE_MS) return "skip"
+  if (args.inputMint === "unknown") return "unresolved"
+  if (args.inputMint && !isNativeSolOutput(args.inputMint)) {
+    if (args.tokenAmount > 0n) return "landed"
+    if ((args.inputTokenAmount ?? 0n) > 0n && args.solLamports > RESUME_MIN_LAMPORTS) {
+      return "resume-token"
+    }
+    return "unresolved"
+  }
+  if (args.hasSubmittedSignature && args.tokenAmount > 0n) return "landed"
   if (args.solLamports > RESUME_MIN_LAMPORTS) return "resume"
   if (args.tokenAmount > 0n) return "landed"
   return "unresolved"

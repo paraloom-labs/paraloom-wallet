@@ -188,18 +188,20 @@ async function routeSwap(
   throw lastErr instanceof Error ? lastErr : new Error("swap routing failed")
 }
 
-// Route -> sign -> submit -> confirm a swap of `swapLamports` SOL at `fresh`.
+// Route -> sign -> submit -> confirm a swap of `amount` at `fresh`.
 // Shared by the live swap and the resume/recovery path so both harden identically.
 async function executeSwapLeg(
   connection: Connection,
   fresh: Keypair,
   outputMint: string,
-  swapLamports: bigint
+  amount: bigint,
+  inputMint = "SOL"
 ): Promise<{ swapSignature: string; outAmount: number }> {
   const { out_amount, swap_transaction } = await routeSwap(
     fresh.publicKey.toBase58(),
     outputMint,
-    swapLamports
+    amount,
+    inputMint
   )
   const tx = VersionedTransaction.deserialize(
     Uint8Array.from(Buffer.from(swap_transaction, "base64"))
@@ -315,6 +317,7 @@ export async function privateSwap(
   await saveSwapOutput({
     freshAddress: fresh.publicKey.toBase58(),
     freshSecretKeyHex: Buffer.from(fresh.secretKey).toString("hex"),
+    inputMint: "SOL",
     outputMint: params.outputMint,
     outAmount: 0,
     swapSignature: "",
@@ -388,6 +391,7 @@ export async function privateSwap(
   await saveSwapOutput({
     freshAddress: fresh.publicKey.toBase58(),
     freshSecretKeyHex: Buffer.from(fresh.secretKey).toString("hex"),
+    inputMint: "SOL",
     outputMint: params.outputMint,
     outAmount: out_amount,
     swapSignature,
@@ -504,6 +508,8 @@ export async function privateSwapFromToken(
   await saveSwapOutput({
     freshAddress: fresh.publicKey.toBase58(),
     freshSecretKeyHex: Buffer.from(fresh.secretKey).toString("hex"),
+    inputMint: params.inputMint,
+    inputAmount: params.amountTokenUnits.toString(),
     outputMint: params.outputMint,
     outAmount: 0,
     swapSignature: "",
@@ -594,6 +600,8 @@ export async function privateSwapFromToken(
   await saveSwapOutput({
     freshAddress: fresh.publicKey.toBase58(),
     freshSecretKeyHex: Buffer.from(fresh.secretKey).toString("hex"),
+    inputMint: params.inputMint,
+    inputAmount: params.amountTokenUnits.toString(),
     outputMint: params.outputMint,
     outAmount: out_amount,
     swapSignature,
@@ -685,6 +693,54 @@ export async function resumeSwapAtFreshAddress(
 
   let reshielded: ReshieldedNote | undefined
   if (reshield && outputMint !== "SOL") {
+    reshielded = await reshieldToken(
+      connection,
+      fresh,
+      shieldedAddress,
+      outputMint,
+      onReshielded
+    )
+  }
+
+  return { swapSignature, outAmount, reshielded }
+}
+
+/**
+ * Finish a private swap FROM a shielded token whose withdraw already settled
+ * into the fresh address's ATA, but whose swap leg never ran. It reads the
+ * ACTUAL current balance at the fresh address ATA and swaps that token into
+ * the output mint, ensuring gas SOL is never mistaken for input or completion.
+ */
+export async function resumeTokenSwapAtFreshAddress(
+  connection: Connection,
+  shieldedAddress: string,
+  freshSecretKeyHex: string,
+  inputMint: string,
+  outputMint: string,
+  reshield: boolean,
+  onReshielded?: (note: ReshieldedNote) => Promise<void>
+): Promise<ResumeSwapResult> {
+  const fresh = Keypair.fromSecretKey(
+    Uint8Array.from(Buffer.from(freshSecretKeyHex, "hex"))
+  )
+  const inMintPk = new PublicKey(inputMint)
+  const ata = associatedTokenAddress(fresh.publicKey, inMintPk)
+  const bal = await connection.getTokenAccountBalance(ata)
+  const inputAmount = BigInt(bal.value.amount)
+  if (inputAmount <= 0n) {
+    throw new Error("no input tokens at fresh address to swap")
+  }
+
+  const { swapSignature, outAmount } = await executeSwapLeg(
+    connection,
+    fresh,
+    outputMint,
+    inputAmount,
+    inputMint
+  )
+
+  let reshielded: ReshieldedNote | undefined
+  if (reshield && !isNativeSolOutput(outputMint)) {
     reshielded = await reshieldToken(
       connection,
       fresh,

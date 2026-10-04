@@ -174,6 +174,9 @@ export interface SpendResult {
 export interface SpendOptions {
   /// Bearer token for the transact ingress, when the endpoint gates submission.
   ingressToken?: string
+  /// Expected asset id for the spend (#852). When provided, spendV3 asserts that
+  /// the notes match this asset (preventing accidental asset confusion).
+  expectedAssetIdHex?: string
   /// Settlement signal supplied by the caller: resolves true once the spend is
   /// confirmed on-chain (e.g. the withdrawn funds landed at the recipient), or
   /// false on timeout. A withdraw caller passes this to reuse the cheap
@@ -214,6 +217,9 @@ export async function spendV3(
   const assetIdHex = inputs[0].assetId || NATIVE_ASSET_HEX
   if (inputs.some((n) => (n.assetId || NATIVE_ASSET_HEX) !== assetIdHex)) {
     throw new Error("all spent notes must share one asset")
+  }
+  if (opts.expectedAssetIdHex && assetIdHex !== opts.expectedAssetIdHex) {
+    throw new Error(`asset mismatch: expected ${opts.expectedAssetIdHex}, got ${assetIdHex}`)
   }
   const isSpl = assetIdHex !== NATIVE_ASSET_HEX
   const mintHex = isSpl && inputs[0].mint ? new PublicKey(inputs[0].mint).toBuffer().toString("hex") : undefined

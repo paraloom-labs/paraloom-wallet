@@ -315,6 +315,7 @@ export async function privateSwap(
   await saveSwapOutput({
     freshAddress: fresh.publicKey.toBase58(),
     freshSecretKeyHex: Buffer.from(fresh.secretKey).toString("hex"),
+    inputMint: "SOL",
     outputMint: params.outputMint,
     outAmount: 0,
     swapSignature: "",
@@ -388,6 +389,7 @@ export async function privateSwap(
   await saveSwapOutput({
     freshAddress: fresh.publicKey.toBase58(),
     freshSecretKeyHex: Buffer.from(fresh.secretKey).toString("hex"),
+    inputMint: "SOL",
     outputMint: params.outputMint,
     outAmount: out_amount,
     swapSignature,
@@ -504,6 +506,7 @@ export async function privateSwapFromToken(
   await saveSwapOutput({
     freshAddress: fresh.publicKey.toBase58(),
     freshSecretKeyHex: Buffer.from(fresh.secretKey).toString("hex"),
+    inputMint: params.inputMint,
     outputMint: params.outputMint,
     outAmount: 0,
     swapSignature: "",
@@ -594,6 +597,7 @@ export async function privateSwapFromToken(
   await saveSwapOutput({
     freshAddress: fresh.publicKey.toBase58(),
     freshSecretKeyHex: Buffer.from(fresh.secretKey).toString("hex"),
+    inputMint: params.inputMint,
     outputMint: params.outputMint,
     outAmount: out_amount,
     swapSignature,
@@ -695,4 +699,62 @@ export async function resumeSwapAtFreshAddress(
   }
 
   return { swapSignature, outAmount, reshielded }
+}
+
+/**
+ * Finish a token-input private swap whose withdraw already settled but whose
+ * swap leg never ran — the fresh address holds the withdrawn input token in its
+ * ATA (plus leftover gas SOL).
+ *
+ * Recovery is safe and idempotent: it reads the ACTUAL token balance in the ATA
+ * and routes a swap to outputMint, avoiding touching or misinterpreting the
+ * self-funded gas SOL (#855).
+ */
+export async function resumeSwapFromTokenAtFreshAddress(
+  connection: Connection,
+  shieldedAddress: string,
+  freshSecretKeyHex: string,
+  inputMint: string,
+  outputMint: string,
+  reshield: boolean,
+  onReshielded?: (note: ReshieldedNote) => Promise<void>
+): Promise<ResumeSwapResult> {
+  const fresh = Keypair.fromSecretKey(
+    Uint8Array.from(Buffer.from(freshSecretKeyHex, "hex"))
+  )
+  const inputMintPk = new PublicKey(inputMint)
+  const ata = associatedTokenAddress(fresh.publicKey, inputMintPk)
+  const bal = await connection.getTokenAccountBalance(ata)
+  const tokenAmount = BigInt(bal.value.amount)
+  if (tokenAmount <= 0n) {
+    throw new Error("fresh address input token account has no balance to swap")
+  }
+
+  const { out_amount, swap_transaction } = await routeSwap(
+    fresh.publicKey.toBase58(),
+    outputMint,
+    tokenAmount,
+    inputMint
+  )
+  const tx = VersionedTransaction.deserialize(
+    Uint8Array.from(Buffer.from(swap_transaction, "base64"))
+  )
+  tx.sign([fresh])
+  const swapSignature = await connection.sendRawTransaction(tx.serialize(), {
+    maxRetries: 5
+  })
+  await waitForSwapConfirmation(connection, swapSignature)
+
+  let reshielded: ReshieldedNote | undefined
+  if (reshield && !isNativeSolOutput(outputMint)) {
+    reshielded = await reshieldToken(
+      connection,
+      fresh,
+      shieldedAddress,
+      outputMint,
+      onReshielded
+    )
+  }
+
+  return { swapSignature, outAmount: out_amount, reshielded }
 }

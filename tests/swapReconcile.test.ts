@@ -104,3 +104,73 @@ describe("isNativeSolOutput", () => {
     expect(isNativeSolOutput("EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v")).toBe(false)
   })
 })
+
+describe("token-input classifyStrand (#855)", () => {
+  it("resumes token swap when fresh address holds unswapped input token and gas", () => {
+    expect(
+      classifyStrand({
+        hasSignature: false,
+        ageMs: OLD,
+        solLamports: 6_500_000n, // leftover gas SOL
+        tokenAmount: 0n,
+        inputTokenAmount: 5_000_000n,
+        isTokenInput: true
+      })
+    ).toBe("resume")
+  })
+
+  it("leaves token swap unresolved if input token is present but address has no gas", () => {
+    expect(
+      classifyStrand({
+        hasSignature: false,
+        ageMs: OLD,
+        solLamports: 0n,
+        tokenAmount: 0n,
+        inputTokenAmount: 5_000_000n,
+        isTokenInput: true
+      })
+    ).toBe("unresolved")
+  })
+
+  it("never marks token -> SOL as landed when SOL is just leftover gas reserve (#855)", () => {
+    // 6.5M lamports leftover gas with 0 input token (e.g. withdraw failed or cancelled)
+    // must NOT be mistaken for a landed SOL swap output
+    expect(
+      classifyStrand({
+        hasSignature: false,
+        ageMs: OLD,
+        solLamports: 6_500_000n,
+        tokenAmount: 0n,
+        inputTokenAmount: 0n,
+        isTokenInput: true
+      })
+    ).toBe("unresolved")
+  })
+
+  it("marks token -> SOL as landed when SOL exceeds the gas funding reserve", () => {
+    expect(
+      classifyStrand({
+        hasSignature: false,
+        ageMs: OLD,
+        solLamports: 35_000_000n, // > 9_000_000n gas reserve
+        tokenAmount: 0n,
+        inputTokenAmount: 0n,
+        isTokenInput: true
+      })
+    ).toBe("landed")
+  })
+
+  it("marks token -> token as landed when input token is gone and output token is present", () => {
+    expect(
+      classifyStrand({
+        hasSignature: false,
+        ageMs: OLD,
+        solLamports: 6_500_000n,
+        tokenAmount: 250_000_000n, // output token arrived
+        inputTokenAmount: 0n,
+        isTokenInput: true
+      })
+    ).toBe("landed")
+  })
+})
+

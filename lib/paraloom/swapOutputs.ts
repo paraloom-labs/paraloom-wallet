@@ -8,6 +8,9 @@ export interface SwapOutput {
   freshAddress: string
   /** Secret key (hex) of the fresh address — needed to move the token later. */
   freshSecretKeyHex: string
+  /** Input mint (base58) or "SOL". Preserved so recovery can distinguish token-input
+   *  from SOL-input swaps and query the right accounts (#855). */
+  inputMint?: string
   /** Output mint (base58) or "SOL". */
   outputMint: string
   /** Output amount the route reported, in the out mint's base units. */

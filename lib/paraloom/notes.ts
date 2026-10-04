@@ -154,3 +154,62 @@ export async function shieldedTokenBalances(
   }
   return byMint
 }
+
+// Below this a native note costs more to withdraw (25 bps fee + tx fee) than it
+// is worth: it is dust. Hidden from the withdraw selection so the picker isn't
+// buried under worthless fillers, but still counted in the shielded total.
+export const WITHDRAW_DUST_LAMPORTS = 1_000_000n // 0.001 SOL
+export const NATIVE_ASSET_HEX = "00".repeat(32)
+export const SOL_MINT = "So11111111111111111111111111111111111111112"
+
+// Unspent notes worth withdrawing, largest first (#867).
+// If mint is omitted, "SOL", or SOL_MINT, filters for spendable native SOL notes (respecting WITHDRAW_DUST_LAMPORTS).
+// If mint is an SPL token mint, filters for notes matching n.mint with amount > 0n.
+export function spendableWithdrawNotes(all: ShieldedNote[], mint?: string): ShieldedNote[] {
+  const isSpl = Boolean(mint && mint !== "SOL" && mint !== SOL_MINT)
+  return all
+    .filter((n) => {
+      if (n.spent) return false
+      if (isSpl) {
+        return n.mint === mint && BigInt(n.amount) > 0n
+      } else {
+        return (!n.assetId || n.assetId === NATIVE_ASSET_HEX) && !n.mint && BigInt(n.amount) >= WITHDRAW_DUST_LAMPORTS
+      }
+    })
+    .sort((a, b) => {
+      const d = BigInt(b.amount) - BigInt(a.amount)
+      return d > 0n ? 1 : d < 0n ? -1 : 0
+    })
+}
+
+// Pick up to 2 spendable notes covering `amount` (a transact spends 1–2 and
+// returns change). Null if 2 notes can't cover it.
+export function selectWithdrawNotes(
+  all: ShieldedNote[],
+  amount: bigint,
+  mint?: string
+): ShieldedNote[] | null {
+  const sorted = spendableWithdrawNotes(all, mint)
+  const chosen: ShieldedNote[] = []
+  let sum = 0n
+  for (const n of sorted) {
+    chosen.push(n)
+    sum += BigInt(n.amount)
+    if (sum >= amount) return chosen
+    if (chosen.length === 2) break
+  }
+  return null
+}
+
+// Aliases for backwards compatibility:
+export function spendableSolNotes(all: ShieldedNote[]): ShieldedNote[] {
+  return spendableWithdrawNotes(all)
+}
+
+export function selectSolWithdrawNotes(
+  all: ShieldedNote[],
+  lamports: bigint
+): ShieldedNote[] | null {
+  return selectWithdrawNotes(all, lamports)
+}
+

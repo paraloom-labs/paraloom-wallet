@@ -20,7 +20,10 @@ import {
 } from "~lib/paraloom/privateSwap"
 import { persistReshieldedNote, recoverReshields } from "~lib/paraloom/reshieldRecovery"
 import { reconcileSwapOutputs } from "~lib/paraloom/swapReconcile"
+import { dropPhantomNotes } from "~lib/paraloom/dropPhantomNotes"
 import { assetIdForMint, NATIVE_ASSET_HEX } from "~lib/prover"
+
+export { dropPhantomNotes }
 
 // Private swaps are mainnet-only (Jupiter liquidity) and rebuilding the v3 tree
 // needs an archival RPC, so the swap always runs against the node's archival
@@ -797,46 +800,6 @@ async function runSwapJob(
 // note whose leaf never landed. Selecting one bricks the whole spend at
 // ensureLeafIndex ("note commitment not found in the on-chain tree"). Deposit
 // notes carry a trusted on-chain leafIndex and are never touched; only notes
-// located by commitment (no leafIndex) and older than a settlement grace window
-// are checked, so a just-settled note is never dropped on RPC lag. Dropping is a
-// soft mark-spent (the record + blinding are kept), so nothing real is lost.
-async function dropPhantomNotes(
-  connection: Connection,
-  account: string,
-  notes: ShieldedNote[]
-): Promise<ShieldedNote[]> {
-  const GRACE_MS = 120_000
-  const suspects = notes.filter(
-    (n) =>
-      n.leafIndex === undefined &&
-      !!n.commitment &&
-      Date.now() - n.createdAt > GRACE_MS
-  )
-  if (suspects.length === 0) return notes
-
-  let onchain: Set<string>
-  try {
-    const leaves = await fetchV3Leaves(connection)
-    onchain = new Set(leaves.map((l) => l.commitmentHex))
-  } catch {
-    return notes // cannot rebuild the tree safely — drop nothing
-  }
-
-  const dropped = new Set<string>()
-  for (const n of suspects) {
-    if (n.commitment && !onchain.has(n.commitment)) {
-      await markNoteSpentByCommitment(account, n.commitment)
-      dropped.add(n.commitment)
-    }
-  }
-  if (dropped.size > 0) {
-    console.log(
-      `[paraloom] reconciled ${dropped.size} phantom note(s) not present on-chain`
-    )
-  }
-  return notes.filter((n) => !(n.commitment && dropped.has(n.commitment)))
-}
-
 // The actual spend. Runs only after handlePrivateSwapRequest approved it.
 async function handlePrivateSwap(
   params: SwapRequestParams
@@ -872,7 +835,14 @@ async function handlePrivateSwap(
     const tokenCandidates = allNotes.filter(
       (n) => !n.spent && n.assetId === inputAssetId
     )
-    const tokenInputs = selectNotes(tokenCandidates, amount)
+    // Reconcile phantom SPL notes before selecting (#857), so an unsettled
+    // token deposit or failed swap cannot brick the token-input spend.
+    const tokenNotes = await dropPhantomNotes(
+      connection,
+      shieldedAddress,
+      tokenCandidates
+    )
+    const tokenInputs = selectNotes(tokenNotes, amount)
     const nativeCandidates = allNotes.filter(
       (n) => !n.spent && n.assetId === NATIVE_ASSET_HEX
     )

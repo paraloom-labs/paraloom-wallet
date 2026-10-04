@@ -946,7 +946,9 @@ export function Home({ onLock }: HomeProps) {
                         {g.items.map((e, i) => {
                           if (e.kind === "buy") {
                             const s = e.s
-                            const done = s.outAmount > 0 && !!s.swapSignature
+                            const isConfirmed =
+                              s.confirmed ?? (s.status ? s.status === "confirmed" : true)
+                            const done = isConfirmed && s.outAmount > 0 && !!s.swapSignature
                             const isSolOut =
                               s.outputMint === "SOL" || s.outputMint === WSOL_MINT
                             const sym = isSolOut

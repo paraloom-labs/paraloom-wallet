@@ -48,8 +48,43 @@ export async function reconcileSwapOutputs(
     const outputs = await listSwapOutputs()
     const now = Date.now()
     for (const o of outputs) {
-      if (o.swapSignature) continue
       if (now - o.createdAt < RESUME_GRACE_MS) continue
+
+      // If the swap was already verified confirmed on-chain, skip it (#856).
+      if (o.confirmed === true || o.status === "confirmed") continue
+
+      // If the row carries a submitted signature but has not yet confirmed,
+      // verify whether the transaction actually landed on-chain (#856).
+      if (o.swapSignature) {
+        let isConfirmed = false
+        try {
+          const status = await connection.getSignatureStatus(o.swapSignature, {
+            searchTransactionHistory: true
+          })
+          const conf = status.value?.confirmationStatus
+          if (
+            (conf === "confirmed" || conf === "finalized") &&
+            status.value?.err === null
+          ) {
+            isConfirmed = true
+          }
+        } catch {
+          // RPC blip: retry on the next open rather than guess
+          continue
+        }
+
+        if (isConfirmed) {
+          // Verified confirmed on-chain! Mark confirmed and continue.
+          await saveSwapOutput({
+            ...o,
+            status: "confirmed",
+            confirmed: true
+          })
+          continue
+        }
+        // The submitted signature was dropped, expired, or failed on-chain.
+        // Fall through to inspect the fresh address balances and recover funds!
+      }
 
       const freshPub = new PublicKey(o.freshAddress)
       let solLamports = 0n
@@ -108,7 +143,9 @@ export async function reconcileSwapOutputs(
           await saveSwapOutput({
             ...o,
             outAmount: r.outAmount,
-            swapSignature: r.swapSignature
+            swapSignature: r.swapSignature,
+            status: "confirmed",
+            confirmed: true
           })
           if (r.reshielded) {
             await persistReshieldedNote(shieldedAddress, r.reshielded)
@@ -134,7 +171,9 @@ export async function reconcileSwapOutputs(
           await saveSwapOutput({
             ...o,
             outAmount: Number(tokenAmount),
-            swapSignature: sig
+            swapSignature: sig,
+            status: "confirmed",
+            confirmed: true
           })
           resolved++
         } catch (e) {

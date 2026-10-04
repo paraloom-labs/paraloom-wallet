@@ -1,8 +1,10 @@
 import {
   addDiscoveredNote,
   addNote,
+  confirmNote,
   getNotes,
   markNoteSpentByIdentity,
+  retirePendingNotes,
   shieldedBalance,
   shieldedTokenBalances,
   type ShieldedNote
@@ -199,4 +201,69 @@ describe("note storage", () => {
     await addNote(ACCOUNT, deposit({ signature: "s2", spent: true }))
     expect(await shieldedBalance(ACCOUNT)).toBe(1000n)
   })
+
+  it("excludes pending notes from native balance and token balances (#853)", async () => {
+    const USDC = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"
+    await addNote(ACCOUNT, deposit({ signature: "p-sol", amount: "5000", pending: true }))
+    await addNote(
+      ACCOUNT,
+      deposit({ signature: "p-spl", mint: USDC, amount: "1000", pending: true })
+    )
+    await addNote(ACCOUNT, deposit({ signature: "c-sol", amount: "2000" }))
+
+    expect(await shieldedBalance(ACCOUNT)).toBe(2000n)
+    expect(await shieldedTokenBalances(ACCOUNT)).toEqual({})
+  })
+
+  it("promotes pending note to confirmed when confirmed note is added with same signature (#853)", async () => {
+    const USDC = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"
+    await addNote(
+      ACCOUNT,
+      deposit({ signature: "tx1", mint: USDC, amount: "1000", pending: true })
+    )
+    expect(await shieldedTokenBalances(ACCOUNT)).toEqual({})
+
+    // When confirmation lands, addNote promotes existing note
+    await addNote(
+      ACCOUNT,
+      deposit({ signature: "tx1", mint: USDC, amount: "1000", pending: false })
+    )
+    expect(await shieldedTokenBalances(ACCOUNT)).toEqual({ [USDC]: 1000n })
+    const notes = await getNotes(ACCOUNT)
+    expect(notes).toHaveLength(1)
+    expect(notes[0].pending).toBe(false)
+  })
+
+  it("confirmNote marks pending note confirmed by signature (#853)", async () => {
+    await addNote(ACCOUNT, deposit({ signature: "tx2", amount: "3000", pending: true }))
+    expect(await shieldedBalance(ACCOUNT)).toBe(0n)
+
+    await confirmNote(ACCOUNT, "tx2")
+    expect(await shieldedBalance(ACCOUNT)).toBe(3000n)
+  })
+
+  it("retirePendingNotes removes pending notes for a specific mint or SOL (#853)", async () => {
+    const USDC = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"
+    const USDT = "Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB"
+
+    await addNote(ACCOUNT, deposit({ signature: "p1", mint: USDC, amount: "100", pending: true }))
+    await addNote(ACCOUNT, deposit({ signature: "c1", mint: USDC, amount: "200", pending: false }))
+    await addNote(ACCOUNT, deposit({ signature: "p2", mint: USDT, amount: "300", pending: true }))
+    await addNote(ACCOUNT, deposit({ signature: "p3", amount: "400", pending: true }))
+
+    // Retire only USDC pending notes
+    await retirePendingNotes(ACCOUNT, USDC)
+
+    const notes = await getNotes(ACCOUNT)
+    expect(notes.find((n) => n.signature === "p1")).toBeUndefined()
+    expect(notes.find((n) => n.signature === "c1")).toBeDefined()
+    expect(notes.find((n) => n.signature === "p2")).toBeDefined()
+    expect(notes.find((n) => n.signature === "p3")).toBeDefined()
+
+    // Retire native pending notes
+    await retirePendingNotes(ACCOUNT)
+    const notes2 = await getNotes(ACCOUNT)
+    expect(notes2.find((n) => n.signature === "p3")).toBeUndefined()
+  })
 })
+

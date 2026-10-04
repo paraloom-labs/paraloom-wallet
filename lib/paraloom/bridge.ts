@@ -253,7 +253,10 @@ export async function depositSpl(
   }
   // Tolerant confirm (not the hard blockhash deadline): a busy mainnet must not
   // throw "block height exceeded" on a deposit that actually lands.
-  await confirmBySignatureStatus(connection, signature)
+  const confirmed = await confirmBySignatureStatus(connection, signature)
+  if (!confirmed) {
+    throw new Error(`deposit confirmation timed out for ${signature}`)
+  }
 
   return result
 }

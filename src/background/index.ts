@@ -870,11 +870,11 @@ async function handlePrivateSwap(
     )
     const allNotes = await getNotes(shieldedAddress)
     const tokenCandidates = allNotes.filter(
-      (n) => !n.spent && n.assetId === inputAssetId
+      (n) => !n.spent && !n.pending && n.assetId === inputAssetId
     )
     const tokenInputs = selectNotes(tokenCandidates, amount)
     const nativeCandidates = allNotes.filter(
-      (n) => !n.spent && n.assetId === NATIVE_ASSET_HEX
+      (n) => !n.spent && !n.pending && n.assetId === NATIVE_ASSET_HEX
     )
     const gasNotes = await dropPhantomNotes(
       connection,
@@ -905,7 +905,7 @@ async function handlePrivateSwap(
         reshield: params.reshield ?? true
       },
       undefined,
-      (note) => persistReshieldedNote(shieldedAddress, note)
+      (note) => persistReshieldedNote(shieldedAddress, note, true)
     )
     void recordActivity(Date.now())
     if (tokenResult.reshielded) {
@@ -923,7 +923,7 @@ async function handlePrivateSwap(
   }
 
   const candidates = (await getNotes(shieldedAddress)).filter(
-    (n) => !n.spent && n.assetId === NATIVE_ASSET_HEX
+    (n) => !n.spent && !n.pending && n.assetId === NATIVE_ASSET_HEX
   )
   // Reconcile out phantom notes (leftovers from swaps that never settled)
   // before selecting, so a stale note can't brick the spend.
@@ -945,7 +945,7 @@ async function handlePrivateSwap(
     undefined,
     // Persist the re-shielded note the instant its deposit is submitted, so a
     // confirmation timeout or worker eviction cannot orphan the shielded balance.
-    (note) => persistReshieldedNote(shieldedAddress, note)
+    (note) => persistReshieldedNote(shieldedAddress, note, true)
   )
 
   // The fresh key + output are persisted inside privateSwap the instant the swap

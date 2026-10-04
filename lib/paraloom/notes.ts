@@ -27,6 +27,10 @@ export interface ShieldedNote {
   // recorded at deposit (from DepositNoteEvent) or located by commitment for
   // received notes. Spending needs it for the membership path.
   leafIndex?: number
+  // Pending deposit (#853): persisted early at submit time to preserve the
+  // blinding, but excluded from spendable balance and input selection until
+  // confirmed on-chain.
+  pending?: boolean
 }
 
 const NOTES_KEY = "paraloom_notes"
@@ -54,11 +58,53 @@ export async function addNote(account: string, note: ShieldedNote): Promise<void
   // persisted more than once — the early on-submit persist AND the end-of-flow
   // persist AND the recovery scan all target the same deposit — so dedupe here
   // rather than double-counting the balance.
-  if (note.signature && existing.some((n) => n.signature === note.signature)) {
-    return
+  // If the existing note was saved as pending and is now confirmed, promote it (#853).
+  if (note.signature) {
+    const idx = existing.findIndex((n) => n.signature === note.signature)
+    if (idx >= 0) {
+      if (existing[idx].pending && !note.pending) {
+        all[account] = existing.map((n, i) =>
+          i === idx ? { ...n, pending: false } : n
+        )
+        await writeAll(all)
+      }
+      return
+    }
   }
   all[account] = [...existing, note]
   await writeAll(all)
+}
+
+// Retire pending notes for a given mint (or native SOL if undefined) when a
+// retry or replacement replaces them (#853).
+export async function retirePendingNotes(
+  account: string,
+  mint?: string
+): Promise<void> {
+  const all = await readAll()
+  const notes = all[account] ?? []
+  const filtered = notes.filter(
+    (n) => !(n.pending && (mint !== undefined ? n.mint === mint : !n.mint))
+  )
+  if (filtered.length !== notes.length) {
+    all[account] = filtered
+    await writeAll(all)
+  }
+}
+
+// Mark a pending deposit note as confirmed by signature (#853).
+export async function confirmNote(account: string, signature: string): Promise<void> {
+  const all = await readAll()
+  const notes = all[account] ?? []
+  let changed = false
+  all[account] = notes.map((n) => {
+    if (n.signature === signature && n.pending) {
+      changed = true
+      return { ...n, pending: false }
+    }
+    return n
+  })
+  if (changed) await writeAll(all)
 }
 
 // Mark the note with this deposit signature as spent (after a withdrawal
@@ -137,19 +183,20 @@ export async function markNoteSpentByIdentity(account: string, note: ShieldedNot
 export async function shieldedBalance(account: string): Promise<bigint> {
   const notes = await getNotes(account)
   return notes
-    .filter((n) => !n.spent && !n.mint)
+    .filter((n) => !n.spent && !n.pending && !n.mint)
     .reduce((sum, n) => sum + BigInt(n.amount), 0n)
 }
 
 // Unspent shielded SPL balances keyed by base58 mint (#779). Each amount is in
 // that mint's own base units, kept separate from the native lamports sum.
+// Pending deposits (#853) are excluded until confirmed on-chain.
 export async function shieldedTokenBalances(
   account: string
 ): Promise<Record<string, bigint>> {
   const notes = await getNotes(account)
   const byMint: Record<string, bigint> = {}
   for (const n of notes) {
-    if (n.spent || !n.mint) continue
+    if (n.spent || n.pending || !n.mint) continue
     byMint[n.mint] = (byMint[n.mint] ?? 0n) + BigInt(n.amount)
   }
   return byMint

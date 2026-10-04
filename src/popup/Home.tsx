@@ -1179,8 +1179,8 @@ export function Home({ onLock }: HomeProps) {
 
                   {activityDetail.kind === "buy" && activityDetail.pending && (
                     <p className="detail-note">
-                      Still pending after a while? Your funds are safe in your shielded
-                      balance. Dismissing only clears this row.
+                      Still pending after a while? Dismissing hides this row from your activity.
+                      Any funds at the fresh address remain safe and recoverable.
                     </p>
                   )}
 

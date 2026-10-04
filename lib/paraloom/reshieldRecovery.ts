@@ -47,7 +47,7 @@ export async function recoverReshields(
   shieldedAddress: string
 ): Promise<number> {
   let recovered = 0
-  const outputs = await listSwapOutputs()
+  const outputs = await listSwapOutputs(true)
   for (const o of outputs) {
     if (!o.reshield || !o.swapSignature || o.outputMint === "SOL") continue
     if (o.reshieldRecovered) continue

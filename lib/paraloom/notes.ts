@@ -154,3 +154,68 @@ export async function shieldedTokenBalances(
   }
   return byMint
 }
+
+// Below this a native note costs more to withdraw (25 bps fee + tx fee) than it
+// is worth: it is dust. Hidden from the withdraw selection so the picker isn't
+// buried under worthless fillers, but still counted in the shielded total.
+export const WITHDRAW_DUST_LAMPORTS = 1_000_000n // 0.001 SOL
+
+// Unspent notes worth withdrawing for the specified mint (or native SOL), largest first (#867).
+// For native SOL, filters by dust threshold (0.001 SOL).
+// For SPL tokens, filters by matching mint and amount > 0.
+export function spendableWithdrawNotes(
+  all: ShieldedNote[],
+  mint: string = "SOL"
+): ShieldedNote[] {
+  if (mint === "SOL" || !mint) {
+    return all
+      .filter(
+        (n) =>
+          !n.spent &&
+          !n.mint &&
+          BigInt(n.amount) >= WITHDRAW_DUST_LAMPORTS
+      )
+      .sort((a, b) => {
+        const d = BigInt(b.amount) - BigInt(a.amount)
+        return d > 0n ? 1 : d < 0n ? -1 : 0
+      })
+  }
+  return all
+    .filter((n) => !n.spent && n.mint === mint && BigInt(n.amount) > 0n)
+    .sort((a, b) => {
+      const d = BigInt(b.amount) - BigInt(a.amount)
+      return d > 0n ? 1 : d < 0n ? -1 : 0
+    })
+}
+
+// Pick up to 2 spendable notes covering `amountUnits` (a transact spends 1–2 and
+// returns change). Null if 2 notes can't cover it.
+export function selectWithdrawNotes(
+  all: ShieldedNote[],
+  amountUnits: bigint,
+  mint: string = "SOL"
+): ShieldedNote[] | null {
+  const sorted = spendableWithdrawNotes(all, mint)
+  const chosen: ShieldedNote[] = []
+  let sum = 0n
+  for (const n of sorted) {
+    chosen.push(n)
+    sum += BigInt(n.amount)
+    if (sum >= amountUnits) return chosen
+    if (chosen.length === 2) break
+  }
+  return null
+}
+
+// Unspent native (non-token) notes worth withdrawing, largest first.
+export function spendableSolNotes(all: ShieldedNote[]): ShieldedNote[] {
+  return spendableWithdrawNotes(all, "SOL")
+}
+
+// Pick up to 2 spendable notes covering `lamports` for native SOL.
+export function selectSolWithdrawNotes(
+  all: ShieldedNote[],
+  lamports: bigint
+): ShieldedNote[] | null {
+  return selectWithdrawNotes(all, lamports, "SOL")
+}

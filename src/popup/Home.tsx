@@ -7,8 +7,36 @@ import { useWalletStore } from "~lib/store/walletStore"
 import { deriveKeypairFromSeed, decryptWallet, decryptSeedPhrase, deriveBoxKeypair, KDF_VERSION_SCRYPT } from "~lib/crypto/keyManagement"
 import { getStoredWallet } from "~lib/storage/secure"
 import type { Account } from "~lib/store/walletStore"
-import { getConnection, deposit, getSolBalance, solanaAddress, solanaAddressToBytes } from "~lib/paraloom/bridge"
-import { addNote, getNotes, markNoteSpent, shieldedBalance, shieldedTokenBalances, type ShieldedNote } from "~lib/paraloom/notes"
+import { Keypair, PublicKey } from "@solana/web3.js"
+import {
+  getConnection,
+  deposit,
+  getSolBalance,
+  solanaAddress,
+  solanaAddressToBytes,
+  associatedTokenAddress,
+  createTokenAccount
+} from "~lib/paraloom/bridge"
+import {
+  addNote,
+  getNotes,
+  markNoteSpent,
+  shieldedBalance,
+  shieldedTokenBalances,
+  spendableWithdrawNotes,
+  selectWithdrawNotes,
+  spendableSolNotes,
+  selectSolWithdrawNotes,
+  WITHDRAW_DUST_LAMPORTS,
+  type ShieldedNote
+} from "~lib/paraloom/notes"
+export {
+  spendableWithdrawNotes,
+  selectWithdrawNotes,
+  spendableSolNotes,
+  selectSolWithdrawNotes,
+  WITHDRAW_DUST_LAMPORTS
+}
 
 // Known shielded SPL tokens for display; unknown mints fall back to a truncated
 // mint and raw base units.
@@ -42,43 +70,7 @@ const AUTO_LOCK_OPTIONS: { value: number; label: string }[] = [
 ]
 const DEFAULT_AUTO_LOCK_MINUTES = 60
 
-// Below this a native note costs more to withdraw (25 bps fee + tx fee) than it
-// is worth: it is dust. Hidden from the withdraw selection so the picker isn't
-// buried under worthless fillers, but still counted in the shielded total.
-const WITHDRAW_DUST_LAMPORTS = 1_000_000n // 0.001 SOL
 
-// Unspent native (non-token) notes worth withdrawing, largest first.
-function spendableSolNotes(all: ShieldedNote[]): ShieldedNote[] {
-  return all
-    .filter(
-      (n) =>
-        !n.spent &&
-        (!n.assetId || n.assetId === NATIVE_ASSET_HEX) &&
-        BigInt(n.amount) >= WITHDRAW_DUST_LAMPORTS
-    )
-    .sort((a, b) => {
-      const d = BigInt(b.amount) - BigInt(a.amount)
-      return d > 0n ? 1 : d < 0n ? -1 : 0
-    })
-}
-
-// Pick up to 2 spendable notes covering `lamports` (a transact spends 1–2 and
-// returns change). Null if 2 notes can't cover it.
-function selectSolWithdrawNotes(
-  all: ShieldedNote[],
-  lamports: bigint
-): ShieldedNote[] | null {
-  const sorted = spendableSolNotes(all)
-  const chosen: ShieldedNote[] = []
-  let sum = 0n
-  for (const n of sorted) {
-    chosen.push(n)
-    sum += BigInt(n.amount)
-    if (sum >= lamports) return chosen
-    if (chosen.length === 2) break
-  }
-  return null
-}
 
 interface Token {
   symbol: string
@@ -139,6 +131,7 @@ export function Home({ onLock }: HomeProps) {
   const [withdrawAddress, setWithdrawAddress] = useState("")
   const [withdrawAmount, setWithdrawAmount] = useState("")
   const [withdrawing, setWithdrawing] = useState(false)
+  const [withdrawMint, setWithdrawMint] = useState<string>("SOL")
   const [showTransferModal, setShowTransferModal] = useState(false)
   const [transferAddress, setTransferAddress] = useState("")
   const [transferAmount, setTransferAmount] = useState("")
@@ -413,17 +406,25 @@ export function Home({ onLock }: HomeProps) {
       showToast("Enter an amount to withdraw", "error")
       return
     }
-    const lamports = BigInt(Math.round(amt * 1e9))
+
+    const isSpl = withdrawMint !== "SOL" && withdrawMint !== SOL_MINT
+    const tokenMeta = isSpl
+      ? (SHIELDED_TOKEN_META[withdrawMint] || { symbol: `${withdrawMint.slice(0, 4)}…`, decimals: 6 })
+      : null
+    const decimals = isSpl ? tokenMeta!.decimals : 9
+    const symbol = isSpl ? tokenMeta!.symbol : "SOL"
+    const units = BigInt(Math.round(amt * 10 ** decimals))
+
     // Pick up to 2 spendable notes covering the amount; the wallet returns the
     // change as a new note, so the user withdraws a chosen amount instead of one
     // whole note. A single withdraw settles at most 2 notes.
-    const inputs = selectSolWithdrawNotes(notes, lamports)
+    const inputs = selectWithdrawNotes(notes, units, withdrawMint)
     if (!inputs) {
-      const max = spendableSolNotes(notes)
+      const max = spendableWithdrawNotes(notes, withdrawMint)
         .slice(0, 2)
         .reduce((s, n) => s + BigInt(n.amount), 0n)
       showToast(
-        `Max ${(Number(max) / 1e9).toFixed(4)} SOL per withdraw (2 notes); withdraw in parts`,
+        `Max ${(Number(max) / 10 ** decimals).toFixed(4)} ${symbol} per withdraw (2 notes); withdraw in parts`,
         "error"
       )
       return
@@ -431,38 +432,102 @@ export function Home({ onLock }: HomeProps) {
     setWithdrawing(true)
     try {
       const conn = getConnection(network)
-      const before = await getSolBalance(conn, targetBytes)
-      // Circuit v3 (#350): a withdraw is a transact with ext_amount < 0; the
-      // proof binds the destination and the quorum settles it. spendV3 marks the
-      // inputs spent and books any change note ONLY once settlement is confirmed
-      // — the recipient balance rising above `before` — so a failed settlement
-      // never hides still-spendable funds (paraloom-core#792).
-      const { requestId, settled } = await spendV3(
-        conn,
-        wallet.shieldedAddress,
-        Buffer.from(wallet.spendPrivkey).toString("hex"),
-        addressBoxPubHex(wallet.shieldedAddress),
-        inputs,
-        lamports,
-        { kind: "withdraw", recipientSolanaHex: Buffer.from(targetBytes).toString("hex") },
-        {
-          confirmSettled: async () => {
-            for (let i = 0; i < 25; i++) {
-              await new Promise((r) => setTimeout(r, 2000))
-              if ((await getSolBalance(conn, targetBytes)) > before) return true
+      if (!isSpl) {
+        const before = await getSolBalance(conn, targetBytes)
+        // Circuit v3 (#350): a withdraw is a transact with ext_amount < 0; the
+        // proof binds the destination and the quorum settles it. spendV3 marks the
+        // inputs spent and books any change note ONLY once settlement is confirmed
+        // — the recipient balance rising above `before` — so a failed settlement
+        // never hides still-spendable funds (paraloom-core#792).
+        const { requestId, settled } = await spendV3(
+          conn,
+          wallet.shieldedAddress,
+          Buffer.from(wallet.spendPrivkey).toString("hex"),
+          addressBoxPubHex(wallet.shieldedAddress),
+          inputs,
+          units,
+          { kind: "withdraw", recipientSolanaHex: Buffer.from(targetBytes).toString("hex") },
+          {
+            confirmSettled: async () => {
+              for (let i = 0; i < 25; i++) {
+                await new Promise((r) => setTimeout(r, 2000))
+                if ((await getSolBalance(conn, targetBytes)) > before) return true
+              }
+              return false
             }
-            return false
+          }
+        )
+        if (settled) {
+          showToast(`Withdrew ${amt.toFixed(4)} SOL to Solana`, "success")
+          setShowWithdrawModal(false)
+          setWithdrawAddress("")
+          setWithdrawAmount("")
+          await loadBalances()
+        } else {
+          showToast(`Submitted (${requestId.slice(0, 14)}…); settlement pending`, "info")
+        }
+      } else {
+        // Shielded SPL Token withdrawal (paraloom-core#867)
+        const recipientPubkey = new PublicKey(target)
+        const mintPubkey = new PublicKey(withdrawMint)
+        const recipientAta = associatedTokenAddress(recipientPubkey, mintPubkey)
+
+        // If target is user's own address, ensure the ATA exists on-chain before withdraw
+        if (target === solanaAddress(wallet.publicKey)) {
+          try {
+            await createTokenAccount(
+              conn,
+              Keypair.fromSecretKey(wallet.secretKey),
+              recipientPubkey,
+              mintPubkey
+            )
+          } catch (e) {
+            console.warn("createTokenAccount warning:", e)
           }
         }
-      )
-      if (settled) {
-        showToast(`Withdrew ${amt.toFixed(4)} SOL to Solana`, "success")
-        setShowWithdrawModal(false)
-        setWithdrawAddress("")
-        setWithdrawAmount("")
-        await loadBalances()
-      } else {
-        showToast(`Submitted (${requestId.slice(0, 14)}…); settlement pending`, "info")
+
+        const beforeBalance = await (async () => {
+          try {
+            const resp = await conn.getTokenAccountBalance(recipientAta)
+            return BigInt(resp.value.amount)
+          } catch {
+            return 0n
+          }
+        })()
+
+        const recipientAtaBytes = recipientAta.toBytes()
+        const recipientSolanaHex = Buffer.from(recipientAtaBytes).toString("hex")
+
+        const { requestId, settled } = await spendV3(
+          conn,
+          wallet.shieldedAddress,
+          Buffer.from(wallet.spendPrivkey).toString("hex"),
+          addressBoxPubHex(wallet.shieldedAddress),
+          inputs,
+          units,
+          { kind: "withdraw", recipientSolanaHex },
+          {
+            confirmSettled: async () => {
+              for (let i = 0; i < 25; i++) {
+                await new Promise((r) => setTimeout(r, 2000))
+                try {
+                  const resp = await conn.getTokenAccountBalance(recipientAta)
+                  if (BigInt(resp.value.amount) > beforeBalance) return true
+                } catch {}
+              }
+              return false
+            }
+          }
+        )
+        if (settled) {
+          showToast(`Withdrew ${amt.toFixed(4)} ${symbol} to Solana`, "success")
+          setShowWithdrawModal(false)
+          setWithdrawAddress("")
+          setWithdrawAmount("")
+          await loadBalances()
+        } else {
+          showToast(`Submitted (${requestId.slice(0, 14)}…); settlement pending`, "info")
+        }
       }
     } catch (e) {
       showToast(`Withdraw failed: ${e instanceof Error ? e.message : "error"}`, "error")
@@ -1694,7 +1759,7 @@ export function Home({ onLock }: HomeProps) {
               <div className="modal-header-left">
                 <div>
                   <h3>Withdraw to Solana</h3>
-                  <span className="modal-token-name">Move shielded SOL back to a Solana address</span>
+                  <span className="modal-token-name">Move shielded funds back to a Solana address</span>
                 </div>
               </div>
               <button className="modal-close" onClick={() => !withdrawing && setShowWithdrawModal(false)}>
@@ -1706,6 +1771,52 @@ export function Home({ onLock }: HomeProps) {
             </div>
 
             <div className="send-form">
+              {/* Asset Selector (#867) */}
+              {(() => {
+                const availableMints: { mint: string; symbol: string; decimals: number }[] = [
+                  { mint: "SOL", symbol: "SOL", decimals: 9 }
+                ]
+                for (const [m, amt] of Object.entries(shieldedTokens)) {
+                  if (amt > 0n) {
+                    const meta = SHIELDED_TOKEN_META[m]
+                    availableMints.push({
+                      mint: m,
+                      symbol: meta?.symbol ?? `${m.slice(0, 4)}…`,
+                      decimals: meta?.decimals ?? 6
+                    })
+                  }
+                }
+                if (availableMints.length > 1) {
+                  return (
+                    <div className="form-group">
+                      <label className="form-label">Asset</label>
+                      <div className="token-select-group" style={{ display: "flex", gap: "8px", marginBottom: "8px" }}>
+                        {availableMints.map((tok) => (
+                          <button
+                            key={tok.mint}
+                            type="button"
+                            className={`button ${withdrawMint === tok.mint ? "button-primary" : "button-secondary"}`}
+                            style={{
+                              padding: "6px 12px",
+                              fontSize: "13px",
+                              borderRadius: "6px",
+                              cursor: "pointer"
+                            }}
+                            onClick={() => {
+                              setWithdrawMint(tok.mint)
+                              setWithdrawAmount("")
+                            }}
+                          >
+                            {tok.symbol}
+                          </button>
+                        ))}
+                      </div>
+                    </div>
+                  )
+                }
+                return null
+              })()}
+
               <div className="form-group">
                 <label className="form-label">Destination Solana address</label>
                 <input
@@ -1719,15 +1830,24 @@ export function Home({ onLock }: HomeProps) {
               </div>
 
               {(() => {
-                const spend = spendableSolNotes(notes)
+                const isSpl = withdrawMint !== "SOL" && withdrawMint !== SOL_MINT
+                const meta = isSpl
+                  ? (SHIELDED_TOKEN_META[withdrawMint] || { symbol: `${withdrawMint.slice(0, 4)}…`, decimals: 6 })
+                  : { symbol: "SOL", decimals: 9 }
+                const decimals = meta.decimals
+                const symbol = meta.symbol
+
+                const spend = spendableWithdrawNotes(notes, withdrawMint)
                 const spendSum = spend.reduce((s, n) => s + BigInt(n.amount), 0n)
                 const maxOne = spend.slice(0, 2).reduce((s, n) => s + BigInt(n.amount), 0n)
-                const allSol = notes.filter(
-                  (n) => !n.spent && (!n.assetId || n.assetId === NATIVE_ASSET_HEX)
+
+                const allAssetNotes = notes.filter((n) =>
+                  !n.spent && (!isSpl ? (!n.assetId || n.assetId === NATIVE_ASSET_HEX) : n.mint === withdrawMint)
                 )
-                const dustCount = allSol.length - spend.length
+                const dustCount = allAssetNotes.length - spend.length
                 const dustSum =
-                  allSol.reduce((s, n) => s + BigInt(n.amount), 0n) - spendSum
+                  allAssetNotes.reduce((s, n) => s + BigInt(n.amount), 0n) - spendSum
+
                 return (
                   <div className="form-group">
                     <label className="form-label">
@@ -1736,25 +1856,28 @@ export function Home({ onLock }: HomeProps) {
                         <button
                           type="button"
                           className="label-max"
-                          onClick={() => setWithdrawAmount(String(Number(maxOne) / 1e9))}
+                          onClick={() => setWithdrawAmount(String(Number(maxOne) / (10 ** decimals)))}
                         >
-                          Max {(Number(maxOne) / 1e9).toFixed(4)} SOL
+                          Max {(Number(maxOne) / (10 ** decimals)).toFixed(4)} {symbol}
                         </button>
                       )}
                     </label>
-                    <input
-                      type="number"
-                      className="form-input"
-                      placeholder="0.0"
-                      value={withdrawAmount}
-                      onChange={(e) => setWithdrawAmount(e.target.value)}
-                    />
+                    <div className="amount-input-wrapper">
+                      <input
+                        type="number"
+                        className="form-input amount-input"
+                        placeholder="0.0"
+                        value={withdrawAmount}
+                        onChange={(e) => setWithdrawAmount(e.target.value)}
+                      />
+                      <div className="input-suffix">{symbol}</div>
+                    </div>
                     <div className="balance-info">
                       {spend.length === 0
                         ? "No spendable notes — deposit first"
-                        : `Up to ${(Number(maxOne) / 1e9).toFixed(4)} SOL per withdraw (2 notes at a time)`}
-                      {dustCount > 0 &&
-                        ` · ${(Number(dustSum) / 1e9).toFixed(4)} SOL in ${dustCount} dust note(s) hidden`}
+                        : `Up to ${(Number(maxOne) / (10 ** decimals)).toFixed(4)} ${symbol} per withdraw (2 notes at a time)`}
+                      {!isSpl && dustCount > 0 &&
+                        ` · ${(Number(dustSum) / (10 ** decimals)).toFixed(4)} SOL in ${dustCount} dust note(s) hidden`}
                     </div>
                   </div>
                 )
@@ -1767,7 +1890,7 @@ export function Home({ onLock }: HomeProps) {
                   !withdrawAddress.trim() ||
                   !withdrawAmount ||
                   Number(withdrawAmount) <= 0 ||
-                  spendableSolNotes(notes).length === 0
+                  spendableWithdrawNotes(notes, withdrawMint).length === 0
                 }
                 onClick={handleWithdraw}
               >

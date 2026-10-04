@@ -5,6 +5,8 @@ import {
   markNoteSpentByIdentity,
   shieldedBalance,
   shieldedTokenBalances,
+  unspentSolNotes,
+  selectTransferNotes,
   type ShieldedNote
 } from "~lib/paraloom/notes"
 import { beforeEach, describe, expect, it } from "vitest"
@@ -198,5 +200,68 @@ describe("note storage", () => {
     await addNote(ACCOUNT, deposit({ signature: "s1" }))
     await addNote(ACCOUNT, deposit({ signature: "s2", spent: true }))
     expect(await shieldedBalance(ACCOUNT)).toBe(1000n)
+  })
+})
+
+describe("unspentSolNotes & selectTransferNotes (#852)", () => {
+  const USDC = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"
+
+  it("filters out spent notes and SPL token notes", () => {
+    const sol1 = deposit({ amount: "100000000", signature: "sol-1" })
+    const sol2 = deposit({ amount: "200000000", signature: "sol-2" })
+    const spentSol = deposit({ amount: "300000000", signature: "sol-spent", spent: true })
+    const usdc = deposit({
+      amount: "500000000",
+      mint: USDC,
+      assetId: "aa".repeat(32),
+      signature: "usdc-1"
+    })
+
+    const unspent = unspentSolNotes([sol1, sol2, spentSol, usdc])
+    expect(unspent).toHaveLength(2)
+    expect(unspent.map((n) => n.signature)).toEqual(["sol-1", "sol-2"])
+  })
+
+  it("selects only native notes and never selects an SPL note for native transfer", () => {
+    const sol1 = deposit({ amount: "100000000", signature: "sol-1" })
+    const usdcLarge = deposit({
+      amount: "10000000000",
+      mint: USDC,
+      assetId: "aa".repeat(32),
+      signature: "usdc-huge"
+    })
+
+    // Requesting 50_000_000 lamports (0.05 SOL)
+    const selected = selectTransferNotes([sol1, usdcLarge], 50000000n)
+    expect(selected).not.toBeNull()
+    expect(selected).toHaveLength(1)
+    expect(selected![0].signature).toBe("sol-1")
+    expect(selected![0].mint).toBeUndefined()
+  })
+
+  it("returns null if native notes do not cover the transfer amount, even if SPL balance is large", () => {
+    const solSmall = deposit({ amount: "10000000", signature: "sol-small" }) // 0.01 SOL
+    const usdcLarge = deposit({
+      amount: "10000000000",
+      mint: USDC,
+      assetId: "aa".repeat(32),
+      signature: "usdc-huge"
+    })
+
+    // Transfer needs 50_000_000 lamports (0.05 SOL)
+    const selected = selectTransferNotes([solSmall, usdcLarge], 50000000n)
+    expect(selected).toBeNull()
+  })
+
+  it("sorts largest native notes first and caps at 2 notes", () => {
+    const sol1 = deposit({ amount: "1000", signature: "s1" })
+    const sol2 = deposit({ amount: "3000", signature: "s2" })
+    const sol3 = deposit({ amount: "2000", signature: "s3" })
+
+    const selected = selectTransferNotes([sol1, sol2, sol3], 4000n)
+    expect(selected).not.toBeNull()
+    expect(selected).toHaveLength(2)
+    expect(selected![0].amount).toBe("3000")
+    expect(selected![1].amount).toBe("2000")
   })
 })

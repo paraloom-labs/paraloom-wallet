@@ -154,3 +154,35 @@ export async function shieldedTokenBalances(
   }
   return byMint
 }
+
+// Native SOL asset ID (32 all-zero bytes in hex) (#852).
+export const NATIVE_SOL_ASSET_HEX = "00".repeat(32)
+
+// Unspent native SOL notes (excluding SPL token notes) (#852). A note is native
+// iff it carries no mint and its assetId is empty or the native all-zero ID.
+export function unspentSolNotes(all: ShieldedNote[]): ShieldedNote[] {
+  return all.filter(
+    (n) => !n.spent && !n.mint && (!n.assetId || n.assetId === NATIVE_SOL_ASSET_HEX)
+  )
+}
+
+// Select up to 2 unspent native notes covering `amount` (largest-first) (#852).
+// Returns null if unspent native notes cannot cover the amount.
+export function selectTransferNotes(
+  all: ShieldedNote[],
+  amount: bigint
+): ShieldedNote[] | null {
+  const sorted = unspentSolNotes(all).sort((a, b) => {
+    const d = BigInt(b.amount) - BigInt(a.amount)
+    return d > 0n ? 1 : d < 0n ? -1 : 0
+  })
+  const chosen: ShieldedNote[] = []
+  let sum = 0n
+  for (const n of sorted) {
+    chosen.push(n)
+    sum += BigInt(n.amount)
+    if (sum >= amount) return chosen
+    if (chosen.length === 2) break
+  }
+  return null
+}

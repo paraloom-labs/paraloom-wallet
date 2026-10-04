@@ -11,7 +11,7 @@ import {
   depositSpl,
   recoverReshieldedNote
 } from "~lib/paraloom/bridge"
-import { addNote } from "~lib/paraloom/notes"
+import { addNote, retirePendingNotes } from "~lib/paraloom/notes"
 import type { ReshieldedNote } from "~lib/paraloom/privateSwap"
 import { listSwapOutputs, saveSwapOutput } from "~lib/paraloom/swapOutputs"
 import { assetIdForMint } from "~lib/prover"
@@ -20,9 +20,11 @@ import { assetIdForMint } from "~lib/prover"
 // the instant a deposit is submitted (via the privateSwap onReshielded callback,
 // so a worker eviction cannot orphan it), at the end of the flow, and from the
 // recovery scan; addNote dedupes by deposit signature so double-persisting is safe.
+// When pending is true (#853), the note is kept as pending until confirmed.
 export async function persistReshieldedNote(
   shieldedAddress: string,
-  note: ReshieldedNote
+  note: ReshieldedNote,
+  pending = false
 ): Promise<void> {
   await addNote(shieldedAddress, {
     amount: note.amount,
@@ -32,7 +34,8 @@ export async function persistReshieldedNote(
     signature: note.depositSignature,
     createdAt: Date.now(),
     spent: false,
-    source: "deposit"
+    source: "deposit",
+    pending
   })
 }
 
@@ -81,8 +84,11 @@ export async function recoverReshields(
       const bal = await connection.getTokenAccountBalance(ata).catch(() => null)
       const tokenAmount = bal ? BigInt(bal.value.amount) : 0n
       if (tokenAmount > 0n) {
+        // Retire prior pending deposit notes for this mint (#853): tokens are
+        // still at the fresh address, so any prior unconfirmed deposit never landed.
+        await retirePendingNotes(shieldedAddress, o.outputMint)
         const assetId = await assetIdForMint(mintHex)
-        await depositSpl(
+        const dep = await depositSpl(
           connection,
           fresh,
           shieldedAddress,
@@ -91,14 +97,25 @@ export async function recoverReshields(
           assetId,
           undefined,
           (note) =>
-            persistReshieldedNote(shieldedAddress, {
-              assetId,
-              mint: o.outputMint,
-              amount: tokenAmount.toString(),
-              blindingHex: Buffer.from(note.blinding).toString("hex"),
-              depositSignature: note.signature
-            })
+            persistReshieldedNote(
+              shieldedAddress,
+              {
+                assetId,
+                mint: o.outputMint,
+                amount: tokenAmount.toString(),
+                blindingHex: Buffer.from(note.blinding).toString("hex"),
+                depositSignature: note.signature
+              },
+              true
+            )
         )
+        await persistReshieldedNote(shieldedAddress, {
+          assetId,
+          mint: o.outputMint,
+          amount: tokenAmount.toString(),
+          blindingHex: Buffer.from(dep.blinding).toString("hex"),
+          depositSignature: dep.signature
+        })
         await saveSwapOutput({ ...o, reshieldRecovered: true })
         recovered++
         console.log(`[paraloom] finished pending reshield at ${o.freshAddress}`)

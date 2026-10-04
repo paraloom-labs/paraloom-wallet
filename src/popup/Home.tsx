@@ -7,8 +7,20 @@ import { useWalletStore } from "~lib/store/walletStore"
 import { deriveKeypairFromSeed, decryptWallet, decryptSeedPhrase, deriveBoxKeypair, KDF_VERSION_SCRYPT } from "~lib/crypto/keyManagement"
 import { getStoredWallet } from "~lib/storage/secure"
 import type { Account } from "~lib/store/walletStore"
-import { getConnection, deposit, getSolBalance, solanaAddress, solanaAddressToBytes } from "~lib/paraloom/bridge"
-import { addNote, getNotes, markNoteSpent, shieldedBalance, shieldedTokenBalances, type ShieldedNote } from "~lib/paraloom/notes"
+import { getConnection, deposit, getSolBalance, solanaAddress, solanaAddressToBytes, associatedTokenAddress, createTokenAccount } from "~lib/paraloom/bridge"
+import { Keypair, PublicKey } from "@solana/web3.js"
+import {
+  addNote,
+  getNotes,
+  markNoteSpent,
+  shieldedBalance,
+  shieldedTokenBalances,
+  spendableWithdrawNotes,
+  selectWithdrawNotes,
+  spendableSolNotes,
+  selectSolWithdrawNotes,
+  type ShieldedNote
+} from "~lib/paraloom/notes"
 
 // Known shielded SPL tokens for display; unknown mints fall back to a truncated
 // mint and raw base units.
@@ -42,43 +54,6 @@ const AUTO_LOCK_OPTIONS: { value: number; label: string }[] = [
 ]
 const DEFAULT_AUTO_LOCK_MINUTES = 60
 
-// Below this a native note costs more to withdraw (25 bps fee + tx fee) than it
-// is worth: it is dust. Hidden from the withdraw selection so the picker isn't
-// buried under worthless fillers, but still counted in the shielded total.
-const WITHDRAW_DUST_LAMPORTS = 1_000_000n // 0.001 SOL
-
-// Unspent native (non-token) notes worth withdrawing, largest first.
-function spendableSolNotes(all: ShieldedNote[]): ShieldedNote[] {
-  return all
-    .filter(
-      (n) =>
-        !n.spent &&
-        (!n.assetId || n.assetId === NATIVE_ASSET_HEX) &&
-        BigInt(n.amount) >= WITHDRAW_DUST_LAMPORTS
-    )
-    .sort((a, b) => {
-      const d = BigInt(b.amount) - BigInt(a.amount)
-      return d > 0n ? 1 : d < 0n ? -1 : 0
-    })
-}
-
-// Pick up to 2 spendable notes covering `lamports` (a transact spends 1–2 and
-// returns change). Null if 2 notes can't cover it.
-function selectSolWithdrawNotes(
-  all: ShieldedNote[],
-  lamports: bigint
-): ShieldedNote[] | null {
-  const sorted = spendableSolNotes(all)
-  const chosen: ShieldedNote[] = []
-  let sum = 0n
-  for (const n of sorted) {
-    chosen.push(n)
-    sum += BigInt(n.amount)
-    if (sum >= lamports) return chosen
-    if (chosen.length === 2) break
-  }
-  return null
-}
 
 interface Token {
   symbol: string
@@ -138,6 +113,7 @@ export function Home({ onLock }: HomeProps) {
   const [showWithdrawModal, setShowWithdrawModal] = useState(false)
   const [withdrawAddress, setWithdrawAddress] = useState("")
   const [withdrawAmount, setWithdrawAmount] = useState("")
+  const [withdrawMint, setWithdrawMint] = useState<string>("SOL")
   const [withdrawing, setWithdrawing] = useState(false)
   const [showTransferModal, setShowTransferModal] = useState(false)
   const [transferAddress, setTransferAddress] = useState("")
@@ -413,17 +389,23 @@ export function Home({ onLock }: HomeProps) {
       showToast("Enter an amount to withdraw", "error")
       return
     }
-    const lamports = BigInt(Math.round(amt * 1e9))
+
+    const isSpl = withdrawMint !== "SOL" && withdrawMint !== SOL_MINT
+    const meta = isSpl ? SHIELDED_TOKEN_META[withdrawMint] : undefined
+    const decimals = isSpl ? (meta?.decimals ?? 6) : 9
+    const symbol = isSpl ? (meta?.symbol ?? "Token") : "SOL"
+    const amountUnits = BigInt(Math.round(amt * 10 ** decimals))
+
     // Pick up to 2 spendable notes covering the amount; the wallet returns the
     // change as a new note, so the user withdraws a chosen amount instead of one
     // whole note. A single withdraw settles at most 2 notes.
-    const inputs = selectSolWithdrawNotes(notes, lamports)
+    const inputs = selectWithdrawNotes(notes, amountUnits, withdrawMint)
     if (!inputs) {
-      const max = spendableSolNotes(notes)
+      const max = spendableWithdrawNotes(notes, withdrawMint)
         .slice(0, 2)
         .reduce((s, n) => s + BigInt(n.amount), 0n)
       showToast(
-        `Max ${(Number(max) / 1e9).toFixed(4)} SOL per withdraw (2 notes); withdraw in parts`,
+        `Max ${(Number(max) / 10 ** decimals).toFixed(4)} ${symbol} per withdraw (2 notes); withdraw in parts`,
         "error"
       )
       return
@@ -431,32 +413,73 @@ export function Home({ onLock }: HomeProps) {
     setWithdrawing(true)
     try {
       const conn = getConnection(network)
-      const before = await getSolBalance(conn, targetBytes)
+      let recipientHex: string
+      let confirmSettled: () => Promise<boolean>
+
+      if (isSpl) {
+        const targetPubkey = new PublicKey(target)
+        const mintPubkey = new PublicKey(withdrawMint)
+        const recipientAta = associatedTokenAddress(targetPubkey, mintPubkey)
+        recipientHex = recipientAta.toBuffer().toString("hex")
+
+        // If withdrawing to own wallet, ensure the ATA exists on-chain so the tokens can land
+        if (target === solanaAddress(wallet.publicKey)) {
+          try {
+            const payer = Keypair.fromSecretKey(wallet.secretKey)
+            await createTokenAccount(conn, payer, new PublicKey(wallet.publicKey), mintPubkey)
+          } catch {
+            // ATA may already exist or creation confirmed asynchronously
+          }
+        }
+
+        let beforeBal = 0n
+        try {
+          const res = await conn.getTokenAccountBalance(recipientAta)
+          beforeBal = BigInt(res.value.amount)
+        } catch {
+          // ATA does not exist yet or balance 0
+        }
+
+        confirmSettled = async () => {
+          for (let i = 0; i < 25; i++) {
+            await new Promise((r) => setTimeout(r, 2000))
+            try {
+              const res = await conn.getTokenAccountBalance(recipientAta)
+              if (BigInt(res.value.amount) > beforeBal) return true
+            } catch {
+              // keep polling
+            }
+          }
+          return false
+        }
+      } else {
+        recipientHex = Buffer.from(targetBytes).toString("hex")
+        const before = await getSolBalance(conn, targetBytes)
+        confirmSettled = async () => {
+          for (let i = 0; i < 25; i++) {
+            await new Promise((r) => setTimeout(r, 2000))
+            if ((await getSolBalance(conn, targetBytes)) > before) return true
+          }
+          return false
+        }
+      }
+
       // Circuit v3 (#350): a withdraw is a transact with ext_amount < 0; the
       // proof binds the destination and the quorum settles it. spendV3 marks the
       // inputs spent and books any change note ONLY once settlement is confirmed
-      // — the recipient balance rising above `before` — so a failed settlement
-      // never hides still-spendable funds (paraloom-core#792).
+      // — so a failed settlement never hides still-spendable funds (paraloom-core#792).
       const { requestId, settled } = await spendV3(
         conn,
         wallet.shieldedAddress,
         Buffer.from(wallet.spendPrivkey).toString("hex"),
         addressBoxPubHex(wallet.shieldedAddress),
         inputs,
-        lamports,
-        { kind: "withdraw", recipientSolanaHex: Buffer.from(targetBytes).toString("hex") },
-        {
-          confirmSettled: async () => {
-            for (let i = 0; i < 25; i++) {
-              await new Promise((r) => setTimeout(r, 2000))
-              if ((await getSolBalance(conn, targetBytes)) > before) return true
-            }
-            return false
-          }
-        }
+        amountUnits,
+        { kind: "withdraw", recipientSolanaHex: recipientHex },
+        { confirmSettled }
       )
       if (settled) {
-        showToast(`Withdrew ${amt.toFixed(4)} SOL to Solana`, "success")
+        showToast(`Withdrew ${amt.toFixed(4)} ${symbol} to Solana`, "success")
         setShowWithdrawModal(false)
         setWithdrawAddress("")
         setWithdrawAmount("")
@@ -829,7 +852,7 @@ export function Home({ onLock }: HomeProps) {
                       <span className="home-act-ic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M12 2v13"></path><polyline points="6 9 12 15 18 9"></polyline><line x1="5" y1="21" x2="19" y2="21"></line></svg></span>
                       <span className="home-act-lb">Deposit</span>
                     </button>
-                    <button className="home-act" onClick={() => { if (wallet) setWithdrawAddress(solanaAddress(wallet.publicKey)); setShowWithdrawModal(true); loadBalances() }}>
+                    <button className="home-act" onClick={() => { if (wallet) setWithdrawAddress(solanaAddress(wallet.publicKey)); setWithdrawMint("SOL"); setShowWithdrawModal(true); loadBalances() }}>
                       <span className="home-act-ic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M12 22V9"></path><polyline points="6 15 12 9 18 15"></polyline><line x1="5" y1="3" x2="19" y2="3"></line></svg></span>
                       <span className="home-act-lb">Withdraw</span>
                     </button>
@@ -848,7 +871,19 @@ export function Home({ onLock }: HomeProps) {
                         const usd = usdOf(h)
                         const chg = prices[h.mint]?.priceChange24h
                         return (
-                          <div className="home-asset" key={h.key}>
+                          <div
+                            className="home-asset"
+                            key={h.key}
+                            style={h.privacy === "shielded" ? { cursor: "pointer" } : undefined}
+                            onClick={() => {
+                              if (h.privacy === "shielded" && wallet) {
+                                setWithdrawAddress(solanaAddress(wallet.publicKey))
+                                setWithdrawMint(h.mint === SOL_MINT ? "SOL" : h.mint)
+                                setShowWithdrawModal(true)
+                                loadBalances()
+                              }
+                            }}
+                          >
                             <div className={`home-asset-logo ${h.usdcMark ? "usdc" : "sol"}`}>
                               <img src={h.usdcMark ? usdcLogo : solanaLogo} alt="" />
                             </div>
@@ -1686,7 +1721,7 @@ export function Home({ onLock }: HomeProps) {
         </div>
       )}
 
-      {/* Withdraw Modal */}
+      {/* Withdraw Modal (#867) */}
       {showWithdrawModal && (
         <div className="modal-overlay" onClick={() => !withdrawing && setShowWithdrawModal(false)}>
           <div className="modal-content" onClick={(e) => e.stopPropagation()}>
@@ -1694,7 +1729,7 @@ export function Home({ onLock }: HomeProps) {
               <div className="modal-header-left">
                 <div>
                   <h3>Withdraw to Solana</h3>
-                  <span className="modal-token-name">Move shielded SOL back to a Solana address</span>
+                  <span className="modal-token-name">Move shielded funds back to a Solana address</span>
                 </div>
               </div>
               <button className="modal-close" onClick={() => !withdrawing && setShowWithdrawModal(false)}>
@@ -1706,73 +1741,128 @@ export function Home({ onLock }: HomeProps) {
             </div>
 
             <div className="send-form">
-              <div className="form-group">
-                <label className="form-label">Destination Solana address</label>
-                <input
-                  type="text"
-                  className="form-input"
-                  placeholder="Solana address"
-                  value={withdrawAddress}
-                  onChange={(e) => setWithdrawAddress(e.target.value)}
-                />
-                <div className="balance-info">Prefilled with your address — edit to send elsewhere</div>
-              </div>
-
               {(() => {
-                const spend = spendableSolNotes(notes)
+                const withdrawableAssets: { mint: string; symbol: string; decimals: number }[] = []
+                const solNotes = spendableWithdrawNotes(notes, "SOL")
+                if (shieldedLamports > 0n || solNotes.length > 0) {
+                  withdrawableAssets.push({ mint: "SOL", symbol: "SOL", decimals: 9 })
+                }
+                for (const [mint, bal] of Object.entries(shieldedTokens)) {
+                  const tokenNotes = spendableWithdrawNotes(notes, mint)
+                  if (bal > 0n || tokenNotes.length > 0) {
+                    const meta = SHIELDED_TOKEN_META[mint]
+                    withdrawableAssets.push({
+                      mint,
+                      symbol: meta?.symbol ?? `${mint.slice(0, 4)}…`,
+                      decimals: meta?.decimals ?? 6
+                    })
+                  }
+                }
+                if (withdrawableAssets.length === 0) {
+                  withdrawableAssets.push({ mint: "SOL", symbol: "SOL", decimals: 9 })
+                }
+                const activeMint = withdrawableAssets.some((a) => a.mint === withdrawMint)
+                  ? withdrawMint
+                  : withdrawableAssets[0].mint
+
+                const isSpl = activeMint !== "SOL" && activeMint !== SOL_MINT
+                const meta = isSpl ? SHIELDED_TOKEN_META[activeMint] : undefined
+                const decimals = isSpl ? (meta?.decimals ?? 6) : 9
+                const symbol = isSpl ? (meta?.symbol ?? "Token") : "SOL"
+                const divisor = 10 ** decimals
+
+                const spend = spendableWithdrawNotes(notes, activeMint)
                 const spendSum = spend.reduce((s, n) => s + BigInt(n.amount), 0n)
                 const maxOne = spend.slice(0, 2).reduce((s, n) => s + BigInt(n.amount), 0n)
-                const allSol = notes.filter(
-                  (n) => !n.spent && (!n.assetId || n.assetId === NATIVE_ASSET_HEX)
-                )
-                const dustCount = allSol.length - spend.length
-                const dustSum =
-                  allSol.reduce((s, n) => s + BigInt(n.amount), 0n) - spendSum
+                const allForAsset = notes.filter((n) => {
+                  if (n.spent) return false
+                  if (isSpl) return n.mint === activeMint
+                  return (!n.assetId || n.assetId === NATIVE_ASSET_HEX) && !n.mint
+                })
+                const dustCount = allForAsset.length - spend.length
+                const dustSum = allForAsset.reduce((s, n) => s + BigInt(n.amount), 0n) - spendSum
+
                 return (
-                  <div className="form-group">
-                    <label className="form-label">
-                      Amount to withdraw
-                      {maxOne > 0n && (
-                        <button
-                          type="button"
-                          className="label-max"
-                          onClick={() => setWithdrawAmount(String(Number(maxOne) / 1e9))}
-                        >
-                          Max {(Number(maxOne) / 1e9).toFixed(4)} SOL
-                        </button>
-                      )}
-                    </label>
-                    <input
-                      type="number"
-                      className="form-input"
-                      placeholder="0.0"
-                      value={withdrawAmount}
-                      onChange={(e) => setWithdrawAmount(e.target.value)}
-                    />
-                    <div className="balance-info">
-                      {spend.length === 0
-                        ? "No spendable notes — deposit first"
-                        : `Up to ${(Number(maxOne) / 1e9).toFixed(4)} SOL per withdraw (2 notes at a time)`}
-                      {dustCount > 0 &&
-                        ` · ${(Number(dustSum) / 1e9).toFixed(4)} SOL in ${dustCount} dust note(s) hidden`}
+                  <>
+                    {withdrawableAssets.length > 1 && (
+                      <div className="form-group">
+                        <label className="form-label">Asset to withdraw</label>
+                        <div style={{ display: "flex", gap: "8px", flexWrap: "wrap", marginBottom: "4px" }}>
+                          {withdrawableAssets.map((asset) => (
+                            <button
+                              key={asset.mint}
+                              type="button"
+                              className={`home-chip ${activeMint === asset.mint ? "sh" : ""}`}
+                              style={{ cursor: "pointer", padding: "6px 14px", border: activeMint === asset.mint ? "1px solid var(--plm-gold-light)" : undefined }}
+                              onClick={() => {
+                                setWithdrawMint(asset.mint)
+                                setWithdrawAmount("")
+                              }}
+                            >
+                              {asset.symbol}
+                            </button>
+                          ))}
+                        </div>
+                      </div>
+                    )}
+
+                    <div className="form-group">
+                      <label className="form-label">Destination Solana address</label>
+                      <input
+                        type="text"
+                        className="form-input"
+                        placeholder="Solana address"
+                        value={withdrawAddress}
+                        onChange={(e) => setWithdrawAddress(e.target.value)}
+                      />
+                      <div className="balance-info">Prefilled with your address — edit to send elsewhere</div>
                     </div>
-                  </div>
+
+                    <div className="form-group">
+                      <label className="form-label">
+                        Amount to withdraw ({symbol})
+                        {maxOne > 0n && (
+                          <button
+                            type="button"
+                            className="label-max"
+                            onClick={() => setWithdrawAmount(String(Number(maxOne) / divisor))}
+                          >
+                            Max {(Number(maxOne) / divisor).toFixed(4)} {symbol}
+                          </button>
+                        )}
+                      </label>
+                      <input
+                        type="number"
+                        className="form-input"
+                        placeholder="0.0"
+                        value={withdrawAmount}
+                        onChange={(e) => setWithdrawAmount(e.target.value)}
+                      />
+                      <div className="balance-info">
+                        {spend.length === 0
+                          ? "No spendable notes — deposit first"
+                          : `Up to ${(Number(maxOne) / divisor).toFixed(4)} ${symbol} per withdraw (2 notes at a time)`}
+                        {dustCount > 0 &&
+                          ` · ${(Number(dustSum) / divisor).toFixed(4)} ${symbol} in ${dustCount} dust note(s) hidden`}
+                      </div>
+                    </div>
+
+                    <button
+                      className="button send-button"
+                      disabled={
+                        withdrawing ||
+                        !withdrawAddress.trim() ||
+                        !withdrawAmount ||
+                        Number(withdrawAmount) <= 0 ||
+                        spendableWithdrawNotes(notes, activeMint).length === 0
+                      }
+                      onClick={handleWithdraw}
+                    >
+                      {withdrawing ? "Proving & settling…" : "Withdraw"}
+                    </button>
+                  </>
                 )
               })()}
-
-              <button
-                className="button send-button"
-                disabled={
-                  withdrawing ||
-                  !withdrawAddress.trim() ||
-                  !withdrawAmount ||
-                  Number(withdrawAmount) <= 0 ||
-                  spendableSolNotes(notes).length === 0
-                }
-                onClick={handleWithdraw}
-              >
-                {withdrawing ? "Proving & settling…" : "Withdraw"}
-              </button>
             </div>
           </div>
         </div>

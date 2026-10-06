@@ -21,6 +21,8 @@ export interface SwapOutput {
   /** Set once the re-shield note has been persisted (either normally or via the
    *  recovery scan), so recovery does not re-scan a settled reshield each connect. */
   reshieldRecovered?: boolean
+  /** Whether the row was dismissed by the user. Hidden from listSwapOutputs but kept in storage for background recovery. */
+  dismissed?: boolean
   createdAt: number
 }
 
@@ -41,7 +43,8 @@ export async function saveSwapOutput(output: SwapOutput): Promise<void> {
 
 export async function listSwapOutputs(): Promise<SwapOutput[]> {
   const stored = await chrome.storage.local.get(KEY)
-  return (stored[KEY] as SwapOutput[]) ?? []
+  const current = (stored[KEY] as SwapOutput[]) ?? []
+  return current.filter((o) => !o.dismissed)
 }
 
 // Drop a swap row by its fresh address. Used to clear a stale "pending" row the
@@ -51,6 +54,9 @@ export async function listSwapOutputs(): Promise<SwapOutput[]> {
 export async function dismissSwapOutput(freshAddress: string): Promise<void> {
   const stored = await chrome.storage.local.get(KEY)
   const current = (stored[KEY] as SwapOutput[]) ?? []
-  const next = current.filter((o) => o.freshAddress !== freshAddress)
-  await chrome.storage.local.set({ [KEY]: next })
+  const i = current.findIndex((o) => o.freshAddress === freshAddress)
+  if (i >= 0) {
+    current[i] = { ...current[i], dismissed: true }
+    await chrome.storage.local.set({ [KEY]: current })
+  }
 }

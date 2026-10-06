@@ -80,6 +80,35 @@ function selectSolWithdrawNotes(
   return null
 }
 
+// Unspent native (non-token) notes for transfer (#852), largest first.
+// Unlike withdraw, transfer has no dust cutoff, but MUST exclude SPL token notes.
+export function unspentSolNotes(all: ShieldedNote[]): ShieldedNote[] {
+  return all
+    .filter((n) => !n.spent && (!n.assetId || n.assetId === NATIVE_ASSET_HEX))
+    .sort((a, b) => {
+      const d = BigInt(b.amount) - BigInt(a.amount)
+      return d > 0n ? 1 : d < 0n ? -1 : 0
+    })
+}
+
+// Pick up to 2 spendable notes covering `lamports` for transfer (#852).
+// Returns null if 2 native notes can't cover it.
+export function selectSolTransferNotes(
+  all: ShieldedNote[],
+  lamports: bigint
+): ShieldedNote[] | null {
+  const sorted = unspentSolNotes(all)
+  const chosen: ShieldedNote[] = []
+  let sum = 0n
+  for (const n of sorted) {
+    chosen.push(n)
+    sum += BigInt(n.amount)
+    if (sum >= lamports) return chosen
+    if (chosen.length === 2) break
+  }
+  return null
+}
+
 interface Token {
   symbol: string
   name: string
@@ -496,17 +525,10 @@ export function Home({ onLock }: HomeProps) {
 
     // Circuit v3 (#350): spend 1 or 2 notes; change comes back as a new note
     // (audit #16), so partial amounts work from a single note.
-    const unspent = notes
-      .filter((n) => !n.spent)
-      .sort((a, b) => Number(BigInt(b.amount) - BigInt(a.amount)))
-    const inputs: ShieldedNote[] = []
-    let covered = 0n
-    for (const n of unspent) {
-      if (covered >= amount || inputs.length === 2) break
-      inputs.push(n)
-      covered += BigInt(n.amount)
-    }
-    if (covered < amount) {
+    // Must select only native SOL notes (#852); SPL token notes have different
+    // assetId and decimals (e.g. 6-decimal USDC) and would cause unit misinterpretation.
+    const inputs = selectSolTransferNotes(notes, amount)
+    if (!inputs) {
       showToast("Your notes don't cover that amount", "error")
       return
     }
@@ -1821,18 +1843,18 @@ export function Home({ onLock }: HomeProps) {
                 <div className="balance-info">
                   Spends your 2 largest notes; the remainder returns as change. Shielded total:{" "}
                   {(Number(shieldedLamports) / 1e9).toFixed(4)} SOL across{" "}
-                  {notes.filter((n) => !n.spent).length} note(s)
+                  {unspentSolNotes(notes).length} note(s)
                 </div>
               </div>
 
               <button
                 className="button send-button"
-                disabled={transferring || !transferAddress.trim() || !transferAmount.trim() || notes.filter((n) => !n.spent).length < 2}
+                disabled={transferring || !transferAddress.trim() || !transferAmount.trim() || unspentSolNotes(notes).length < 2}
                 onClick={handleTransfer}
               >
                 {transferring ? "Proving & sending…" : "Send shielded transfer"}
               </button>
-              {notes.filter((n) => !n.spent).length < 2 && (
+              {unspentSolNotes(notes).length < 2 && (
                 <div className="balance-info">Needs at least 2 unspent notes (deposit again to split).</div>
               )}
             </div>

@@ -206,6 +206,15 @@ export async function spendV3(
   if (payLamports <= 0n || payLamports > sumIn) {
     throw new Error("amount exceeds the selected notes")
   }
+  // Shielded transfers are native SOL only (#852). Reject SPL token notes here
+  // as defense-in-depth: the UI selector filters them, but a future caller must
+  // not silently spend a shielded SPL note on a SOL transfer.
+  if (
+    dest.kind === "transfer" &&
+    inputs.some((n) => n.assetId && n.assetId !== NATIVE_ASSET_HEX)
+  ) {
+    throw new Error("shielded transfers spend native SOL notes only (paraloom-core#852)")
+  }
   const change = sumIn - payLamports
 
   // Asset (#779): every input in one transact shares a single asset. Native SOL

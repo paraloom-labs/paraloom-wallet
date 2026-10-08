@@ -206,6 +206,9 @@ export async function spendV3(
   if (payLamports <= 0n || payLamports > sumIn) {
     throw new Error("amount exceeds the selected notes")
   }
+  if (dest.kind === "transfer" && inputs.some((n) => n.assetId && n.assetId !== NATIVE_ASSET_HEX)) {
+    throw new Error("shielded transfers spend native SOL notes only (paraloom-core#852)")
+  }
   const change = sumIn - payLamports
 
   // Asset (#779): every input in one transact shares a single asset. Native SOL

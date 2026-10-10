@@ -17,17 +17,25 @@ import {
   type Keypair
 } from "@solana/web3.js"
 
+import {
+  assetIdForMint,
+  v3NoteCommitment,
+  v3NoteCommitmentAsset
+} from "~lib/prover"
 import { confirmBySignatureStatus } from "./bridge"
 import {
   BRIDGE_STATE_SEED,
   BRIDGE_VAULT_SEED,
   DEPOSIT_NOTE_DISCRIMINATOR,
   DEPOSIT_NOTE_EVENT_DISCRIMINATOR,
+  DEPOSIT_NOTE_SPL_DISCRIMINATOR,
   DEPOSIT_NOTE_SPL_EVENT_DISCRIMINATOR,
   MERKLE_TREE_SEED,
   PROGRAM_ID,
+  TRANSACT_DISCRIMINATOR,
   TRANSACT_EVENT_DISCRIMINATOR,
-  TRANSACT_INGRESS_URL
+  TRANSACT_INGRESS_URL,
+  TRANSACT_SPL_DISCRIMINATOR
 } from "./constants"
 
 const programId = new PublicKey(PROGRAM_ID)
@@ -152,6 +160,97 @@ function startsWith(buf: Uint8Array, prefix: Uint8Array): boolean {
   return true
 }
 
+const B58_ALPHABET =
+  "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz"
+
+function base58Decode(s: string): Uint8Array {
+  const bytes: number[] = [0]
+  for (const ch of s) {
+    const v = B58_ALPHABET.indexOf(ch)
+    if (v < 0) throw new Error(`invalid base58 char: ${ch}`)
+    let carry = v
+    for (let j = 0; j < bytes.length; j++) {
+      carry += bytes[j] * 58
+      bytes[j] = carry & 0xff
+      carry >>= 8
+    }
+    while (carry > 0) {
+      bytes.push(carry & 0xff)
+      carry >>= 8
+    }
+  }
+  for (let k = 0; k < s.length && s[k] === "1"; k++) bytes.push(0)
+  return Uint8Array.from(bytes.reverse())
+}
+
+function parseInstructionData(data: unknown): Uint8Array {
+  if (typeof data === "string") {
+    return base58Decode(data)
+  }
+  if (data instanceof Uint8Array) {
+    return data
+  }
+  if (Array.isArray(data)) {
+    return Uint8Array.from(data)
+  }
+  if (Buffer.isBuffer(data)) {
+    return Uint8Array.from(data)
+  }
+  return new Uint8Array()
+}
+
+interface ExtractedProgramIx {
+  data: Uint8Array
+  accountKeys: (PublicKey | string)[]
+  accountIndices?: number[]
+}
+
+function extractProgramInstructions(tx: any, targetProgramId: string): ExtractedProgramIx[] {
+  const msg = tx.transaction?.message
+  if (!msg) return []
+  const keys: (PublicKey | string)[] = msg.staticAccountKeys ?? msg.accountKeys ?? []
+  const topIxs = msg.compiledInstructions ?? msg.instructions ?? []
+
+  const getProgId = (ix: any): string => {
+    if (typeof ix.programIdIndex === "number" && keys[ix.programIdIndex]) {
+      const k = keys[ix.programIdIndex]
+      return typeof (k as any).toBase58 === "function" ? (k as any).toBase58() : String(k)
+    }
+    if (ix.programId) {
+      return typeof ix.programId.toBase58 === "function" ? ix.programId.toBase58() : String(ix.programId)
+    }
+    return ""
+  }
+
+  const results: ExtractedProgramIx[] = []
+
+  for (let i = 0; i < topIxs.length; i++) {
+    const ix = topIxs[i]
+    if (getProgId(ix) === targetProgramId) {
+      results.push({
+        data: parseInstructionData(ix.data),
+        accountKeys: keys,
+        accountIndices: ix.accounts ?? ix.accountKeyIndexes
+      })
+    }
+  }
+
+  const innerList = tx.meta?.innerInstructions ?? []
+  for (const innerGroup of innerList) {
+    for (const innerIx of innerGroup.instructions ?? []) {
+      if (getProgId(innerIx) === targetProgramId) {
+        results.push({
+          data: parseInstructionData(innerIx.data),
+          accountKeys: keys,
+          accountIndices: innerIx.accounts ?? innerIx.accountKeyIndexes
+        })
+      }
+    }
+  }
+
+  return results
+}
+
 /// Rebuild the ordered v3 leaf list from the program's public event logs.
 ///
 /// DepositNoteEvent: depositor(32) amount(8) commitment(32)@40 leaf_index(8)@72.
@@ -209,13 +308,16 @@ export async function fetchV3Leaves(connection: Connection): Promise<V3Leaf[]> {
       )
     }
     const logs = tx.meta?.logMessages ?? []
-    for (const payload of eventPayloads(logs, PROGRAM_ID)) {
+    const isTruncated = logs.some((l) => l === "Log truncated" || l.includes("Log truncated"))
+    const logPayloads = eventPayloads(logs, PROGRAM_ID)
+    let txLeaves: V3Leaf[] = []
+
+    for (const payload of logPayloads) {
       if (startsWith(payload, DEPOSIT_NOTE_EVENT_DISCRIMINATOR)) {
         const body = payload.slice(8)
         const commitment = body.slice(40, 72)
         const leafIndex = Number(new DataView(body.buffer, body.byteOffset + 72, 8).getBigUint64(0, true))
-        leaves.push({ index: leafIndex, commitmentHex: Buffer.from(commitment).toString("hex") })
-        transactLeafCursor = Math.max(transactLeafCursor ?? 0, leafIndex + 1)
+        txLeaves.push({ index: leafIndex, commitmentHex: Buffer.from(commitment).toString("hex") })
       } else if (startsWith(payload, DEPOSIT_NOTE_SPL_EVENT_DISCRIMINATOR)) {
         // SPL deposit (#779): same tree, one extra `mint` (32) field before the
         // commitment. Body: depositor(32) | mint(32) | amount(8) | commitment(32)
@@ -226,17 +328,109 @@ export async function fetchV3Leaves(connection: Connection): Promise<V3Leaf[]> {
         const leafIndex = Number(
           new DataView(body.buffer, body.byteOffset + 104, 8).getBigUint64(0, true)
         )
-        leaves.push({ index: leafIndex, commitmentHex: Buffer.from(commitment).toString("hex") })
-        transactLeafCursor = Math.max(transactLeafCursor ?? 0, leafIndex + 1)
+        txLeaves.push({ index: leafIndex, commitmentHex: Buffer.from(commitment).toString("hex") })
       } else if (startsWith(payload, TRANSACT_EVENT_DISCRIMINATOR)) {
         const body = payload.slice(8)
         const oc0 = body.slice(64, 96)
         const oc1 = body.slice(96, 128)
         const base = transactLeafCursor ?? leaves.length
-        leaves.push({ index: base, commitmentHex: Buffer.from(oc0).toString("hex") })
-        leaves.push({ index: base + 1, commitmentHex: Buffer.from(oc1).toString("hex") })
-        transactLeafCursor = base + 2
+        txLeaves.push({ index: base, commitmentHex: Buffer.from(oc0).toString("hex") })
+        txLeaves.push({ index: base + 1, commitmentHex: Buffer.from(oc1).toString("hex") })
       }
+    }
+
+    // Solana caps per-transaction log messages at 10,000 bytes (LOG_MESSAGES_BYTES_LIMIT),
+    // emitting "Log truncated" and silently dropping subsequent log lines.
+    // If truncation occurred, check if program instructions produced leaves that were dropped
+    // from the log stream, and fall back to recomputing them from instruction data.
+    if (isTruncated) {
+      const programIxs = extractProgramInstructions(tx, PROGRAM_ID)
+      const leafIxs = programIxs.filter(
+        (ix) =>
+          startsWith(ix.data, DEPOSIT_NOTE_DISCRIMINATOR) ||
+          startsWith(ix.data, DEPOSIT_NOTE_SPL_DISCRIMINATOR) ||
+          startsWith(ix.data, TRANSACT_DISCRIMINATOR) ||
+          startsWith(ix.data, TRANSACT_SPL_DISCRIMINATOR)
+      )
+      const expectedLeavesCount = leafIxs.reduce(
+        (sum, ix) =>
+          sum +
+          (startsWith(ix.data, TRANSACT_DISCRIMINATOR) ||
+          startsWith(ix.data, TRANSACT_SPL_DISCRIMINATOR)
+            ? 2
+            : 1),
+        0
+      )
+      const programInvokedInLogs = logs.some((l) => l.startsWith(`Program ${PROGRAM_ID}`))
+
+      if (expectedLeavesCount > txLeaves.length || (programInvokedInLogs && txLeaves.length === 0)) {
+        if (leafIxs.length > 0) {
+          txLeaves = []
+          for (const ix of leafIxs) {
+            if (startsWith(ix.data, DEPOSIT_NOTE_DISCRIMINATOR)) {
+              const body = ix.data.slice(8)
+              const dv = new DataView(body.buffer, body.byteOffset, body.byteLength)
+              const amountLamports = dv.getBigUint64(0, true)
+              const pubkey = body.slice(8, 40)
+              const blinding = body.slice(40, 72)
+              const pubkeyHex = Buffer.from(pubkey).toString("hex")
+              const blindingHex = Buffer.from(blinding).toString("hex")
+              const commitmentHex = await v3NoteCommitment(amountLamports, pubkeyHex, blindingHex)
+              const idx = transactLeafCursor ?? leaves.length
+              txLeaves.push({ index: idx, commitmentHex })
+              transactLeafCursor = idx + 1
+            } else if (startsWith(ix.data, DEPOSIT_NOTE_SPL_DISCRIMINATOR)) {
+              const body = ix.data.slice(8)
+              const dv = new DataView(body.buffer, body.byteOffset, body.byteLength)
+              const amountLamports = dv.getBigUint64(0, true)
+              const pubkey = body.slice(8, 40)
+              const blinding = body.slice(40, 72)
+              const pubkeyHex = Buffer.from(pubkey).toString("hex")
+              const blindingHex = Buffer.from(blinding).toString("hex")
+              let mintHex = "00".repeat(32)
+              if (ix.accountIndices && ix.accountIndices.length > 2) {
+                const mintKey = ix.accountKeys[ix.accountIndices[2]]
+                if (mintKey) {
+                  const b58 =
+                    typeof (mintKey as any).toBase58 === "function"
+                      ? (mintKey as any).toBase58()
+                      : String(mintKey)
+                  mintHex = Buffer.from(new PublicKey(b58).toBytes()).toString("hex")
+                }
+              }
+              const assetIdHex = await assetIdForMint(mintHex)
+              const commitmentHex = await v3NoteCommitmentAsset(
+                amountLamports,
+                pubkeyHex,
+                blindingHex,
+                assetIdHex
+              )
+              const idx = transactLeafCursor ?? leaves.length
+              txLeaves.push({ index: idx, commitmentHex })
+              transactLeafCursor = idx + 1
+            } else if (
+              startsWith(ix.data, TRANSACT_DISCRIMINATOR) ||
+              startsWith(ix.data, TRANSACT_SPL_DISCRIMINATOR)
+            ) {
+              const oc0 = ix.data.slice(72, 104)
+              const oc1 = ix.data.slice(104, 136)
+              const base = transactLeafCursor ?? leaves.length
+              txLeaves.push({ index: base, commitmentHex: Buffer.from(oc0).toString("hex") })
+              txLeaves.push({ index: base + 1, commitmentHex: Buffer.from(oc1).toString("hex") })
+              transactLeafCursor = base + 2
+            }
+          }
+        } else {
+          throw new Error(
+            `transaction ${sig.signature} logs were truncated past the 10,000-byte cap and leaf events could not be recovered from instruction data; refusing to build an incomplete tree`
+          )
+        }
+      }
+    }
+
+    for (const leaf of txLeaves) {
+      leaves.push(leaf)
+      transactLeafCursor = Math.max(transactLeafCursor ?? 0, leaf.index + 1)
     }
   }
   leaves.sort((a, b) => a.index - b.index)

@@ -25,6 +25,14 @@ export const DEPOSIT_NOTE_SPL_EVENT_DISCRIMINATOR = new Uint8Array([
   229, 33, 39, 208, 18, 5, 237, 1
 ])
 export const TRANSACT_EVENT_DISCRIMINATOR = new Uint8Array([89, 245, 87, 250, 222, 30, 135, 142])
+// sha256("global:transact")[..8] / sha256("global:transact_spl")[..8] — instruction
+// discriminators for unified spend, used to inspect instructions if logs are truncated.
+export const TRANSACT_DISCRIMINATOR = new Uint8Array([
+  217, 149, 130, 143, 221, 52, 252, 119
+])
+export const TRANSACT_SPL_DISCRIMINATOR = new Uint8Array([
+  154, 66, 244, 204, 78, 225, 163, 151
+])
 
 // PDA seeds.
 export const BRIDGE_STATE_SEED = "bridge_state"

@@ -7,17 +7,39 @@
 import { sha256 } from "@noble/hashes/sha256"
 import type { Connection } from "@solana/web3.js"
 import {
+  DEPOSIT_NOTE_DISCRIMINATOR,
   DEPOSIT_NOTE_EVENT_DISCRIMINATOR,
+  DEPOSIT_NOTE_SPL_DISCRIMINATOR,
   DEPOSIT_NOTE_SPL_EVENT_DISCRIMINATOR,
   PROGRAM_ID,
-  TRANSACT_EVENT_DISCRIMINATOR
+  TRANSACT_DISCRIMINATOR,
+  TRANSACT_EVENT_DISCRIMINATOR,
+  TRANSACT_SPL_DISCRIMINATOR
 } from "~lib/paraloom/constants"
 import { fetchV3Leaves } from "~lib/paraloom/transact"
 import { describe, expect, it, vi } from "vitest"
 
-// transact.ts now reaches ~lib/prover through bridge.ts, and the wasm module
-// cannot load under vitest. Nothing in fetchV3Leaves uses it.
-vi.mock("~lib/prover", () => ({ NATIVE_ASSET_HEX: "00".repeat(32) }))
+// transact.ts now reaches ~lib/prover through bridge.ts and instruction fallback.
+vi.mock("~lib/prover", () => ({
+  NATIVE_ASSET_HEX: "00".repeat(32),
+  v3NoteCommitment: vi.fn(async (amount: bigint, pubkeyHex: string, blindingHex: string) => {
+    return sha256(new TextEncoder().encode(`${amount}:${pubkeyHex}:${blindingHex}`))
+      .slice(0, 32)
+      .reduce((s, b) => s + b.toString(16).padStart(2, "0"), "")
+  }),
+  v3NoteCommitmentAsset: vi.fn(
+    async (amount: bigint, pubkeyHex: string, blindingHex: string, assetIdHex: string) => {
+      return sha256(new TextEncoder().encode(`${amount}:${pubkeyHex}:${blindingHex}:${assetIdHex}`))
+        .slice(0, 32)
+        .reduce((s, b) => s + b.toString(16).padStart(2, "0"), "")
+    }
+  ),
+  assetIdForMint: vi.fn(async (mintHex: string) => {
+    return sha256(new TextEncoder().encode(mintHex))
+      .slice(0, 32)
+      .reduce((s, b) => s + b.toString(16).padStart(2, "0"), "")
+  })
+}))
 
 const OTHER_PROGRAM = "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"
 
@@ -92,6 +114,7 @@ interface FakeTx {
   err?: unknown
   /** Number of leading getTransaction calls that return null. */
   nullFor?: number
+  transaction?: unknown
 }
 
 function fakeConnection(txs: FakeTx[]) {
@@ -117,7 +140,11 @@ function fakeConnection(txs: FakeTx[]) {
         nullsLeft.set(signature, remaining - 1)
         return null
       }
-      return { meta: { logMessages: txs[Number(signature.slice(3))].logs ?? [] } }
+      const t = txs[Number(signature.slice(3))]
+      return {
+        meta: { logMessages: t.logs ?? [] },
+        transaction: t.transaction ?? { message: { accountKeys: [], instructions: [] } }
+      }
     }
   }
   return { connection: connection as unknown as Connection, calls }
@@ -134,6 +161,18 @@ describe("event discriminators", () => {
     ["TransactEvent", TRANSACT_EVENT_DISCRIMINATOR]
   ])('%s matches sha256("event:<Name>")[..8]', (name, constant) => {
     const expected = sha256(new TextEncoder().encode(`event:${name}`)).slice(0, 8)
+    expect(Array.from(constant)).toEqual(Array.from(expected))
+  })
+})
+
+describe("instruction discriminators", () => {
+  it.each([
+    ["deposit_note", DEPOSIT_NOTE_DISCRIMINATOR],
+    ["deposit_note_spl", DEPOSIT_NOTE_SPL_DISCRIMINATOR],
+    ["transact", TRANSACT_DISCRIMINATOR],
+    ["transact_spl", TRANSACT_SPL_DISCRIMINATOR]
+  ])('%s matches sha256("global:<name>")[..8]', (name, constant) => {
+    const expected = sha256(new TextEncoder().encode(`global:${name}`)).slice(0, 8)
     expect(Array.from(constant)).toEqual(Array.from(expected))
   })
 })
@@ -363,3 +402,149 @@ describe("refusing an unsafe tree", () => {
     await expect(fetchV3Leaves(connection)).rejects.toThrow(/leaf history may be incomplete/)
   })
 })
+
+describe("log truncation handling and fallback", () => {
+  function mockDepositTx(
+    programIdStr: string,
+    amount: bigint,
+    pubkeyByte: number,
+    blindingByte: number
+  ) {
+    const data = new Uint8Array(8 + 8 + 32 + 32)
+    data.set(DEPOSIT_NOTE_DISCRIMINATOR, 0)
+    new DataView(data.buffer).setBigUint64(8, amount, true)
+    data.fill(pubkeyByte, 16, 48)
+    data.fill(blindingByte, 48, 80)
+    return {
+      message: {
+        accountKeys: [programIdStr],
+        instructions: [{ programIdIndex: 0, data }]
+      }
+    }
+  }
+
+  function mockDepositSplTx(
+    programIdStr: string,
+    amount: bigint,
+    pubkeyByte: number,
+    blindingByte: number,
+    mintStr: string
+  ) {
+    const data = new Uint8Array(8 + 8 + 32 + 32)
+    data.set(DEPOSIT_NOTE_SPL_DISCRIMINATOR, 0)
+    new DataView(data.buffer).setBigUint64(8, amount, true)
+    data.fill(pubkeyByte, 16, 48)
+    data.fill(blindingByte, 48, 80)
+    return {
+      message: {
+        accountKeys: [
+          programIdStr,
+          "BridgeState11111111111111111111111111111111",
+          "AssetConfig11111111111111111111111111111111",
+          mintStr
+        ],
+        instructions: [{ programIdIndex: 0, data, accounts: [1, 2, 3] }]
+      }
+    }
+  }
+
+  function mockTransactTx(
+    programIdStr: string,
+    oc0Byte: number,
+    oc1Byte: number
+  ) {
+    const data = new Uint8Array(8 + 64 + 32 + 32)
+    data.set(TRANSACT_DISCRIMINATOR, 0)
+    data.fill(oc0Byte, 72, 104)
+    data.fill(oc1Byte, 104, 136)
+    return {
+      message: {
+        accountKeys: [programIdStr],
+        instructions: [{ programIdIndex: 0, data }]
+      }
+    }
+  }
+
+  it("recovers deposit_note leaf from instruction data when logs are truncated", async () => {
+    const attackerProgram = "Attacker1111111111111111111111111111111111"
+    const noise = Array.from({ length: 200 }, (_, i) => `Program log: ${"x".repeat(48)} ${i}`)
+    const { connection } = fakeConnection([
+      { logs: emittedBy(PROGRAM_ID, depositEvent(0xa0, 0)) },
+      // attacker tx: noisy ix first, then deposit_note (leaf 1) whose event was truncated by runtime
+      {
+        logs: [
+          `Program ${attackerProgram} invoke [1]`,
+          ...noise,
+          `Program ${attackerProgram} success`,
+          `Program ${PROGRAM_ID} invoke [1]`,
+          "Log truncated"
+        ],
+        transaction: mockDepositTx(PROGRAM_ID, 1_000_000n, 0xa1, 0xb1)
+      },
+      // honest user deposit afterwards
+      { logs: emittedBy(PROGRAM_ID, depositEvent(0xa2, 2)) }
+    ])
+
+    const leaves = await fetchV3Leaves(connection)
+    expect(leaves.map((l) => l.index)).toEqual([0, 1, 2])
+    expect(leaves[0].commitmentHex).toBe("a0".repeat(32))
+    expect(leaves[1].commitmentHex.length).toBe(64)
+    expect(leaves[2].commitmentHex).toBe("a2".repeat(32))
+  })
+
+  it("recovers deposit_note_spl leaf and derives asset commitment when logs are truncated", async () => {
+    const { connection } = fakeConnection([
+      { logs: emittedBy(PROGRAM_ID, depositEvent(0xa0, 0)) },
+      {
+        logs: [`Program ${PROGRAM_ID} invoke [1]`, "Log truncated"],
+        transaction: mockDepositSplTx(
+          PROGRAM_ID,
+          500_000n,
+          0xc1,
+          0xd1,
+          "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"
+        )
+      },
+      { logs: emittedBy(PROGRAM_ID, depositEvent(0xa2, 2)) }
+    ])
+
+    const leaves = await fetchV3Leaves(connection)
+    expect(leaves.map((l) => l.index)).toEqual([0, 1, 2])
+    expect(leaves[1].commitmentHex.length).toBe(64)
+  })
+
+  it("recovers transact output commitments from instruction data when logs are truncated", async () => {
+    const { connection } = fakeConnection([
+      { logs: emittedBy(PROGRAM_ID, depositEvent(0xa0, 0)) },
+      {
+        logs: [`Program ${PROGRAM_ID} invoke [1]`, "Log truncated"],
+        transaction: mockTransactTx(PROGRAM_ID, 0xb0, 0xb1)
+      },
+      { logs: emittedBy(PROGRAM_ID, depositEvent(0xa3, 3)) }
+    ])
+
+    const leaves = await fetchV3Leaves(connection)
+    expect(leaves.map((l) => [l.index, l.commitmentHex.slice(0, 2)])).toEqual([
+      [0, "a0"],
+      [1, "b0"],
+      [2, "b1"],
+      [3, "a3"]
+    ])
+  })
+
+  it("throws when logs are truncated and instruction data cannot recover the missing leaf", async () => {
+    const { connection } = fakeConnection([
+      { logs: emittedBy(PROGRAM_ID, depositEvent(0xa0, 0)) },
+      {
+        logs: [`Program ${PROGRAM_ID} invoke [1]`, "Log truncated"]
+        // no transaction / instructions provided
+      },
+      { logs: emittedBy(PROGRAM_ID, depositEvent(0xa2, 2)) }
+    ])
+
+    await expect(fetchV3Leaves(connection)).rejects.toThrow(
+      /logs were truncated past the 10,000-byte cap and leaf events could not be recovered/
+    )
+  })
+})
+

@@ -300,7 +300,8 @@ export function Home({ onLock }: HomeProps) {
       await scanForNotes(
         wallet.shieldedAddress,
         boxSecret,
-        Buffer.from(wallet.spendPrivkey).toString("hex")
+        Buffer.from(wallet.spendPrivkey).toString("hex"),
+        getConnection(network)
       )
     } catch {
       // transfer node down / no scan endpoint — ignore

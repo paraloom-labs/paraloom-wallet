@@ -1,6 +1,6 @@
 import { Connection, PublicKey } from "@solana/web3.js"
 
-import { getAutoLockMinutes, getStoredWallet, isWalletLocked, setLockState } from "~lib/storage/secure"
+import { getAutoLockMinutes, getNetwork, getStoredWallet, isWalletLocked, setLockState } from "~lib/storage/secure"
 import { addApprovedOrigin, isOriginApproved, removeApprovedOrigin } from "~lib/storage/connections"
 import { clearSession, getLastActivity, loadSession, recordActivity } from "~lib/storage/session"
 import { addNote, getNotes, markNoteSpentByCommitment, shieldedBalance, shieldedTokenBalances, type ShieldedNote } from "~lib/paraloom/notes"
@@ -8,6 +8,7 @@ import { scanForNotes } from "~lib/paraloom/scan"
 import {
   associatedTokenAddress,
   depositSpl,
+  getConnection,
   recoverReshieldedNote,
   solanaAddress
 } from "~lib/paraloom/bridge"
@@ -655,10 +656,13 @@ async function backgroundScan(
   if (scanInFlight || !session) return
   scanInFlight = true
   try {
+    const network = await getNetwork()
+    const connection = getConnection(network)
     await scanForNotes(
       addr,
       session.wallet.boxSecretKey,
-      Buffer.from(session.wallet.spendPrivkey).toString("hex")
+      Buffer.from(session.wallet.spendPrivkey).toString("hex"),
+      connection
     )
   } catch {
     // node down / no scan endpoint — the local balance still stands

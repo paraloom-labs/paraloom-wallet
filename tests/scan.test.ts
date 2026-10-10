@@ -17,7 +17,7 @@
 // a mismatch drops the note — and not Poseidon itself. A test that the real
 // hash is correct would need the prover artifacts.
 
-import { PublicKey } from "@solana/web3.js"
+import { Connection, PublicKey } from "@solana/web3.js"
 import { encryptNote } from "~lib/paraloom/noteCrypto"
 import {
   getNotes,
@@ -39,6 +39,7 @@ const {
   fakeAssetCommitment,
   fakeCommitment,
   fakeAssetIdForMint,
+  fetchV3LeavesMock,
   v3NoteCommitment,
   v3NoteCommitmentAsset,
   v3NotePubkey
@@ -60,10 +61,13 @@ const {
       .map((b) => (parseInt(b, 16) ^ 0x5a).toString(16).padStart(2, "0"))
       .join("")
 
+  const fetchV3LeavesMock = vi.fn(async (_conn: any) => [] as Array<{ index: number; commitmentHex: string }>)
+
   return {
     fakeCommitment,
     fakeAssetCommitment,
     fakeAssetIdForMint,
+    fetchV3LeavesMock,
     v3NoteCommitment: vi.fn(async (a: bigint, p: string, b: string) => fakeCommitment(a, p, b)),
     v3NoteCommitmentAsset: vi.fn(async (a: bigint, p: string, b: string, s: string) =>
       fakeAssetCommitment(a, p, b, s)
@@ -87,6 +91,10 @@ vi.mock("~lib/prover", () => ({
   v3NotePubkey,
   assetIdForMint,
   NATIVE_ASSET_HEX: "00".repeat(32)
+}))
+
+vi.mock("~lib/paraloom/transact", () => ({
+  fetchV3Leaves: fetchV3LeavesMock
 }))
 
 const ACCOUNT = "paraloom1" + "11".repeat(64)
@@ -199,6 +207,7 @@ beforeEach(() => {
   v3NoteCommitmentAsset.mockClear()
   v3NotePubkey.mockClear()
   assetIdForMint.mockClear()
+  fetchV3LeavesMock.mockClear()
 })
 
 describe("phantom note rejection (#196)", () => {
@@ -458,5 +467,104 @@ describe("ordinary scanning", () => {
   it("handles an empty feed", async () => {
     respondWith([])
     expect(await scan()).toBe(0)
+  })
+})
+
+describe("on-chain leaf membership verification (paraloom-core#724 item A1)", () => {
+  it("drops a self-consistent note whose commitment is not in on-chain leaves", async () => {
+    // Attack described in A1: griefer produces a self-consistent forged triple
+    // (bigAmount, ourSpendPub, blinding) with a matching ciphertext and commitment.
+    // It passes ciphertext decryption and commitment recomputation, but was never
+    // appended on-chain. Crediting it would inflate balance and brick transfers.
+    const forged = honest(1_000_000n)
+    respondWith([forged])
+
+    const count = await scanForNotes(ACCOUNT, ourBox.secretKey, SPEND_PRIVKEY, {
+      leaves: ["some_other_commitment"]
+    })
+    expect(count).toBe(0)
+    expect(await getNotes(ACCOUNT)).toEqual([])
+    expect(await shieldedBalance(ACCOUNT)).toBe(0n)
+  })
+
+  it("credits a self-consistent note whose commitment is confirmed in on-chain leaves", async () => {
+    const note = honest(100n)
+    respondWith([note])
+
+    const count = await scanForNotes(ACCOUNT, ourBox.secretKey, SPEND_PRIVKEY, {
+      leaves: [note.output_commitment]
+    })
+    expect(count).toBe(1)
+    expect(await shieldedBalance(ACCOUNT)).toBe(100n)
+  })
+
+  it("drops off-chain forged notes while crediting on-chain notes in a mixed scan", async () => {
+    const realNote = honest(100n)
+    const forgedNote = honest(500n, "dd".repeat(32))
+    respondWith([realNote, forgedNote])
+
+    const count = await scanForNotes(ACCOUNT, ourBox.secretKey, SPEND_PRIVKEY, {
+      leaves: [realNote.output_commitment]
+    })
+    expect(count).toBe(1)
+    expect(await shieldedBalance(ACCOUNT)).toBe(100n)
+  })
+
+  it("queries fetchV3Leaves via connection and rejects unconfirmed notes", async () => {
+    const realNote = honest(250n)
+    const fakeNote = honest(999n, "ee".repeat(32))
+    respondWith([realNote, fakeNote])
+
+    fetchV3LeavesMock.mockResolvedValueOnce([
+      { index: 3, commitmentHex: realNote.output_commitment }
+    ])
+
+    const mockConn = { getSignaturesForAddress: vi.fn() } as unknown as Connection
+    const count = await scanForNotes(ACCOUNT, ourBox.secretKey, SPEND_PRIVKEY, mockConn)
+
+    expect(fetchV3LeavesMock).toHaveBeenCalledWith(mockConn)
+    expect(count).toBe(1)
+    expect(await shieldedBalance(ACCOUNT)).toBe(250n)
+  })
+
+  it("lazily queries connection only when a candidate note decrypts for us", async () => {
+    respondWith([forSomeoneElse(500n)])
+
+    const mockConn = { getSignaturesForAddress: vi.fn() } as unknown as Connection
+    const count = await scanForNotes(ACCOUNT, ourBox.secretKey, SPEND_PRIVKEY, mockConn)
+
+    expect(count).toBe(0)
+    expect(fetchV3LeavesMock).not.toHaveBeenCalled()
+  })
+
+  it("verifies leaf membership for received SPL token notes", async () => {
+    const tokenNote = splNote(500n)
+    respondWith([tokenNote])
+
+    // Off-chain SPL note is rejected
+    const countOffchain = await scanForNotes(ACCOUNT, ourBox.secretKey, SPEND_PRIVKEY, {
+      leaves: []
+    })
+    expect(countOffchain).toBe(0)
+    expect(await shieldedTokenBalances(ACCOUNT)).toEqual({})
+
+    // On-chain SPL note is accepted and credited
+    const countOnchain = await scanForNotes(ACCOUNT, ourBox.secretKey, SPEND_PRIVKEY, {
+      leaves: [tokenNote.output_commitment]
+    })
+    expect(countOnchain).toBe(1)
+    expect(await shieldedTokenBalances(ACCOUNT)).toEqual({ [MINT]: 500n })
+  })
+
+  it("attaches on-chain leafIndex to discovered notes when available", async () => {
+    const note = honest(100n)
+    respondWith([note])
+
+    await scanForNotes(ACCOUNT, ourBox.secretKey, SPEND_PRIVKEY, {
+      leaves: [{ index: 77, commitmentHex: note.output_commitment }]
+    })
+
+    const [stored] = await getNotes(ACCOUNT)
+    expect(stored.leafIndex).toBe(77)
   })
 })

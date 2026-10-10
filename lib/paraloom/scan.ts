@@ -3,7 +3,7 @@
 // the notes that decrypt as spendable. Failed decrypts are silent. Shielded
 // balance then reflects received transfer notes, not just local deposits.
 
-import { PublicKey } from "@solana/web3.js"
+import { Connection, PublicKey } from "@solana/web3.js"
 import {
   assetIdForMint,
   NATIVE_ASSET_HEX,
@@ -14,6 +14,7 @@ import {
 import { TRANSACT_INGRESS_URL } from "./constants"
 import { tryDecryptNote } from "./noteCrypto"
 import { addDiscoveredNote, getNotes } from "./notes"
+import { fetchV3Leaves, type V3Leaf } from "./transact"
 
 interface DeliveredNote {
   output_commitment: string
@@ -78,6 +79,13 @@ async function verifiedMint(
   }
 }
 
+export interface ScanOptions {
+  /// Solana RPC connection used to fetch on-chain leaf events via fetchV3Leaves.
+  connection?: Connection
+  /// Pre-fetched on-chain leaves or commitments to verify membership against.
+  leaves?: Set<string> | V3Leaf[] | string[]
+}
+
 // Scan for and store notes owned by this wallet. Returns how many new notes
 // were discovered. The note is spent later with the account's own spend key
 // (#293), so no per-note secret is stored.
@@ -91,10 +99,21 @@ async function verifiedMint(
 // spend key: it inflated the balance and, because it can never be found in the
 // on-chain tree, bricked every subsequent transfer. We now recompute the
 // commitment ourselves and store the note only if it matches.
+//
+// Defense-in-depth (paraloom-core#724 item A1): recomputing the commitment under
+// our spend key closes phantom-note inflation from an unbound ciphertext, but
+// does not prove the commitment was ever appended to the on-chain Merkle tree.
+// A griefing scan endpoint could serve a self-consistent forged triple
+// (amount, victimSpendPub, blinding) with a matching ciphertext, inflating the
+// balance and bricking transfers when selected as an input. Before crediting
+// a discovered note, we confirm its commitment is present in the on-chain leaf
+// set (the same fetchV3Leaves membership check the spend path does).
 export async function scanForNotes(
   account: string,
   boxSecretKey: Uint8Array,
-  spendPrivkeyHex: string
+  spendPrivkeyHex: string,
+  connectionOrOptions?: Connection | ScanOptions,
+  cachedLeaves?: V3Leaf[] | Set<string> | string[]
 ): Promise<number> {
   const res = await fetch(`${TRANSACT_INGRESS_URL}/transact/scan`)
   if (!res.ok) {
@@ -106,6 +125,40 @@ export async function scanForNotes(
     (await getNotes(account)).map((n) => n.commitment).filter(Boolean) as string[]
   )
   const spendPubHex = await v3NotePubkey(spendPrivkeyHex)
+
+  let connection: Connection | undefined
+  let initialLeaves: Set<string> | V3Leaf[] | string[] | undefined
+
+  if (connectionOrOptions) {
+    if ("getSignaturesForAddress" in connectionOrOptions) {
+      connection = connectionOrOptions as Connection
+      initialLeaves = cachedLeaves
+    } else {
+      const opts = connectionOrOptions as ScanOptions
+      connection = opts.connection
+      initialLeaves = opts.leaves ?? cachedLeaves
+    }
+  }
+
+  let onChainLeafIndices: Map<string, number> | null = null
+  let onChainCommitments: Set<string> | null = null
+
+  if (initialLeaves) {
+    if (initialLeaves instanceof Set) {
+      onChainCommitments = initialLeaves as Set<string>
+    } else if (Array.isArray(initialLeaves)) {
+      onChainCommitments = new Set()
+      onChainLeafIndices = new Map()
+      for (const item of initialLeaves) {
+        if (typeof item === "string") {
+          onChainCommitments.add(item)
+        } else {
+          onChainCommitments.add((item as V3Leaf).commitmentHex)
+          onChainLeafIndices.set((item as V3Leaf).commitmentHex, (item as V3Leaf).index)
+        }
+      }
+    }
+  }
 
   let found = 0
   for (const d of delivered) {
@@ -137,6 +190,29 @@ export async function scanForNotes(
     if (mint === REJECT) {
       continue
     }
+
+    // Confirm on-chain leaf membership (paraloom-core#724 item A1).
+    // Recomputing the commitment under our spend key closes phantom-note
+    // inflation from an unbound ciphertext, but does not prove the commitment
+    // was ever appended to the on-chain Merkle tree. A griefing scan endpoint
+    // could serve a self-consistent forged triple (amount, victimSpendPub, blinding)
+    // with a matching ciphertext, inflating the balance and bricking transfers
+    // when selected as an input. Check that the commitment exists in the on-chain
+    // leaf set (the same fetchV3Leaves membership check the spend path does).
+    if (connection && !onChainCommitments) {
+      const fetched = await fetchV3Leaves(connection)
+      onChainCommitments = new Set()
+      onChainLeafIndices = new Map()
+      for (const item of fetched) {
+        onChainCommitments.add(item.commitmentHex)
+        onChainLeafIndices.set(item.commitmentHex, item.index)
+      }
+    }
+    if (onChainCommitments && !onChainCommitments.has(d.output_commitment)) {
+      continue
+    }
+
+    const leafIndex = onChainLeafIndices?.get(d.output_commitment)
     await addDiscoveredNote(account, {
       amount: note.amount.toString(),
       blinding: note.blindingHex,
@@ -146,7 +222,8 @@ export async function scanForNotes(
       createdAt: Date.now(),
       spent: false,
       commitment: d.output_commitment,
-      source: "transfer"
+      source: "transfer",
+      ...(leafIndex !== undefined ? { leafIndex } : {})
     })
     // Track it here too: the same commitment can appear twice in one response,
     // and `known` is otherwise only a snapshot from before the loop, so the

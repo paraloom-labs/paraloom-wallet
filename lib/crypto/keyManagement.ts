@@ -239,7 +239,8 @@ export function encryptWallet(
 export async function decryptWallet(
   encryptedWallet: EncryptedWallet,
   password: string,
-  legacy: boolean = false
+  legacy: boolean = false,
+  allowKdfFallback: boolean = true
 ): Promise<WalletKeyPair> {
   // Parse hex strings
   const encrypted = Buffer.from(encryptedWallet.encrypted, "hex")
@@ -247,10 +248,20 @@ export async function decryptWallet(
   const salt = Buffer.from(encryptedWallet.salt, "hex")
 
   // Derive encryption key from password (scrypt, or legacy chain for old vaults)
-  const encryptionKey = deriveKey(password, salt, legacy)
+  let encryptionKey = deriveKey(password, salt, legacy)
 
   // Decrypt
-  const decrypted = nacl.secretbox.open(encrypted, nonce, encryptionKey)
+  let decrypted = nacl.secretbox.open(encrypted, nonce, encryptionKey)
+
+  // If initial attempt fails and fallback is allowed, try alternate KDF
+  // to prevent unauthenticated/missing kdfVersion from permanently locking the vault (paraloom-core#873)
+  if (!decrypted && allowKdfFallback) {
+    const fallbackKey = deriveKey(password, salt, !legacy)
+    const fallbackDecrypted = nacl.secretbox.open(encrypted, nonce, fallbackKey)
+    if (fallbackDecrypted) {
+      decrypted = fallbackDecrypted
+    }
+  }
 
   if (!decrypted) {
     throw new Error("Invalid password")
@@ -320,7 +331,8 @@ export function encryptSeedPhrase(seedPhrase: string, password: string): string 
 export function decryptSeedPhrase(
   encryptedData: string,
   password: string,
-  legacy: boolean = false
+  legacy: boolean = false,
+  allowKdfFallback: boolean = true
 ): string {
   const combined = Buffer.from(encryptedData, "hex")
 
@@ -329,8 +341,17 @@ export function decryptSeedPhrase(
   const nonce = combined.subarray(32, 32 + nacl.secretbox.nonceLength)
   const encrypted = combined.subarray(32 + nacl.secretbox.nonceLength)
 
-  const encryptionKey = deriveKey(password, salt, legacy)
-  const decrypted = nacl.secretbox.open(encrypted, nonce, encryptionKey)
+  let encryptionKey = deriveKey(password, salt, legacy)
+  let decrypted = nacl.secretbox.open(encrypted, nonce, encryptionKey)
+
+  // If initial attempt fails and fallback is allowed, try alternate KDF (paraloom-core#873)
+  if (!decrypted && allowKdfFallback) {
+    const fallbackKey = deriveKey(password, salt, !legacy)
+    const fallbackDecrypted = nacl.secretbox.open(encrypted, nonce, fallbackKey)
+    if (fallbackDecrypted) {
+      decrypted = fallbackDecrypted
+    }
+  }
 
   if (!decrypted) {
     throw new Error("Invalid password")

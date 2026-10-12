@@ -337,12 +337,58 @@ describe("refusing an unsafe tree", () => {
     await expect(fetchV3Leaves(connection)).rejects.toThrow(/not contiguous/)
   })
 
-  it("throws on a duplicated leaf index", async () => {
+  it("throws on a duplicated leaf index and names the pool-reset case", async () => {
     const { connection } = fakeConnection([
       { logs: emittedBy(PROGRAM_ID, depositEvent(0xa0, 0)) },
       { logs: emittedBy(PROGRAM_ID, depositEvent(0xa1, 0)) }
     ])
-    await expect(fetchV3Leaves(connection)).rejects.toThrow(/not contiguous/)
+    await expect(fetchV3Leaves(connection)).rejects.toThrow(
+      /not contiguous.*same-program-id pool reset/
+    )
+  })
+
+  it("rebuilds from the latest on-chain tree reset boundary under the same program id", async () => {
+    const { connection } = fakeConnection([
+      { logs: emittedBy(PROGRAM_ID, depositEvent(0xa0, 0)) },
+      { logs: emittedBy(PROGRAM_ID, transactEvent(0xb0, 0xb1)) },
+      {
+        logs: [
+          `Program ${PROGRAM_ID} invoke [1]`,
+          "Program log: Instruction: InitializeMerkleTree",
+          "Program log: Merkle tree initialized",
+          `Program ${PROGRAM_ID} success`
+        ]
+      },
+      { logs: emittedBy(PROGRAM_ID, depositEvent(0xc0, 0)) },
+      { logs: emittedBy(PROGRAM_ID, depositSplEvent(0xc1, 1)) },
+      { logs: emittedBy(PROGRAM_ID, transactEvent(0xd0, 0xd1)) }
+    ])
+    const leaves = await fetchV3Leaves(connection)
+    expect(leaves.map((l) => [l.index, l.commitmentHex.slice(0, 2)])).toEqual([
+      [0, "c0"],
+      [1, "c1"],
+      [2, "d0"],
+      [3, "d1"]
+    ])
+  })
+
+  it("ignores a tree reset log emitted by a different program", async () => {
+    const { connection } = fakeConnection([
+      { logs: emittedBy(PROGRAM_ID, depositEvent(0xa0, 0)) },
+      {
+        logs: [
+          `Program ${OTHER_PROGRAM} invoke [1]`,
+          "Program log: Merkle tree initialized",
+          `Program ${OTHER_PROGRAM} success`
+        ]
+      },
+      { logs: emittedBy(PROGRAM_ID, depositEvent(0xa1, 1)) }
+    ])
+    const leaves = await fetchV3Leaves(connection)
+    expect(leaves.map((l) => [l.index, l.commitmentHex.slice(0, 2)])).toEqual([
+      [0, "a0"],
+      [1, "a1"]
+    ])
   })
 
   it("retries a transient null getTransaction rather than dropping the leaf", async () => {

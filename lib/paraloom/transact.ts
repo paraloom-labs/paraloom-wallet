@@ -146,6 +146,30 @@ function eventPayloads(logs: string[], expectedProgramId: string): Uint8Array[] 
   return out
 }
 
+function hasTreeResetLog(logs: string[], expectedProgramId: string): boolean {
+  const stack: string[] = []
+  for (const line of logs) {
+    const invoke = line.match(/^Program (\S+) invoke \[\d+\]$/)
+    if (invoke) {
+      stack.push(invoke[1])
+      continue
+    }
+    if (/^Program \S+ (success|failed)/.test(line)) {
+      stack.pop()
+      continue
+    }
+    if (
+      stack[stack.length - 1] === expectedProgramId &&
+      /^Program log: (Merkle tree initialized|Merkle tree reset|Instruction: InitializeMerkleTree|Instruction: ResetMerkleTree)$/.test(
+        line
+      )
+    ) {
+      return true
+    }
+  }
+  return false
+}
+
 function startsWith(buf: Uint8Array, prefix: Uint8Array): boolean {
   if (buf.length < prefix.length) return false
   for (let i = 0; i < prefix.length; i++) if (buf[i] !== prefix[i]) return false
@@ -209,6 +233,14 @@ export async function fetchV3Leaves(connection: Connection): Promise<V3Leaf[]> {
       )
     }
     const logs = tx.meta?.logMessages ?? []
+    // Audit residual A2 (#724): on a same-program-id pool reset, the signature
+    // history spans both epochs. Start the rebuild from the latest on-chain
+    // tree initialization/reset boundary so prior-epoch leaves do not collide
+    // at low indices.
+    if (hasTreeResetLog(logs, PROGRAM_ID)) {
+      leaves.length = 0
+      transactLeafCursor = null
+    }
     for (const payload of eventPayloads(logs, PROGRAM_ID)) {
       if (startsWith(payload, DEPOSIT_NOTE_EVENT_DISCRIMINATOR)) {
         const body = payload.slice(8)
@@ -247,8 +279,12 @@ export async function fetchV3Leaves(connection: Connection): Promise<V3Leaf[]> {
   // "prover root not recognized" later.
   for (let i = 0; i < leaves.length; i++) {
     if (leaves[i].index !== i) {
+      const resetHint =
+        leaves[i].index < i
+          ? " (duplicate leaf index — possible same-program-id pool reset)"
+          : ""
       throw new Error(
-        `leaf history is not contiguous at position ${i} (saw index ${leaves[i].index}); ` +
+        `leaf history is not contiguous at position ${i} (saw index ${leaves[i].index})${resetHint}; ` +
           `refusing to build a tree from an incomplete leaf set`
       )
     }

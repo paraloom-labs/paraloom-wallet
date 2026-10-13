@@ -618,6 +618,16 @@ export async function privateSwapFromToken(
           spendPrivkeyHex,
           reshieldLamports
         )
+        await saveSwapOutput({
+          freshAddress: fresh.publicKey.toBase58(),
+          freshSecretKeyHex: Buffer.from(fresh.secretKey).toString("hex"),
+          outputMint: params.outputMint,
+          outAmount: out_amount,
+          swapSignature,
+          reshield: true,
+          reshieldRecovered: true,
+          createdAt: Date.now()
+        })
       }
     } catch {
       // leave the swapped SOL as a private buy at the fresh address

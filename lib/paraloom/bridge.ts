@@ -18,6 +18,7 @@ import {
   BRIDGE_STATE_SEED,
   BRIDGE_VAULT_SEED,
   DEPOSIT_DISCRIMINATOR,
+  DEPOSIT_NOTE_DISCRIMINATOR,
   DEPOSIT_NOTE_SPL_DISCRIMINATOR,
   MERKLE_TREE_SEED,
   PROGRAM_ID,
@@ -445,12 +446,10 @@ function bytesStartWith(a: Uint8Array, prefix: Uint8Array): boolean {
   return true
 }
 
-/** Recover the re-shield note (amount + blinding) from the fresh address's
- *  on-chain `deposit_note_spl` transaction, or null if none is found. Layout:
- *  disc(8) | amount u64 LE (8) | pubkey(32) | blinding(32). */
-export async function recoverReshieldedNote(
+async function recoverNoteByDiscriminator(
   connection: Connection,
-  freshAddress: string
+  freshAddress: string,
+  discriminator: Uint8Array
 ): Promise<{ amount: string; blindingHex: string; signature: string } | null> {
   const pk = new PublicKey(freshAddress)
   const sigs = await connection.getSignaturesForAddress(pk, { limit: 12 })
@@ -474,7 +473,7 @@ export async function recoverReshieldedNote(
         typeof (ix as { data: unknown }).data === "string"
           ? base58Decode((ix as { data: string }).data)
           : Uint8Array.from((ix as { data: Uint8Array }).data)
-      if (data.length < 80 || !bytesStartWith(data, DEPOSIT_NOTE_SPL_DISCRIMINATOR)) {
+      if (data.length < 80 || !bytesStartWith(data, discriminator)) {
         continue
       }
       const dv = new DataView(data.buffer, data.byteOffset, data.byteLength)
@@ -488,4 +487,23 @@ export async function recoverReshieldedNote(
     }
   }
   return null
+}
+
+/** Recover the re-shield note (amount + blinding) from the fresh address's
+ *  on-chain `deposit_note_spl` transaction, or null if none is found. Layout:
+ *  disc(8) | amount u64 LE (8) | pubkey(32) | blinding(32). */
+export async function recoverReshieldedNote(
+  connection: Connection,
+  freshAddress: string
+): Promise<{ amount: string; blindingHex: string; signature: string } | null> {
+  return recoverNoteByDiscriminator(connection, freshAddress, DEPOSIT_NOTE_SPL_DISCRIMINATOR)
+}
+
+/** Recover the native SOL re-shield note (amount + blinding) from the fresh
+ *  address's on-chain `deposit_note` transaction, or null if none is found. */
+export async function recoverReshieldedNativeNote(
+  connection: Connection,
+  freshAddress: string
+): Promise<{ amount: string; blindingHex: string; signature: string } | null> {
+  return recoverNoteByDiscriminator(connection, freshAddress, DEPOSIT_NOTE_DISCRIMINATOR)
 }

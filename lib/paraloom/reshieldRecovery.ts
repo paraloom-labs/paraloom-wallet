@@ -6,15 +6,20 @@
 
 import { Connection, Keypair, PublicKey } from "@solana/web3.js"
 
+import { addressSpendPubHex } from "~lib/crypto/keyManagement"
 import {
   associatedTokenAddress,
   depositSpl,
+  recoverReshieldedNativeNote,
   recoverReshieldedNote
 } from "~lib/paraloom/bridge"
 import { addNote } from "~lib/paraloom/notes"
-import type { ReshieldedNote } from "~lib/paraloom/privateSwap"
+import { isNativeSolOutput, type ReshieldedNote } from "~lib/paraloom/privateSwap"
 import { listSwapOutputs, saveSwapOutput } from "~lib/paraloom/swapOutputs"
-import { assetIdForMint } from "~lib/prover"
+import { sendDepositNote } from "~lib/paraloom/transact"
+import { assetIdForMint, NATIVE_ASSET_HEX, v3NoteCommitment } from "~lib/prover"
+
+const RESHIELD_FEE_RESERVE = 1_000_000n
 
 // Persist a re-shielded SPL note against the wallet's shielded account. Called
 // the instant a deposit is submitted (via the privateSwap onReshielded callback,
@@ -49,9 +54,75 @@ export async function recoverReshields(
   let recovered = 0
   const outputs = await listSwapOutputs()
   for (const o of outputs) {
-    if (!o.reshield || !o.swapSignature || o.outputMint === "SOL") continue
+    if (!o.reshield || !o.swapSignature) continue
     if (o.reshieldRecovered) continue
     try {
+      if (isNativeSolOutput(o.outputMint)) {
+        const pubkeyHex = addressSpendPubHex(shieldedAddress)
+        const rec = await recoverReshieldedNativeNote(connection, o.freshAddress)
+        if (rec) {
+          const commitment = await v3NoteCommitment(
+            BigInt(rec.amount),
+            pubkeyHex,
+            rec.blindingHex
+          )
+          await addNote(shieldedAddress, {
+            amount: rec.amount,
+            blinding: rec.blindingHex,
+            assetId: NATIVE_ASSET_HEX,
+            signature: rec.signature,
+            createdAt: Date.now(),
+            spent: false,
+            source: "deposit",
+            commitment
+          })
+          await saveSwapOutput({ ...o, reshieldRecovered: true })
+          recovered++
+          console.log(`[paraloom] recovered orphaned native reshield note at ${o.freshAddress}`)
+          continue
+        }
+
+        const fresh = Keypair.fromSecretKey(
+          Uint8Array.from(Buffer.from(o.freshSecretKeyHex, "hex"))
+        )
+        const solBal = BigInt(await connection.getBalance(fresh.publicKey))
+        const reshieldLamports = solBal - RESHIELD_FEE_RESERVE
+        if (reshieldLamports > 0n) {
+          const blinding = new Uint8Array(32)
+          crypto.getRandomValues(blinding)
+          blinding[31] &= 0x1f
+          const blindingHex = Buffer.from(blinding).toString("hex")
+          const commitment = await v3NoteCommitment(
+            reshieldLamports,
+            pubkeyHex,
+            blindingHex
+          )
+          await sendDepositNote(
+            connection,
+            fresh,
+            reshieldLamports,
+            Uint8Array.from(Buffer.from(pubkeyHex, "hex")),
+            blinding,
+            async (sig) => {
+              await addNote(shieldedAddress, {
+                amount: reshieldLamports.toString(),
+                blinding: blindingHex,
+                assetId: NATIVE_ASSET_HEX,
+                signature: sig,
+                createdAt: Date.now(),
+                spent: false,
+                source: "deposit",
+                commitment
+              })
+            }
+          )
+          await saveSwapOutput({ ...o, reshieldRecovered: true })
+          recovered++
+          console.log(`[paraloom] finished pending native reshield at ${o.freshAddress}`)
+        }
+        continue
+      }
+
       const mint = new PublicKey(o.outputMint)
       const mintHex = Buffer.from(mint.toBytes()).toString("hex")
 

@@ -221,6 +221,7 @@ export async function depositSpl(
   const recipient = hexToBytes(addressSpendPubHex(shieldedAddress))
   const blinding = new Uint8Array(32)
   crypto.getRandomValues(blinding)
+  blinding[31] &= 0x1f // stay well under the BN254 modulus (require_canonical_field)
 
   const ata = associatedTokenAddress(depositor.publicKey, mint, tokenProgram)
   const ix = buildDepositSplInstruction(
@@ -384,6 +385,7 @@ export async function deposit(
   const recipient = hexToBytes(addressSpendPubHex(wallet.shieldedAddress))
   const blinding = new Uint8Array(32)
   crypto.getRandomValues(blinding)
+  blinding[31] &= 0x1f // stay well under the BN254 modulus
 
   const ix = buildDepositInstruction(signer.publicKey, amountLamports, recipient, blinding)
   const tx = new Transaction().add(ix)

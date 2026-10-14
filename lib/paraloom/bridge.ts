@@ -445,13 +445,18 @@ function bytesStartWith(a: Uint8Array, prefix: Uint8Array): boolean {
   return true
 }
 
-/** Recover the re-shield note (amount + blinding) from the fresh address's
+/** Recover the re-shield note (amount + pubkey + blinding) from the fresh address's
  *  on-chain `deposit_note_spl` transaction, or null if none is found. Layout:
  *  disc(8) | amount u64 LE (8) | pubkey(32) | blinding(32). */
 export async function recoverReshieldedNote(
   connection: Connection,
   freshAddress: string
-): Promise<{ amount: string; blindingHex: string; signature: string } | null> {
+): Promise<{
+  amount: string
+  pubkeyHex: string
+  blindingHex: string
+  signature: string
+} | null> {
   const pk = new PublicKey(freshAddress)
   const sigs = await connection.getSignaturesForAddress(pk, { limit: 12 })
   for (const s of sigs) {
@@ -479,9 +484,11 @@ export async function recoverReshieldedNote(
       }
       const dv = new DataView(data.buffer, data.byteOffset, data.byteLength)
       const amount = dv.getBigUint64(8, true)
+      const pubkey = data.slice(16, 48)
       const blinding = data.slice(48, 80)
       return {
         amount: amount.toString(),
+        pubkeyHex: Buffer.from(pubkey).toString("hex"),
         blindingHex: Buffer.from(blinding).toString("hex"),
         signature: s.signature
       }

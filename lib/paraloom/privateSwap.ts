@@ -315,6 +315,7 @@ export async function privateSwap(
   await saveSwapOutput({
     freshAddress: fresh.publicKey.toBase58(),
     freshSecretKeyHex: Buffer.from(fresh.secretKey).toString("hex"),
+    shieldedAddress,
     outputMint: params.outputMint,
     outAmount: 0,
     swapSignature: "",
@@ -388,6 +389,7 @@ export async function privateSwap(
   await saveSwapOutput({
     freshAddress: fresh.publicKey.toBase58(),
     freshSecretKeyHex: Buffer.from(fresh.secretKey).toString("hex"),
+    shieldedAddress,
     outputMint: params.outputMint,
     outAmount: out_amount,
     swapSignature,
@@ -504,6 +506,7 @@ export async function privateSwapFromToken(
   await saveSwapOutput({
     freshAddress: fresh.publicKey.toBase58(),
     freshSecretKeyHex: Buffer.from(fresh.secretKey).toString("hex"),
+    shieldedAddress,
     outputMint: params.outputMint,
     outAmount: 0,
     swapSignature: "",
@@ -594,6 +597,7 @@ export async function privateSwapFromToken(
   await saveSwapOutput({
     freshAddress: fresh.publicKey.toBase58(),
     freshSecretKeyHex: Buffer.from(fresh.secretKey).toString("hex"),
+    shieldedAddress,
     outputMint: params.outputMint,
     outAmount: out_amount,
     swapSignature,

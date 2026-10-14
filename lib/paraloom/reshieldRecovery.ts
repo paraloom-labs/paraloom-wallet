@@ -6,6 +6,7 @@
 
 import { Connection, Keypair, PublicKey } from "@solana/web3.js"
 
+import { addressSpendPubHex } from "~lib/crypto/keyManagement"
 import {
   associatedTokenAddress,
   depositSpl,
@@ -13,8 +14,12 @@ import {
 } from "~lib/paraloom/bridge"
 import { addNote } from "~lib/paraloom/notes"
 import type { ReshieldedNote } from "~lib/paraloom/privateSwap"
-import { listSwapOutputs, saveSwapOutput } from "~lib/paraloom/swapOutputs"
-import { assetIdForMint } from "~lib/prover"
+import {
+  listSwapOutputs,
+  saveSwapOutput,
+  swapOutputBelongsTo
+} from "~lib/paraloom/swapOutputs"
+import { assetIdForMint, v3NoteCommitmentAsset } from "~lib/prover"
 
 // Persist a re-shielded SPL note against the wallet's shielded account. Called
 // the instant a deposit is submitted (via the privateSwap onReshielded callback,
@@ -24,6 +29,16 @@ export async function persistReshieldedNote(
   shieldedAddress: string,
   note: ReshieldedNote
 ): Promise<void> {
+  const spendPubHex = addressSpendPubHex(shieldedAddress)
+  const commitment =
+    spendPubHex.length === 64
+      ? await v3NoteCommitmentAsset(
+          BigInt(note.amount),
+          spendPubHex,
+          note.blindingHex,
+          note.assetId
+        ).catch(() => undefined)
+      : undefined
   await addNote(shieldedAddress, {
     amount: note.amount,
     blinding: note.blindingHex,
@@ -32,7 +47,8 @@ export async function persistReshieldedNote(
     signature: note.depositSignature,
     createdAt: Date.now(),
     spent: false,
-    source: "deposit"
+    source: "deposit",
+    commitment
   })
 }
 
@@ -47,10 +63,12 @@ export async function recoverReshields(
   shieldedAddress: string
 ): Promise<number> {
   let recovered = 0
+  const expectedPubkeyHex = addressSpendPubHex(shieldedAddress).toLowerCase()
   const outputs = await listSwapOutputs()
   for (const o of outputs) {
     if (!o.reshield || !o.swapSignature || o.outputMint === "SOL") continue
     if (o.reshieldRecovered) continue
+    if (!swapOutputBelongsTo(o, shieldedAddress)) continue
     try {
       const mint = new PublicKey(o.outputMint)
       const mintHex = Buffer.from(mint.toBytes()).toString("hex")
@@ -59,6 +77,13 @@ export async function recoverReshields(
       // the on-chain instruction so the balance is visible and spendable.
       const rec = await recoverReshieldedNote(connection, o.freshAddress)
       if (rec) {
+        if (
+          rec.pubkeyHex &&
+          expectedPubkeyHex.length === 64 &&
+          rec.pubkeyHex.toLowerCase() !== expectedPubkeyHex
+        ) {
+          continue
+        }
         await persistReshieldedNote(shieldedAddress, {
           assetId: await assetIdForMint(mintHex),
           mint: o.outputMint,
@@ -66,7 +91,11 @@ export async function recoverReshields(
           blindingHex: rec.blindingHex,
           depositSignature: rec.signature
         })
-        await saveSwapOutput({ ...o, reshieldRecovered: true })
+        await saveSwapOutput({
+          ...o,
+          shieldedAddress: o.shieldedAddress ?? shieldedAddress,
+          reshieldRecovered: true
+        })
         recovered++
         console.log(`[paraloom] recovered orphaned reshield note at ${o.freshAddress}`)
         continue
@@ -99,7 +128,11 @@ export async function recoverReshields(
               depositSignature: note.signature
             })
         )
-        await saveSwapOutput({ ...o, reshieldRecovered: true })
+        await saveSwapOutput({
+          ...o,
+          shieldedAddress: o.shieldedAddress ?? shieldedAddress,
+          reshieldRecovered: true
+        })
         recovered++
         console.log(`[paraloom] finished pending reshield at ${o.freshAddress}`)
       }

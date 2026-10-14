@@ -27,7 +27,11 @@ import {
   RESUME_GRACE_MS,
   RESUME_MIN_LAMPORTS
 } from "./swapReconcileClassify"
-import { listSwapOutputs, saveSwapOutput } from "./swapOutputs"
+import {
+  listSwapOutputs,
+  saveSwapOutput,
+  swapOutputBelongsTo
+} from "./swapOutputs"
 
 export { classifyStrand, RESUME_GRACE_MS, RESUME_MIN_LAMPORTS }
 export type { StrandAction } from "./swapReconcileClassify"
@@ -49,6 +53,7 @@ export async function reconcileSwapOutputs(
     const now = Date.now()
     for (const o of outputs) {
       if (o.swapSignature) continue
+      if (!swapOutputBelongsTo(o, shieldedAddress)) continue
       if (now - o.createdAt < RESUME_GRACE_MS) continue
 
       const freshPub = new PublicKey(o.freshAddress)

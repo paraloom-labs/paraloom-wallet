@@ -8,6 +8,9 @@ export interface SwapOutput {
   freshAddress: string
   /** Secret key (hex) of the fresh address — needed to move the token later. */
   freshSecretKeyHex: string
+  /** Shielded account that funded and owns this swap output. Optional on legacy
+   *  rows persisted before multi-account scoping was added. */
+  shieldedAddress?: string
   /** Output mint (base58) or "SOL". */
   outputMint: string
   /** Output amount the route reported, in the out mint's base units. */
@@ -26,6 +29,14 @@ export interface SwapOutput {
 
 const KEY = "paraloom_swap_outputs"
 
+export function swapOutputBelongsTo(
+  output: SwapOutput,
+  shieldedAddress?: string
+): boolean {
+  if (!shieldedAddress || !output.shieldedAddress) return true
+  return output.shieldedAddress === shieldedAddress
+}
+
 // Upsert by freshAddress: the key is saved early (before the withdraw) so it can
 // never be lost, then the same entry is updated with the realized amount +
 // signature once the swap lands. Keyed on the address so the two writes collapse
@@ -39,9 +50,13 @@ export async function saveSwapOutput(output: SwapOutput): Promise<void> {
   await chrome.storage.local.set({ [KEY]: current })
 }
 
-export async function listSwapOutputs(): Promise<SwapOutput[]> {
+export async function listSwapOutputs(
+  shieldedAddress?: string
+): Promise<SwapOutput[]> {
   const stored = await chrome.storage.local.get(KEY)
-  return (stored[KEY] as SwapOutput[]) ?? []
+  const all = (stored[KEY] as SwapOutput[]) ?? []
+  if (!shieldedAddress) return all
+  return all.filter((o) => swapOutputBelongsTo(o, shieldedAddress))
 }
 
 // Drop a swap row by its fresh address. Used to clear a stale "pending" row the

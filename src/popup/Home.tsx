@@ -169,10 +169,10 @@ export function Home({ onLock }: HomeProps) {
   }, [])
 
   // Load the private-swap outputs (tokens bought at fresh unlinkable addresses);
-  // refresh when the Activity tab is opened.
+  // refresh when the Activity tab is opened or the active account changes.
   useEffect(() => {
-    listSwapOutputs().then(setSwapOutputs).catch(() => {})
-  }, [bottomTab])
+    listSwapOutputs(wallet.shieldedAddress).then(setSwapOutputs).catch(() => {})
+  }, [bottomTab, wallet.shieldedAddress])
 
   // Refresh the connected-sites list whenever the Settings tab is opened.
   useEffect(() => {
@@ -311,7 +311,10 @@ export function Home({ onLock }: HomeProps) {
     // it always fires when the wallet is opened, and the reads below then reflect
     // the recovered shielded balance.
     try {
-      await recoverReshields(getConnection(network), wallet.shieldedAddress)
+      await recoverReshields(
+        getConnection("mainnet-beta"),
+        wallet.shieldedAddress
+      )
     } catch {
       // best-effort — the reads below still show whatever is already local
     }
@@ -326,7 +329,9 @@ export function Home({ onLock }: HomeProps) {
         wallet.shieldedAddress
       )
       if (resolved > 0) {
-        listSwapOutputs().then(setSwapOutputs).catch(() => {})
+        listSwapOutputs(wallet.shieldedAddress)
+          .then(setSwapOutputs)
+          .catch(() => {})
       }
     } catch {
       // best-effort

@@ -8,6 +8,9 @@ export interface SwapOutput {
   freshAddress: string
   /** Secret key (hex) of the fresh address — needed to move the token later. */
   freshSecretKeyHex: string
+  /** Input token mint (base58) when the swap spent a shielded SPL token
+   *  (Plan A′ self-funded gas). Absent or "SOL" means a native-SOL input. */
+  inputMint?: string
   /** Output mint (base58) or "SOL". */
   outputMint: string
   /** Output amount the route reported, in the out mint's base units. */

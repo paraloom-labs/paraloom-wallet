@@ -89,6 +89,52 @@ describe("classifyStrand", () => {
       })
     ).toBe("unresolved")
   })
+
+  it("resumes a token-input swap when withdrawn input tokens sit at the fresh ATA", () => {
+    // Even if outputMint is SOL/WSOL or an SPL token, a positive inputTokenAmount
+    // means the token withdraw (step 3 of privateSwapFromToken) landed and the
+    // Jupiter swap leg never ran.
+    expect(
+      classifyStrand({
+        hasSignature: false,
+        ageMs: OLD,
+        solLamports: 6_933_220n,
+        tokenAmount: 0n,
+        isTokenInput: true,
+        inputTokenAmount: 100_000_000n
+      })
+    ).toBe("resume")
+  })
+
+  it("does not swap gas SOL into outputMint when a token-input swap has no input tokens at the fresh ATA", () => {
+    // GAS_LAMPORTS (9M) minus the 0.25% fee and input-mint ATA rent leaves ~6.93M
+    // lamports (> RESUME_MIN_LAMPORTS = 6M) at the fresh address. If the token
+    // withdraw never settled (inputTokenAmount === 0n), classifyStrand must NOT
+    // return "resume" and swap the gas SOL as if it were a SOL-input swap.
+    expect(
+      classifyStrand({
+        hasSignature: false,
+        ageMs: OLD,
+        solLamports: 6_933_220n,
+        tokenAmount: 0n,
+        isTokenInput: true,
+        inputTokenAmount: 0n
+      })
+    ).toBe("unresolved")
+  })
+
+  it("marks a token-input swap landed when input tokens were swapped into output tokens", () => {
+    expect(
+      classifyStrand({
+        hasSignature: false,
+        ageMs: OLD,
+        solLamports: 6_928_000n,
+        tokenAmount: 500_000_000n,
+        isTokenInput: true,
+        inputTokenAmount: 0n
+      })
+    ).toBe("landed")
+  })
 })
 
 describe("isNativeSolOutput", () => {

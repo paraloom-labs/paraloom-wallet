@@ -20,7 +20,11 @@
 
 import { Connection, PublicKey } from "@solana/web3.js"
 
-import { isNativeSolOutput, resumeSwapAtFreshAddress } from "./privateSwap"
+import {
+  isNativeSolOutput,
+  resumeSwapAtFreshAddress,
+  resumeTokenSwapAtFreshAddress
+} from "./privateSwap"
 import { persistReshieldedNote } from "./reshieldRecovery"
 import {
   classifyStrand,
@@ -59,8 +63,32 @@ export async function reconcileSwapOutputs(
         continue // RPC blip: retry on the next open rather than guess
       }
 
+      const isTokenInput = Boolean(o.inputMint && !isNativeSolOutput(o.inputMint))
+      let inputTokenAmount = 0n
+      if (isTokenInput && o.inputMint) {
+        try {
+          const accts = await connection.getParsedTokenAccountsByOwner(freshPub, {
+            mint: new PublicKey(o.inputMint)
+          })
+          inputTokenAmount = accts.value.reduce(
+            (s, a) =>
+              s +
+              BigInt(
+                (a.account.data as { parsed: { info: { tokenAmount: { amount: string } } } })
+                  .parsed.info.tokenAmount.amount
+              ),
+            0n
+          )
+        } catch {
+          // no input token account yet
+        }
+      }
+
       let tokenAmount = 0n
-      if (solLamports <= RESUME_MIN_LAMPORTS && !isNativeSolOutput(o.outputMint)) {
+      if (
+        (isTokenInput ? inputTokenAmount === 0n : solLamports <= RESUME_MIN_LAMPORTS) &&
+        !isNativeSolOutput(o.outputMint)
+      ) {
         try {
           const accts = await connection.getParsedTokenAccountsByOwner(freshPub, {
             mint: new PublicKey(o.outputMint)
@@ -83,28 +111,48 @@ export async function reconcileSwapOutputs(
         hasSignature: false,
         ageMs: now - o.createdAt,
         solLamports,
-        tokenAmount
+        tokenAmount,
+        isTokenInput,
+        inputTokenAmount
       })
 
       // A "SOL" output means this was a token -> SOL swap (or its stranded gas
-      // leg): the SOL at the fresh address is the OUTPUT, never a SOL input to
-      // swap again, so never resume it (that would route SOL -> SOL). Record the
-      // SOL as landed instead; it is real and recoverable with the saved key.
-      if (action === "resume" && isNativeSolOutput(o.outputMint)) {
+      // leg): once the input token is no longer in `fresh`'s ATA
+      // (`inputTokenAmount === 0n`), the SOL at the fresh address is the OUTPUT,
+      // never a SOL input to swap again, so record the SOL as landed instead.
+      // When `inputTokenAmount > 0n`, the withdrawn input token is still waiting
+      // in `fresh`'s ATA and `action === "resume"` must execute `inputMint -> SOL`.
+      if (
+        isNativeSolOutput(o.outputMint) &&
+        inputTokenAmount === 0n &&
+        solLamports > RESUME_MIN_LAMPORTS
+      ) {
         action = "landed"
         tokenAmount = solLamports
       }
 
       if (action === "resume") {
         try {
-          const r = await resumeSwapAtFreshAddress(
-            connection,
-            shieldedAddress,
-            o.freshSecretKeyHex,
-            o.outputMint,
-            o.reshield ?? false,
-            (note) => persistReshieldedNote(shieldedAddress, note)
-          )
+          const r =
+            isTokenInput && o.inputMint
+              ? await resumeTokenSwapAtFreshAddress(
+                  connection,
+                  shieldedAddress,
+                  o.freshSecretKeyHex,
+                  o.inputMint,
+                  inputTokenAmount,
+                  o.outputMint,
+                  o.reshield ?? false,
+                  (note) => persistReshieldedNote(shieldedAddress, note)
+                )
+              : await resumeSwapAtFreshAddress(
+                  connection,
+                  shieldedAddress,
+                  o.freshSecretKeyHex,
+                  o.outputMint,
+                  o.reshield ?? false,
+                  (note) => persistReshieldedNote(shieldedAddress, note)
+                )
           await saveSwapOutput({
             ...o,
             outAmount: r.outAmount,

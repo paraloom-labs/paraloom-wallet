@@ -504,6 +504,7 @@ export async function privateSwapFromToken(
   await saveSwapOutput({
     freshAddress: fresh.publicKey.toBase58(),
     freshSecretKeyHex: Buffer.from(fresh.secretKey).toString("hex"),
+    inputMint: params.inputMint,
     outputMint: params.outputMint,
     outAmount: 0,
     swapSignature: "",
@@ -594,9 +595,11 @@ export async function privateSwapFromToken(
   await saveSwapOutput({
     freshAddress: fresh.publicKey.toBase58(),
     freshSecretKeyHex: Buffer.from(fresh.secretKey).toString("hex"),
+    inputMint: params.inputMint,
     outputMint: params.outputMint,
     outAmount: out_amount,
     swapSignature,
+    reshield: params.reshield ?? false,
     createdAt: Date.now()
   })
   await waitForSwapConfirmation(connection, swapSignature)
@@ -684,7 +687,7 @@ export async function resumeSwapAtFreshAddress(
   )
 
   let reshielded: ReshieldedNote | undefined
-  if (reshield && outputMint !== "SOL") {
+  if (reshield && !isNativeSolOutput(outputMint)) {
     reshielded = await reshieldToken(
       connection,
       fresh,
@@ -695,4 +698,54 @@ export async function resumeSwapAtFreshAddress(
   }
 
   return { swapSignature, outAmount, reshielded }
+}
+
+/**
+ * Finish a token-input swap (`privateSwapFromToken`) whose token withdraw into
+ * `fresh`'s `inputMint` ATA already settled (`inputTokenAmount > 0`), but whose
+ * Jupiter swap leg (`inputMint -> outputMint`) never completed.
+ */
+export async function resumeTokenSwapAtFreshAddress(
+  connection: Connection,
+  shieldedAddress: string,
+  freshSecretKeyHex: string,
+  inputMint: string,
+  inputTokenAmount: bigint,
+  outputMint: string,
+  reshield: boolean,
+  onReshielded?: (note: ReshieldedNote) => Promise<void>
+): Promise<ResumeSwapResult> {
+  if (inputTokenAmount <= 0n) {
+    throw new Error("fresh address holds no input token balance to swap")
+  }
+  const fresh = Keypair.fromSecretKey(
+    Uint8Array.from(Buffer.from(freshSecretKeyHex, "hex"))
+  )
+  const { out_amount, swap_transaction } = await routeSwap(
+    fresh.publicKey.toBase58(),
+    outputMint,
+    inputTokenAmount,
+    inputMint
+  )
+  const tx = VersionedTransaction.deserialize(
+    Uint8Array.from(Buffer.from(swap_transaction, "base64"))
+  )
+  tx.sign([fresh])
+  const swapSignature = await connection.sendRawTransaction(tx.serialize(), {
+    maxRetries: 5
+  })
+  await waitForSwapConfirmation(connection, swapSignature)
+
+  let reshielded: ReshieldedNote | undefined
+  if (reshield && !isNativeSolOutput(outputMint)) {
+    reshielded = await reshieldToken(
+      connection,
+      fresh,
+      shieldedAddress,
+      outputMint,
+      onReshielded
+    )
+  }
+
+  return { swapSignature, outAmount: out_amount, reshielded }
 }

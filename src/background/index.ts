@@ -447,14 +447,16 @@ async function handleConnect(sender: chrome.runtime.MessageSender) {
     throw new Error("No wallet found")
   }
 
-  const succeed = () => {
+  const succeed = async () => {
     connectedOrigin = origin
     void recordActivity(Date.now())
+    const session = await loadSession()
+    const activeAddress = session?.wallet?.shieldedAddress ?? stored.address
     return {
       success: true,
       data: {
-        address: stored.address,
-        publicKey: stored.address // shielded address as identifier
+        address: activeAddress,
+        publicKey: activeAddress // shielded address as identifier
       }
     }
   }
@@ -599,6 +601,10 @@ async function handleGetAddress(sender: chrome.runtime.MessageSender) {
     return { address: null }
   }
 
+  const session = await loadSession()
+  if (session?.wallet?.shieldedAddress) {
+    return { address: session.wallet.shieldedAddress }
+  }
   const stored = await getStoredWallet()
   return { address: stored?.address || null }
 }

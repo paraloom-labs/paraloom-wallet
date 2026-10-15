@@ -1,7 +1,7 @@
 import { useState, useEffect, useRef } from "react"
 import { createPortal } from "react-dom"
-import { setLockState, updateAccounts, clearWallet, getNetwork, setNetwork as saveNetwork, getAutoLockMinutes, setAutoLockMinutes } from "~lib/storage/secure"
-import { clearSession } from "~lib/storage/session"
+import { setLockState, updateAccounts, setActiveAccount, clearWallet, getNetwork, setNetwork as saveNetwork, getAutoLockMinutes, setAutoLockMinutes } from "~lib/storage/secure"
+import { clearSession, saveSession } from "~lib/storage/session"
 import { getApprovedOrigins, removeApprovedOrigin } from "~lib/storage/connections"
 import { useWalletStore } from "~lib/store/walletStore"
 import { deriveKeypairFromSeed, decryptWallet, decryptSeedPhrase, deriveBoxKeypair, KDF_VERSION_SCRYPT } from "~lib/crypto/keyManagement"
@@ -566,9 +566,15 @@ export function Home({ onLock }: HomeProps) {
       addAccount(newAccount)
 
       const updatedAccounts = [...accounts, newAccount]
-      await updateAccounts(updatedAccounts)
+      await updateAccounts(updatedAccounts, newIndex)
 
       switchAccount(newIndex)
+      await saveSession({
+        wallet: newAccount.keypair,
+        accounts: updatedAccounts,
+        currentAccountIndex: newIndex,
+        seedPhrase
+      })
 
       setShowAddAccount(false)
       setAddAccountMethod(null)
@@ -577,6 +583,19 @@ export function Home({ onLock }: HomeProps) {
     } catch {
       showToast("Failed to create account", "error")
     }
+  }
+
+  async function handleSwitchAccount(index: number) {
+    const target = accounts.find((a) => a.index === index)
+    if (!target) return
+    switchAccount(index)
+    await setActiveAccount(index, target.keypair.shieldedAddress)
+    await saveSession({
+      wallet: target.keypair,
+      accounts,
+      currentAccountIndex: index,
+      seedPhrase
+    })
   }
 
   async function handleNetworkChange(net: "mainnet-beta" | "devnet") {
@@ -721,7 +740,7 @@ export function Home({ onLock }: HomeProps) {
                   className={`account-item ${account.index === currentAccountIndex ? 'active' : ''}`}
                   onClick={() => {
                     if (account.index !== currentAccountIndex) {
-                      switchAccount(account.index)
+                      void handleSwitchAccount(account.index)
                     }
                     setShowAccountSwitcher(false)
                   }}

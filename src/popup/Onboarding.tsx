@@ -6,6 +6,7 @@ import {
   validateSeedPhrase
 } from "~lib/crypto/keyManagement"
 import { saveEncryptedWallet, setLockState } from "~lib/storage/secure"
+import { saveSession } from "~lib/storage/session"
 import { useWalletStore } from "~lib/store/walletStore"
 import type { Account } from "~lib/store/walletStore"
 import logoImg from "data-base64:~/../assets/icon.png"
@@ -157,6 +158,12 @@ export function Onboarding({ onComplete }: OnboardingProps) {
       setSeedPhraseStore(seed)
       addAccount(initialAccount)
       await setLockState(false)
+      await saveSession({
+        wallet: keypair,
+        accounts: [initialAccount],
+        currentAccountIndex: 0,
+        seedPhrase: seed
+      })
 
       await new Promise(resolve => setTimeout(resolve, 100))
       onComplete()

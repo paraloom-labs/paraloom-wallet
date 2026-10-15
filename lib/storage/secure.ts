@@ -15,6 +15,7 @@ export interface StoredWallet {
   createdAt: number
   encryptedSeedPhrase?: string
   accounts?: SerializableAccount[]
+  currentAccountIndex?: number
   // KDF used for encryptedData + encryptedSeedPhrase. Both blobs are always
   // written together, so one marker covers both. Absent = legacy SHA-256 chain.
   kdfVersion?: number
@@ -40,6 +41,7 @@ export async function saveEncryptedWallet(
     encryptedData: encryptedWallet,
     address,
     createdAt: Date.now(),
+    currentAccountIndex: 0,
     kdfVersion: KDF_VERSION_SCRYPT
   }
 
@@ -133,7 +135,10 @@ export async function setAutoLockMinutes(minutes: number): Promise<void> {
   }
 }
 
-export async function updateAccounts(accounts: Account[]): Promise<void> {
+export async function updateAccounts(
+  accounts: Account[],
+  currentAccountIndex?: number
+): Promise<void> {
   const result = await chrome.storage.local.get(STORAGE_KEY)
   const storage = result[STORAGE_KEY] as WalletStorage
 
@@ -144,6 +149,27 @@ export async function updateAccounts(accounts: Account[]): Promise<void> {
       address: acc.keypair.shieldedAddress,
       balance: acc.balance.toString()
     }))
+    if (typeof currentAccountIndex === "number") {
+      storage.wallet.currentAccountIndex = currentAccountIndex
+      const active = accounts.find(acc => acc.index === currentAccountIndex)
+      if (active) {
+        storage.wallet.address = active.keypair.shieldedAddress
+      }
+    }
+    await chrome.storage.local.set({ [STORAGE_KEY]: storage })
+  }
+}
+
+export async function setActiveAccount(
+  index: number,
+  address: string
+): Promise<void> {
+  const result = await chrome.storage.local.get(STORAGE_KEY)
+  const storage = result[STORAGE_KEY] as WalletStorage | undefined
+
+  if (storage?.wallet) {
+    storage.wallet.currentAccountIndex = index
+    storage.wallet.address = address
     await chrome.storage.local.set({ [STORAGE_KEY]: storage })
   }
 }

@@ -70,6 +70,23 @@ export async function markNoteSpent(account: string, signature: string): Promise
   await writeAll(all)
 }
 
+// Remove an optimistically persisted deposit note whose transaction definitively
+// reverted on-chain (`meta.err !== null`), so a failed deposit never remains in
+// the wallet as a permanent phantom note (paraloom-core#913).
+export async function removeNoteBySignature(
+  account: string,
+  signature: string
+): Promise<void> {
+  if (!signature) return
+  const all = await readAll()
+  const notes = all[account] ?? []
+  const next = notes.filter((n) => n.signature !== signature)
+  if (next.length !== notes.length) {
+    all[account] = next
+    await writeAll(all)
+  }
+}
+
 // Add a note discovered by scanning transfer ciphertexts (#196), de-duplicated
 // by commitment so re-scanning is idempotent.
 export async function addDiscoveredNote(account: string, note: ShieldedNote): Promise<void> {

@@ -5,19 +5,24 @@
 // makes these worth pinning.
 
 import { sha256 } from "@noble/hashes/sha256"
-import type { Connection } from "@solana/web3.js"
+import { Keypair, PublicKey, type Connection } from "@solana/web3.js"
+import { depositSpl, randomFieldBytes32 } from "~lib/paraloom/bridge"
 import {
   DEPOSIT_NOTE_EVENT_DISCRIMINATOR,
   DEPOSIT_NOTE_SPL_EVENT_DISCRIMINATOR,
   PROGRAM_ID,
   TRANSACT_EVENT_DISCRIMINATOR
 } from "~lib/paraloom/constants"
-import { fetchV3Leaves } from "~lib/paraloom/transact"
+import { routeSwap } from "~lib/paraloom/privateSwap"
+import { fetchV3Leaves, sendDepositNote } from "~lib/paraloom/transact"
 import { describe, expect, it, vi } from "vitest"
 
 // transact.ts now reaches ~lib/prover through bridge.ts, and the wasm module
 // cannot load under vitest. Nothing in fetchV3Leaves uses it.
-vi.mock("~lib/prover", () => ({ NATIVE_ASSET_HEX: "00".repeat(32) }))
+vi.mock("~lib/prover", () => ({
+  NATIVE_ASSET_HEX: "00".repeat(32),
+  v3NotePubkey: vi.fn(async () => "11".repeat(32))
+}))
 
 const OTHER_PROGRAM = "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"
 
@@ -361,5 +366,132 @@ describe("refusing an unsafe tree", () => {
       { logs: emittedBy(PROGRAM_ID, depositEvent(0xa0, 0)), nullFor: Infinity }
     ])
     await expect(fetchV3Leaves(connection)).rejects.toThrow(/leaf history may be incomplete/)
+  })
+})
+
+describe("deposit blinding, confirmation rollback, and swap slippage (#913)", () => {
+  it("randomFieldBytes32 masks byte[31] <= 0x1f so every blinding is < BN254 modulus", () => {
+    for (let i = 0; i < 200; i++) {
+      const b = randomFieldBytes32()
+      expect(b).toHaveLength(32)
+      expect(b[31]).toBeLessThanOrEqual(0x1f)
+    }
+  })
+
+  it("depositSpl rolls back onSubmitted note when the transaction fails on-chain", async () => {
+    const depositor = Keypair.generate()
+    const mint = Keypair.generate().publicKey
+    const shieldedAddr = "paraloom1" + "11".repeat(68)
+    const submitted: string[] = []
+    const failed: string[] = []
+
+    const connection = {
+      async getLatestBlockhash() {
+        return { blockhash: new PublicKey(new Uint8Array(32).fill(1)).toBase58() }
+      },
+      async sendRawTransaction() {
+        return "sig-spl-fail"
+      },
+      async getSignatureStatus() {
+        return {
+          value: {
+            err: { InstructionError: [0, { Custom: 6022 }] },
+            confirmationStatus: "confirmed"
+          }
+        }
+      }
+    } as unknown as Connection
+
+    await expect(
+      depositSpl(
+        connection,
+        depositor,
+        shieldedAddr,
+        mint,
+        500_000n,
+        "22".repeat(32),
+        undefined,
+        async (res) => {
+          expect(res.blinding[31]).toBeLessThanOrEqual(0x1f)
+          submitted.push(res.signature)
+        },
+        async (sig) => {
+          failed.push(sig)
+        }
+      )
+    ).rejects.toThrow(/transaction failed on-chain/)
+
+    expect(submitted).toEqual(["sig-spl-fail"])
+    expect(failed).toEqual(["sig-spl-fail"])
+  })
+
+  it("sendDepositNote rolls back onSubmitted note on on-chain error", async () => {
+    const payer = Keypair.generate()
+    const submitted: string[] = []
+    const failed: string[] = []
+
+    const connection = {
+      async getLatestBlockhash() {
+        return { blockhash: new PublicKey(new Uint8Array(32).fill(2)).toBase58() }
+      },
+      async sendRawTransaction() {
+        return "sig-native-fail"
+      },
+      async getSignatureStatus() {
+        return {
+          value: {
+            err: { InstructionError: [0, { Custom: 1 }] },
+            confirmationStatus: "confirmed"
+          }
+        }
+      }
+    } as unknown as Connection
+
+    await expect(
+      sendDepositNote(
+        connection,
+        payer,
+        1_000_000n,
+        new Uint8Array(32).fill(3),
+        new Uint8Array(32).fill(4),
+        async (sig) => {
+          submitted.push(sig)
+        },
+        async (sig) => {
+          failed.push(sig)
+        }
+      )
+    ).rejects.toThrow(/transaction failed on-chain/)
+
+    expect(submitted).toEqual(["sig-native-fail"])
+    expect(failed).toEqual(["sig-native-fail"])
+  })
+
+  it("routeSwap forwards slippage_bps when slippageBps is provided", async () => {
+    const bodies: Record<string, unknown>[] = []
+    const origFetch = globalThis.fetch
+    globalThis.fetch = vi.fn(async (_url, init) => {
+      bodies.push(JSON.parse(String(init?.body ?? "{}")))
+      return new Response(
+        JSON.stringify({ out_amount: 12345, swap_transaction: "AQ==" }),
+        { status: 200 }
+      )
+    }) as unknown as typeof fetch
+
+    try {
+      await routeSwap("fresh-pub", "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v", 10_000_000n, "SOL", 75)
+      await routeSwap("fresh-pub", "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v", 10_000_000n, "SOL")
+    } finally {
+      globalThis.fetch = origFetch
+    }
+
+    expect(bodies[0]).toMatchObject({
+      input_mint: "SOL",
+      output_mint: "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
+      amount: 10_000_000,
+      user_public_key: "fresh-pub",
+      slippage_bps: 75
+    })
+    expect(bodies[1]).not.toHaveProperty("slippage_bps")
   })
 })

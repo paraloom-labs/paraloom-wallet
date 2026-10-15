@@ -28,7 +28,7 @@ import { assetIdForMint } from "~lib/prover"
 
 import { associatedTokenAddress, createTokenAccount, depositSpl } from "./bridge"
 import { SWAP_ROUTER_URL } from "./constants"
-import type { ShieldedNote } from "./notes"
+import { removeNoteBySignature, type ShieldedNote } from "./notes"
 import { saveSwapOutput } from "./swapOutputs"
 import { depositV3, spendV3 } from "./transactFlow"
 
@@ -145,11 +145,12 @@ async function fetchWithTimeout(
 
 // Ask the routing service for an UNSIGNED swap tx, with a bounded timeout and a
 // few retries. The service holds no key; it only builds the tx for `freshPubkey`.
-async function routeSwap(
+export async function routeSwap(
   freshPubkey: string,
   outputMint: string,
   amount: bigint,
-  inputMint = "SOL"
+  inputMint = "SOL",
+  slippageBps?: number
 ): Promise<{ out_amount: number; swap_transaction: string }> {
   let lastErr: unknown
   for (let attempt = 1; attempt <= ROUTE_RETRIES; attempt++) {
@@ -163,7 +164,8 @@ async function routeSwap(
             input_mint: inputMint,
             output_mint: outputMint,
             amount: Number(amount),
-            user_public_key: freshPubkey
+            user_public_key: freshPubkey,
+            ...(slippageBps !== undefined ? { slippage_bps: slippageBps } : {})
           })
         },
         ROUTE_TIMEOUT_MS
@@ -194,12 +196,15 @@ async function executeSwapLeg(
   connection: Connection,
   fresh: Keypair,
   outputMint: string,
-  swapLamports: bigint
+  swapLamports: bigint,
+  slippageBps?: number
 ): Promise<{ swapSignature: string; outAmount: number }> {
   const { out_amount, swap_transaction } = await routeSwap(
     fresh.publicKey.toBase58(),
     outputMint,
-    swapLamports
+    swapLamports,
+    "SOL",
+    slippageBps
   )
   const tx = VersionedTransaction.deserialize(
     Uint8Array.from(Buffer.from(swap_transaction, "base64"))
@@ -255,6 +260,10 @@ async function reshieldToken(
             depositSignature: r.signature
           })
         }
+      },
+      // onFailed: roll back the optimistic note if the deposit reverts on-chain (#913).
+      async (sig) => {
+        await removeNoteBySignature(shieldedAddress, sig)
       }
     )
     return {
@@ -368,7 +377,9 @@ export async function privateSwap(
   const { out_amount, swap_transaction } = await routeSwap(
     fresh.publicKey.toBase58(),
     params.outputMint,
-    swapLamports
+    swapLamports,
+    "SOL",
+    params.slippageBps
   )
 
   // 6. Sign the swap with the fresh key locally and submit it.
@@ -581,7 +592,8 @@ export async function privateSwapFromToken(
     fresh.publicKey.toBase58(),
     params.outputMint,
     tokenLanded,
-    params.inputMint
+    params.inputMint,
+    params.slippageBps
   )
   const tx = VersionedTransaction.deserialize(
     Uint8Array.from(Buffer.from(swap_transaction, "base64"))

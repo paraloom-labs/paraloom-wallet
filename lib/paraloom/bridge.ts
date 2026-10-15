@@ -198,6 +198,17 @@ export function buildDepositSplInstruction(
   })
 }
 
+// Generate 32 random bytes masked to fit strictly below the BN254 scalar field
+// modulus (`Fr::MODULUS` MSB is 0x30 in big-endian / byte[31] in little-endian),
+// so on-chain `solana_poseidon::hashv` never rejects the blinding with
+// `BridgeError::PoseidonHashFailed` (paraloom-core#913).
+export function randomFieldBytes32(): Uint8Array {
+  const b = new Uint8Array(32)
+  crypto.getRandomValues(b)
+  b[31] &= 0x1f
+  return b
+}
+
 // Re-shield `amount` base units of `mint` held at `depositor`'s associated
 // token account into the shielded pool, crediting `shieldedAddress`. `depositor`
 // is the (fresh) keypair that owns the tokens (e.g. a private-swap output
@@ -216,11 +227,13 @@ export async function depositSpl(
   // and in the on-chain tx, so persisting the note now means a confirmation
   // timeout or a worker eviction can never lose a shielded balance that already
   // landed on-chain (#reshield-note-loss).
-  onSubmitted?: (result: DepositResult) => Promise<void>
+  onSubmitted?: (result: DepositResult) => Promise<void>,
+  // Called when the submitted transaction definitively reverts on-chain, so the
+  // optimistic note written by `onSubmitted` can be rolled back (#913).
+  onFailed?: (signature: string) => Promise<void>
 ): Promise<DepositResult> {
   const recipient = hexToBytes(addressSpendPubHex(shieldedAddress))
-  const blinding = new Uint8Array(32)
-  crypto.getRandomValues(blinding)
+  const blinding = randomFieldBytes32()
 
   const ata = associatedTokenAddress(depositor.publicKey, mint, tokenProgram)
   const ix = buildDepositSplInstruction(
@@ -253,7 +266,28 @@ export async function depositSpl(
   }
   // Tolerant confirm (not the hard blockhash deadline): a busy mainnet must not
   // throw "block height exceeded" on a deposit that actually lands.
-  await confirmBySignatureStatus(connection, signature)
+  let confirmed = false
+  try {
+    confirmed = await confirmBySignatureStatus(connection, signature)
+  } catch (e) {
+    if (
+      onFailed &&
+      e instanceof Error &&
+      e.message.startsWith("transaction failed on-chain")
+    ) {
+      try {
+        await onFailed(signature)
+      } catch {
+        // swallow rollback errors so the on-chain failure still surfaces
+      }
+    }
+    throw e
+  }
+  if (!confirmed) {
+    throw new Error(
+      `deposit submitted (${signature}) but not confirmed within timeout`
+    )
+  }
 
   return result
 }
@@ -382,8 +416,7 @@ export async function deposit(
   // commitment binds; `randomness` carries the note's blinding. The spend key
   // itself stays in the wallet (`wallet.spendPrivkey`).
   const recipient = hexToBytes(addressSpendPubHex(wallet.shieldedAddress))
-  const blinding = new Uint8Array(32)
-  crypto.getRandomValues(blinding)
+  const blinding = randomFieldBytes32()
 
   const ix = buildDepositInstruction(signer.publicKey, amountLamports, recipient, blinding)
   const tx = new Transaction().add(ix)

@@ -19,6 +19,7 @@ import { encryptNote } from "./noteCrypto"
 import {
   addNote,
   markNoteSpentByIdentity,
+  removeNoteBySignature,
   setNoteLeafIndex,
   type ShieldedNote
 } from "./notes"
@@ -104,6 +105,9 @@ export async function depositV3(
         source: "deposit",
         commitment
       })
+    },
+    async (sig) => {
+      await removeNoteBySignature(shieldedAddress, sig)
     }
   )
 

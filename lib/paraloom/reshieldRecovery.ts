@@ -11,7 +11,7 @@ import {
   depositSpl,
   recoverReshieldedNote
 } from "~lib/paraloom/bridge"
-import { addNote } from "~lib/paraloom/notes"
+import { addNote, removeNoteBySignature } from "~lib/paraloom/notes"
 import type { ReshieldedNote } from "~lib/paraloom/privateSwap"
 import { listSwapOutputs, saveSwapOutput } from "~lib/paraloom/swapOutputs"
 import { assetIdForMint } from "~lib/prover"
@@ -97,7 +97,8 @@ export async function recoverReshields(
               amount: tokenAmount.toString(),
               blindingHex: Buffer.from(note.blinding).toString("hex"),
               depositSignature: note.signature
-            })
+            }),
+          (sig) => removeNoteBySignature(shieldedAddress, sig)
         )
         await saveSwapOutput({ ...o, reshieldRecovered: true })
         recovered++

@@ -3,6 +3,7 @@ import {
   addNote,
   getNotes,
   markNoteSpentByIdentity,
+  removeNoteBySignature,
   shieldedBalance,
   shieldedTokenBalances,
   type ShieldedNote
@@ -198,5 +199,17 @@ describe("note storage", () => {
     await addNote(ACCOUNT, deposit({ signature: "s1" }))
     await addNote(ACCOUNT, deposit({ signature: "s2", spent: true }))
     expect(await shieldedBalance(ACCOUNT)).toBe(1000n)
+  })
+
+  it("removeNoteBySignature rolls back only the reverted deposit note (#913)", async () => {
+    await addNote(ACCOUNT, deposit({ signature: "sig-ok", amount: "1000" }))
+    await addNote(ACCOUNT, deposit({ signature: "sig-reverted", amount: "500" }))
+    await addDiscoveredNote(ACCOUNT, received("c0".repeat(32), { amount: "250" }))
+
+    await removeNoteBySignature(ACCOUNT, "sig-reverted")
+
+    const notes = await getNotes(ACCOUNT)
+    expect(notes.map((n) => n.signature)).toEqual(["sig-ok", ""])
+    expect(await shieldedBalance(ACCOUNT)).toBe(1250n)
   })
 })

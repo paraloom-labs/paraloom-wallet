@@ -50,11 +50,15 @@ export async function getNotes(account: string): Promise<ShieldedNote[]> {
 export async function addNote(account: string, note: ShieldedNote): Promise<void> {
   const all = await readAll()
   const existing = all[account] ?? []
-  // Idempotent by (non-empty) deposit signature: the same shielded note can be
-  // persisted more than once — the early on-submit persist AND the end-of-flow
-  // persist AND the recovery scan all target the same deposit — so dedupe here
-  // rather than double-counting the balance.
+  // Idempotent by (non-empty) deposit signature or note commitment: the same
+  // shielded note can be persisted more than once — the early on-submit
+  // persist, the end-of-flow persist, and the recovery/transfer scan can all
+  // race on the same deposit or spendV3 change output — so dedupe by both keys
+  // rather than double-counting the balance or selecting the same note twice.
   if (note.signature && existing.some((n) => n.signature === note.signature)) {
+    return
+  }
+  if (note.commitment && existing.some((n) => n.commitment === note.commitment)) {
     return
   }
   all[account] = [...existing, note]
@@ -71,15 +75,17 @@ export async function markNoteSpent(account: string, signature: string): Promise
 }
 
 // Add a note discovered by scanning transfer ciphertexts (#196), de-duplicated
-// by commitment so re-scanning is idempotent.
-export async function addDiscoveredNote(account: string, note: ShieldedNote): Promise<void> {
+// by commitment so re-scanning is idempotent. Returns true when the note was
+// newly inserted and false when the commitment was already stored.
+export async function addDiscoveredNote(account: string, note: ShieldedNote): Promise<boolean> {
   const all = await readAll()
   const notes = all[account] ?? []
   if (notes.some((n) => n.commitment && n.commitment === note.commitment)) {
-    return
+    return false
   }
   all[account] = [...notes, note]
   await writeAll(all)
+  return true
 }
 
 // Fill in a deposit note's on-chain leaf index once it is known. The note is

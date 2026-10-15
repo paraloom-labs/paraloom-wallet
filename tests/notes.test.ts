@@ -199,4 +199,23 @@ describe("note storage", () => {
     await addNote(ACCOUNT, deposit({ signature: "s2", spent: true }))
     expect(await shieldedBalance(ACCOUNT)).toBe(1000n)
   })
+
+  it("de-duplicates change notes by commitment when scan races with spendV3 addNote", async () => {
+    // While spendV3 awaits confirmSettled, /transact/scan already serves the
+    // encrypted change output. If backgroundScan stores it via addDiscoveredNote
+    // before spendV3 finishes and calls addNote (both with signature: ""),
+    // addNote must not append a duplicate copy of the same commitment.
+    const changeCommitment = "c9".repeat(32)
+    const scannedChange = received(changeCommitment, { amount: "4000", createdAt: 10 })
+    const localChange = received(changeCommitment, { amount: "4000", createdAt: 20 })
+
+    expect(await addDiscoveredNote(ACCOUNT, scannedChange)).toBe(true)
+    await addNote(ACCOUNT, localChange)
+    expect(await addDiscoveredNote(ACCOUNT, scannedChange)).toBe(false)
+
+    const notes = await getNotes(ACCOUNT)
+    expect(notes).toHaveLength(1)
+    expect(notes[0].commitment).toBe(changeCommitment)
+    expect(await shieldedBalance(ACCOUNT)).toBe(4000n)
+  })
 })

@@ -459,4 +459,16 @@ describe("ordinary scanning", () => {
     respondWith([])
     expect(await scan()).toBe(0)
   })
+
+  it("ignores zero-value filler outputs sealed to our own box key", async () => {
+    // Every withdraw and exact-spend transfer seals a 0-value filler/change
+    // note to our own box key so the 2-in-2-out circuit has two ciphertexts.
+    // Ingesting it would pollute paraloom_notes with unspent 0-amount notes.
+    respondWith([honest(0n), splNote(0n)])
+
+    expect(await scan()).toBe(0)
+    expect(await getNotes(ACCOUNT)).toEqual([])
+    expect(v3NoteCommitment).not.toHaveBeenCalled()
+    expect(v3NoteCommitmentAsset).not.toHaveBeenCalled()
+  })
 })

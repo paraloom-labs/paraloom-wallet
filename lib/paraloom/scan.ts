@@ -116,6 +116,12 @@ export async function scanForNotes(
     if (!note) {
       continue
     }
+    // Ignore zero-value filler/dummy change outputs (e.g. withdraw outputs and
+    // exact-spend zero-change outputs sealed to our own box key so the 2-in-2-out
+    // circuit has two valid output ciphertexts).
+    if (note.amount <= 0n) {
+      continue
+    }
     // The commitment must bind the decrypted amount, blinding and asset under
     // OUR spend key and equal the on-chain output commitment. A mismatch means
     // the ciphertext does not describe the leaf it was delivered with — a
@@ -137,7 +143,7 @@ export async function scanForNotes(
     if (mint === REJECT) {
       continue
     }
-    await addDiscoveredNote(account, {
+    const inserted = await addDiscoveredNote(account, {
       amount: note.amount.toString(),
       blinding: note.blindingHex,
       assetId: note.assetIdHex,
@@ -152,7 +158,9 @@ export async function scanForNotes(
     // and `known` is otherwise only a snapshot from before the loop, so the
     // note would be stored once but counted twice.
     known.add(d.output_commitment)
-    found++
+    if (inserted) {
+      found++
+    }
   }
   return found
 }

@@ -2,9 +2,13 @@ import { describe, expect, it } from "vitest"
 
 import {
   classifyStrand,
+  effectiveSwapReshield,
   isNativeSolOutput,
   RESUME_GRACE_MS,
   RESUME_MIN_LAMPORTS,
+  swapInputInfo,
+  swapTokenLabel,
+  USDC_MINT,
   WSOL_MINT
 } from "../lib/paraloom/swapReconcileClassify"
 
@@ -101,6 +105,52 @@ describe("isNativeSolOutput", () => {
   })
 
   it("treats USDC (any SPL mint) as NOT native SOL", () => {
-    expect(isNativeSolOutput("EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v")).toBe(false)
+    expect(isNativeSolOutput(USDC_MINT)).toBe(false)
+  })
+})
+
+describe("swapTokenLabel & swapInputInfo", () => {
+  it("renders both 'SOL' and WSOL_MINT as SOL instead of So11…1112", () => {
+    expect(swapTokenLabel("SOL")).toBe("SOL")
+    expect(swapTokenLabel(WSOL_MINT)).toBe("SOL")
+    expect(swapTokenLabel(USDC_MINT)).toBe("USDC")
+  })
+
+  it("treats undefined, 'SOL', and WSOL_MINT as 9-decimal SOL inputs", () => {
+    expect(swapInputInfo(undefined)).toEqual({ decimals: 9, symbol: "SOL" })
+    expect(swapInputInfo("SOL")).toEqual({ decimals: 9, symbol: "SOL" })
+    expect(swapInputInfo(WSOL_MINT)).toEqual({ decimals: 9, symbol: "SOL" })
+    expect(swapInputInfo(USDC_MINT)).toEqual({ decimals: 6, symbol: "USDC" })
+  })
+})
+
+describe("effectiveSwapReshield", () => {
+  it("defaults token-input swaps (e.g. USDC -> WSOL) to reshield=true when omitted", () => {
+    expect(
+      effectiveSwapReshield({ inputMint: USDC_MINT, outputMint: WSOL_MINT })
+    ).toBe(true)
+    expect(
+      effectiveSwapReshield({
+        inputMint: USDC_MINT,
+        outputMint: WSOL_MINT,
+        reshield: false
+      })
+    ).toBe(false)
+  })
+
+  it("defaults native-SOL input swaps to reshield=false and never reshields a SOL output", () => {
+    expect(effectiveSwapReshield({ outputMint: USDC_MINT })).toBe(false)
+    expect(
+      effectiveSwapReshield({ outputMint: USDC_MINT, reshield: true })
+    ).toBe(true)
+    expect(
+      effectiveSwapReshield({ outputMint: WSOL_MINT, reshield: true })
+    ).toBe(false)
+    expect(
+      effectiveSwapReshield({
+        inputMint: WSOL_MINT,
+        outputMint: USDC_MINT
+      })
+    ).toBe(false)
   })
 })

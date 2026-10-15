@@ -1,6 +1,12 @@
 import { useState } from "react"
 import logoImg from "data-base64:~/../assets/icon.png"
 
+import {
+  effectiveSwapReshield,
+  swapInputInfo,
+  swapTokenLabel
+} from "~lib/paraloom/swapReconcileClassify"
+
 interface SwapParams {
   outputMint: string
   inputMint?: string
@@ -18,24 +24,8 @@ interface SwapApproveProps {
 
 type Status = "idle" | "approved" | "rejected"
 
-const USDC_MINT = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"
-
 function sendMessage(message: Record<string, unknown>): Promise<unknown> {
   return new Promise((resolve) => chrome.runtime.sendMessage(message, resolve))
-}
-
-function tokenLabel(mint: string): string {
-  if (mint === "SOL") return "SOL"
-  if (mint === USDC_MINT) return "USDC"
-  return `${mint.slice(0, 4)}…${mint.slice(-4)}`
-}
-
-// Decimals + symbol for the input side. Only native SOL and USDC are spendable
-// inputs today; an unknown mint falls back to showing raw base units.
-function inputInfo(inputMint?: string): { decimals: number; symbol: string } {
-  if (!inputMint || inputMint === "SOL") return { decimals: 9, symbol: "SOL" }
-  if (inputMint === USDC_MINT) return { decimals: 6, symbol: "USDC" }
-  return { decimals: 0, symbol: tokenLabel(inputMint) }
 }
 
 function formatAmount(amount: string, decimals: number): string {
@@ -98,12 +88,12 @@ export function SwapApprove({ id, origin, params, onResolved }: SwapApproveProps
       <p className="connect-desc">
         This spends{" "}
         <strong>
-          {formatAmount(params.amountLamports, inputInfo(params.inputMint).decimals)}{" "}
-          {inputInfo(params.inputMint).symbol}
+          {formatAmount(params.amountLamports, swapInputInfo(params.inputMint).decimals)}{" "}
+          {swapInputInfo(params.inputMint).symbol}
         </strong>{" "}
         from your shielded balance, exits to a fresh unlinkable address, and swaps
-        to <strong>{tokenLabel(params.outputMint)}</strong> there.{" "}
-        {params.reshield
+        to <strong>{swapTokenLabel(params.outputMint)}</strong> there.{" "}
+        {effectiveSwapReshield(params)
           ? "The result is re-shielded back into your Paraloom balance."
           : "The result stays at that address (it is not re-shielded)."}{" "}
         Only approve swaps you started.

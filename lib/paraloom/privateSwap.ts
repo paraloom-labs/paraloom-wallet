@@ -94,6 +94,8 @@ export interface PrivateSwapResult {
    *  the caller should persist. Absent means the token stayed at the fresh
    *  address (a private buy) — either not requested or the re-shield failed. */
   reshielded?: ReshieldedNote
+  /** True when a token -> native SOL round-trip re-shield (`depositV3`) succeeded. */
+  reshieldedNativeSol?: boolean
 }
 
 // Wait for the swap transaction to confirm by polling its signature status.
@@ -606,6 +608,7 @@ export async function privateSwapFromToken(
   //    itself). Best-effort: on failure the output stays at the fresh address as
   //    a private buy, recoverable with its saved key.
   let reshielded: ReshieldedNote | undefined
+  let reshieldedNativeSol = false
   if (params.reshield && isNativeSolOutput(params.outputMint)) {
     try {
       const solBal = BigInt(await connection.getBalance(fresh.publicKey))
@@ -618,6 +621,7 @@ export async function privateSwapFromToken(
           spendPrivkeyHex,
           reshieldLamports
         )
+        reshieldedNativeSol = true
       }
     } catch {
       // leave the swapped SOL as a private buy at the fresh address
@@ -638,7 +642,8 @@ export async function privateSwapFromToken(
     withdrawRequestId: requestId,
     swapSignature,
     outAmount: out_amount,
-    reshielded
+    reshielded,
+    reshieldedNativeSol
   }
 }
 
@@ -684,7 +689,7 @@ export async function resumeSwapAtFreshAddress(
   )
 
   let reshielded: ReshieldedNote | undefined
-  if (reshield && outputMint !== "SOL") {
+  if (reshield && !isNativeSolOutput(outputMint)) {
     reshielded = await reshieldToken(
       connection,
       fresh,

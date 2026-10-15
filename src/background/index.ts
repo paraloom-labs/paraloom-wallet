@@ -14,6 +14,7 @@ import {
 import { fetchV3Leaves } from "~lib/paraloom/transact"
 import {
   GAS_LAMPORTS,
+  isNativeSolOutput,
   privateSwap,
   privateSwapFromToken,
   type ReshieldedNote
@@ -261,15 +262,29 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   // ── Swap-approval messages (from the popup only) ──
 
   if (message.type === "GET_PENDING_SWAP") {
-    sendResponse(
-      pendingSwap
-        ? { id: pendingSwap.id, origin: pendingSwap.origin, params: pendingSwap.params }
-        : null
-    )
-    return false
+    if (pendingSwap) {
+      sendResponse({
+        id: pendingSwap.id,
+        origin: pendingSwap.origin,
+        params: pendingSwap.params
+      })
+      return false
+    }
+    chrome.storage.session
+      .get("pendingSwap")
+      .then((r) =>
+        sendResponse(
+          (r.pendingSwap as
+            | { id: number; origin: string; params: SwapRequestParams }
+            | undefined) ?? null
+        )
+      )
+      .catch(() => sendResponse(null))
+    return true
   }
 
   if (message.type === "APPROVE_SWAP") {
+    void chrome.storage.session.remove("pendingSwap").catch(() => {})
     if (pendingSwap && pendingSwap.id === message.id) {
       pendingSwap.resolve(true)
     }
@@ -278,6 +293,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   }
 
   if (message.type === "REJECT_SWAP") {
+    void chrome.storage.session.remove("pendingSwap").catch(() => {})
     if (pendingSwap && pendingSwap.id === message.id) {
       pendingSwap.resolve(false)
     }
@@ -712,9 +728,12 @@ function requestSwapApproval(
 ): Promise<boolean> {
   return new Promise((resolve) => {
     const id = ++swapIdCounter
+    const clearPersisted = () =>
+      void chrome.storage.session.remove("pendingSwap").catch(() => {})
     const timer = setTimeout(() => {
       if (pendingSwap?.id === id) {
         pendingSwap = null
+        clearPersisted()
         resolve(false)
       }
     }, timeoutMs)
@@ -725,9 +744,13 @@ function requestSwapApproval(
       resolve: (approved: boolean) => {
         clearTimeout(timer)
         pendingSwap = null
+        clearPersisted()
         resolve(approved)
       }
     }
+    void chrome.storage.session
+      .set({ pendingSwap: { id, origin, params } })
+      .catch(() => {})
   })
 }
 
@@ -776,7 +799,7 @@ async function runSwapJob(
     }
     const decision = requestSwapApproval(origin, params, 180_000)
     await openWalletWindow()
-    const approved = await decision
+    const approved = await withKeepAlive(decision)
     if (!approved) {
       await setSwapJob({ status: "error", error: "rejected" })
       return
@@ -864,7 +887,7 @@ async function handlePrivateSwap(
 
   // Token-input swap (e.g. USDC -> SOL): spend a shielded SPL note and self-fund
   // gas from the user's own shielded SOL (Plan A′, full privacy).
-  if (params.inputMint && params.inputMint !== "SOL") {
+  if (params.inputMint && !isNativeSolOutput(params.inputMint)) {
     const inputAssetId = await assetIdForMint(
       new PublicKey(params.inputMint).toBuffer().toString("hex")
     )
@@ -917,7 +940,9 @@ async function handlePrivateSwap(
         freshAddress: tokenResult.freshAddress,
         swapSignature: tokenResult.swapSignature,
         outAmount: tokenResult.outAmount,
-        reshielded: tokenResult.reshielded !== undefined
+        reshielded:
+          tokenResult.reshielded !== undefined ||
+          Boolean(tokenResult.reshieldedNativeSol)
       }
     }
   }

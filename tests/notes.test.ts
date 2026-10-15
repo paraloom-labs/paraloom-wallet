@@ -2,7 +2,11 @@ import {
   addDiscoveredNote,
   addNote,
   getNotes,
+  isNativeSolNote,
   markNoteSpentByIdentity,
+  PHANTOM_NOTE_GRACE_MS,
+  reconcilePhantomNotes,
+  selectNativeSolNotes,
   shieldedBalance,
   shieldedTokenBalances,
   type ShieldedNote
@@ -200,3 +204,69 @@ describe("note storage", () => {
     expect(await shieldedBalance(ACCOUNT)).toBe(1000n)
   })
 })
+
+describe("selectNativeSolNotes & reconcilePhantomNotes", () => {
+  const USDC = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"
+  const USDC_ASSET = "dd".repeat(32)
+
+  it("never selects SPL token notes when choosing inputs for a native SOL transfer", () => {
+    const splNote = deposit({
+      signature: "spl-1",
+      amount: "2000000000", // 2,000 USDC raw units
+      assetId: USDC_ASSET,
+      mint: USDC
+    })
+    const solNote1 = deposit({
+      signature: "sol-1",
+      amount: "600000000" // 0.6 SOL
+    })
+    const solNote2 = deposit({
+      signature: "sol-2",
+      amount: "500000000" // 0.5 SOL
+    })
+
+    expect(isNativeSolNote(splNote)).toBe(false)
+    expect(isNativeSolNote(solNote1)).toBe(true)
+
+    const chosen = selectNativeSolNotes(
+      [splNote, solNote1, solNote2],
+      1_000_000_000n
+    )
+    expect(chosen).not.toBeNull()
+    expect(chosen!.map((n) => n.signature)).toEqual(["sol-1", "sol-2"])
+  })
+
+  it("reconciles out phantom notes absent from the on-chain tree after the grace window", async () => {
+    const now = 500_000
+    const phantom = received("aa".repeat(32), {
+      amount: "5000",
+      createdAt: now - PHANTOM_NOTE_GRACE_MS - 1
+    })
+    const settled = received("bb".repeat(32), {
+      amount: "3000",
+      createdAt: now - PHANTOM_NOTE_GRACE_MS - 1
+    })
+    const fresh = received("cc".repeat(32), {
+      amount: "4000",
+      createdAt: now - 1_000
+    })
+
+    await addDiscoveredNote(ACCOUNT, phantom)
+    await addDiscoveredNote(ACCOUNT, settled)
+    await addDiscoveredNote(ACCOUNT, fresh)
+
+    const remaining = await reconcilePhantomNotes(
+      ACCOUNT,
+      await getNotes(ACCOUNT),
+      async () => [{ commitmentHex: "bb".repeat(32) }],
+      now
+    )
+
+    expect(remaining.map((n) => n.commitment)).toEqual([
+      "bb".repeat(32),
+      "cc".repeat(32)
+    ])
+    expect(await shieldedBalance(ACCOUNT)).toBe(7000n)
+  })
+})
+

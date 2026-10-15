@@ -8,7 +8,8 @@ import { deriveKeypairFromSeed, decryptWallet, decryptSeedPhrase, deriveBoxKeypa
 import { getStoredWallet } from "~lib/storage/secure"
 import type { Account } from "~lib/store/walletStore"
 import { getConnection, deposit, getSolBalance, solanaAddress, solanaAddressToBytes } from "~lib/paraloom/bridge"
-import { addNote, getNotes, markNoteSpent, shieldedBalance, shieldedTokenBalances, type ShieldedNote } from "~lib/paraloom/notes"
+import { addNote, getNotes, isNativeSolNote, markNoteSpent, reconcilePhantomNotes, selectNativeSolNotes, shieldedBalance, shieldedTokenBalances, type ShieldedNote } from "~lib/paraloom/notes"
+import { fetchV3Leaves } from "~lib/paraloom/transact"
 
 // Known shielded SPL tokens for display; unknown mints fall back to a truncated
 // mint and raw base units.
@@ -53,7 +54,7 @@ function spendableSolNotes(all: ShieldedNote[]): ShieldedNote[] {
     .filter(
       (n) =>
         !n.spent &&
-        (!n.assetId || n.assetId === NATIVE_ASSET_HEX) &&
+        isNativeSolNote(n) &&
         BigInt(n.amount) >= WITHDRAW_DUST_LAMPORTS
     )
     .sort((a, b) => {
@@ -68,16 +69,7 @@ function selectSolWithdrawNotes(
   all: ShieldedNote[],
   lamports: bigint
 ): ShieldedNote[] | null {
-  const sorted = spendableSolNotes(all)
-  const chosen: ShieldedNote[] = []
-  let sum = 0n
-  for (const n of sorted) {
-    chosen.push(n)
-    sum += BigInt(n.amount)
-    if (sum >= lamports) return chosen
-    if (chosen.length === 2) break
-  }
-  return null
+  return selectNativeSolNotes(all, lamports, WITHDRAW_DUST_LAMPORTS)
 }
 
 interface Token {
@@ -332,6 +324,16 @@ export function Home({ onLock }: HomeProps) {
       // best-effort
     }
     try {
+      const existing = await getNotes(wallet.shieldedAddress)
+      await reconcilePhantomNotes(
+        wallet.shieldedAddress,
+        existing,
+        () => fetchV3Leaves(getConnection(network))
+      )
+    } catch {
+      // best-effort
+    }
+    try {
       setShieldedLamports(await shieldedBalance(wallet.shieldedAddress))
       setShieldedTokens(await shieldedTokenBalances(wallet.shieldedAddress))
       setNotes((await getNotes(wallet.shieldedAddress)).slice().reverse())
@@ -494,19 +496,11 @@ export function Home({ onLock }: HomeProps) {
     }
     const amount = BigInt(Math.round(sol * 1e9))
 
-    // Circuit v3 (#350): spend 1 or 2 notes; change comes back as a new note
-    // (audit #16), so partial amounts work from a single note.
-    const unspent = notes
-      .filter((n) => !n.spent)
-      .sort((a, b) => Number(BigInt(b.amount) - BigInt(a.amount)))
-    const inputs: ShieldedNote[] = []
-    let covered = 0n
-    for (const n of unspent) {
-      if (covered >= amount || inputs.length === 2) break
-      inputs.push(n)
-      covered += BigInt(n.amount)
-    }
-    if (covered < amount) {
+    // Circuit v3 (#350): spend 1 or 2 native SOL notes; change comes back as a
+    // new note (audit #16), so partial amounts work from a single note.
+    // Never select SPL token notes for a native SOL transfer.
+    const inputs = selectNativeSolNotes(notes, amount)
+    if (!inputs) {
       showToast("Your notes don't cover that amount", "error")
       return
     }

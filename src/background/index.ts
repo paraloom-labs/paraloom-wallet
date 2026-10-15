@@ -3,7 +3,7 @@ import { Connection, PublicKey } from "@solana/web3.js"
 import { getAutoLockMinutes, getStoredWallet, isWalletLocked, setLockState } from "~lib/storage/secure"
 import { addApprovedOrigin, isOriginApproved, removeApprovedOrigin } from "~lib/storage/connections"
 import { clearSession, getLastActivity, loadSession, recordActivity } from "~lib/storage/session"
-import { addNote, getNotes, markNoteSpentByCommitment, shieldedBalance, shieldedTokenBalances, type ShieldedNote } from "~lib/paraloom/notes"
+import { addNote, getNotes, markNoteSpentByCommitment, reconcilePhantomNotes, shieldedBalance, shieldedTokenBalances, type ShieldedNote } from "~lib/paraloom/notes"
 import { scanForNotes } from "~lib/paraloom/scan"
 import {
   associatedTokenAddress,
@@ -382,9 +382,15 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     // response can't (the setInterval keep-alive is unreliable in a service
     // worker, so the worker was evicted mid-swap: "message channel closed").
     isAuthorizedSender(sender)
-      .then((ok) => {
+      .then(async (ok) => {
         if (!ok) return sendResponse({ success: false, error: "not authorized" })
-        void setSwapJob({ status: "pending", startedAt: Date.now() })
+        if (pendingSwap !== null || (await swapInFlight())) {
+          return sendResponse({
+            success: false,
+            error: "A private swap is already in progress"
+          })
+        }
+        await setSwapJob({ status: "pending", startedAt: Date.now() })
         void runSwapJob(message.params, sender)
         sendResponse({ success: true, pending: true })
       })
@@ -660,6 +666,9 @@ async function backgroundScan(
       session.wallet.boxSecretKey,
       Buffer.from(session.wallet.spendPrivkey).toString("hex")
     )
+    const conn = new Connection(PRIVATE_SWAP_RPC_URL, "confirmed")
+    const existing = await getNotes(addr)
+    await dropPhantomNotes(conn, addr, existing)
   } catch {
     // node down / no scan endpoint — the local balance still stands
   } finally {
@@ -710,6 +719,9 @@ function requestSwapApproval(
   params: SwapRequestParams,
   timeoutMs: number
 ): Promise<boolean> {
+  if (pendingSwap) {
+    pendingSwap.resolve(false)
+  }
   return new Promise((resolve) => {
     const id = ++swapIdCounter
     const timer = setTimeout(() => {
@@ -805,36 +817,7 @@ async function dropPhantomNotes(
   account: string,
   notes: ShieldedNote[]
 ): Promise<ShieldedNote[]> {
-  const GRACE_MS = 120_000
-  const suspects = notes.filter(
-    (n) =>
-      n.leafIndex === undefined &&
-      !!n.commitment &&
-      Date.now() - n.createdAt > GRACE_MS
-  )
-  if (suspects.length === 0) return notes
-
-  let onchain: Set<string>
-  try {
-    const leaves = await fetchV3Leaves(connection)
-    onchain = new Set(leaves.map((l) => l.commitmentHex))
-  } catch {
-    return notes // cannot rebuild the tree safely — drop nothing
-  }
-
-  const dropped = new Set<string>()
-  for (const n of suspects) {
-    if (n.commitment && !onchain.has(n.commitment)) {
-      await markNoteSpentByCommitment(account, n.commitment)
-      dropped.add(n.commitment)
-    }
-  }
-  if (dropped.size > 0) {
-    console.log(
-      `[paraloom] reconciled ${dropped.size} phantom note(s) not present on-chain`
-    )
-  }
-  return notes.filter((n) => !(n.commitment && dropped.has(n.commitment)))
+  return reconcilePhantomNotes(account, notes, () => fetchV3Leaves(connection))
 }
 
 // The actual spend. Runs only after handlePrivateSwapRequest approved it.

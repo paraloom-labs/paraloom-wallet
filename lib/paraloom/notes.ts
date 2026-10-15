@@ -30,6 +30,86 @@ export interface ShieldedNote {
 }
 
 const NOTES_KEY = "paraloom_notes"
+const NATIVE_ASSET_ID_HEX = "00".repeat(32)
+export const PHANTOM_NOTE_GRACE_MS = 120_000
+
+/** True iff `note` is a native SOL note (no SPL `mint` and all-zero `assetId`). */
+export function isNativeSolNote(note: ShieldedNote): boolean {
+  return (!note.assetId || note.assetId === NATIVE_ASSET_ID_HEX) && !note.mint
+}
+
+/**
+ * Pick up to 2 unspent native SOL notes covering `lamports` (largest first).
+ * Never selects SPL token notes (`mint` set or non-zero `assetId`), preventing
+ * native SOL transfers/withdraws from accidentally spending SPL token notes.
+ */
+export function selectNativeSolNotes(
+  all: ShieldedNote[],
+  lamports: bigint,
+  minNoteLamports = 0n
+): ShieldedNote[] | null {
+  if (lamports <= 0n) return null
+  const sorted = all
+    .filter(
+      (n) =>
+        !n.spent &&
+        isNativeSolNote(n) &&
+        BigInt(n.amount) >= minNoteLamports &&
+        BigInt(n.amount) > 0n
+    )
+    .sort((a, b) => {
+      const d = BigInt(b.amount) - BigInt(a.amount)
+      return d > 0n ? 1 : d < 0n ? -1 : 0
+    })
+
+  const chosen: ShieldedNote[] = []
+  let sum = 0n
+  for (const n of sorted) {
+    chosen.push(n)
+    sum += BigInt(n.amount)
+    if (sum >= lamports) return chosen
+    if (chosen.length === 2) break
+  }
+  return null
+}
+
+/**
+ * Soft-drop phantom change/received notes (`leafIndex === undefined`, carrying a
+ * `commitment`, and older than `PHANTOM_NOTE_GRACE_MS`) whose commitment never
+ * landed in the on-chain Merkle tree.
+ */
+export async function reconcilePhantomNotes(
+  account: string,
+  notes: ShieldedNote[],
+  fetchLeaves: () => Promise<{ commitmentHex: string }[]>,
+  nowMs = Date.now()
+): Promise<ShieldedNote[]> {
+  const suspects = notes.filter(
+    (n) =>
+      !n.spent &&
+      n.leafIndex === undefined &&
+      !!n.commitment &&
+      nowMs - n.createdAt > PHANTOM_NOTE_GRACE_MS
+  )
+  if (suspects.length === 0) return notes
+
+  let onchain: Set<string>
+  try {
+    const leaves = await fetchLeaves()
+    onchain = new Set(leaves.map((l) => l.commitmentHex))
+  } catch {
+    return notes
+  }
+
+  const dropped = new Set<string>()
+  for (const n of suspects) {
+    if (n.commitment && !onchain.has(n.commitment)) {
+      await markNoteSpentByCommitment(account, n.commitment)
+      dropped.add(n.commitment)
+    }
+  }
+  return notes.filter((n) => !(n.commitment && dropped.has(n.commitment)))
+}
 
 type NotesByAccount = Record<string, ShieldedNote[]>
 
@@ -137,7 +217,7 @@ export async function markNoteSpentByIdentity(account: string, note: ShieldedNot
 export async function shieldedBalance(account: string): Promise<bigint> {
   const notes = await getNotes(account)
   return notes
-    .filter((n) => !n.spent && !n.mint)
+    .filter((n) => !n.spent && isNativeSolNote(n))
     .reduce((sum, n) => sum + BigInt(n.amount), 0n)
 }
 

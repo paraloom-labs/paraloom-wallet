@@ -1,7 +1,7 @@
 import { useState, useEffect, useRef } from "react"
 import { createPortal } from "react-dom"
 import { setLockState, updateAccounts, clearWallet, getNetwork, setNetwork as saveNetwork, getAutoLockMinutes, setAutoLockMinutes } from "~lib/storage/secure"
-import { clearSession } from "~lib/storage/session"
+import { clearSession, updateSessionAccount } from "~lib/storage/session"
 import { getApprovedOrigins, removeApprovedOrigin } from "~lib/storage/connections"
 import { useWalletStore } from "~lib/store/walletStore"
 import { deriveKeypairFromSeed, decryptWallet, decryptSeedPhrase, deriveBoxKeypair, KDF_VERSION_SCRYPT } from "~lib/crypto/keyManagement"
@@ -566,9 +566,10 @@ export function Home({ onLock }: HomeProps) {
       addAccount(newAccount)
 
       const updatedAccounts = [...accounts, newAccount]
-      await updateAccounts(updatedAccounts)
+      await updateAccounts(updatedAccounts, newIndex)
 
       switchAccount(newIndex)
+      await updateSessionAccount(newIndex, updatedAccounts)
 
       setShowAddAccount(false)
       setAddAccountMethod(null)
@@ -722,6 +723,8 @@ export function Home({ onLock }: HomeProps) {
                   onClick={() => {
                     if (account.index !== currentAccountIndex) {
                       switchAccount(account.index)
+                      void updateAccounts(accounts, account.index)
+                      void updateSessionAccount(account.index)
                     }
                     setShowAccountSwitcher(false)
                   }}

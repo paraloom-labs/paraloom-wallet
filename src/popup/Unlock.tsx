@@ -90,11 +90,18 @@ export function Unlock({ onUnlock }: UnlockProps) {
       // Persist the decrypted session in memory-only storage so reopening the
       // popup doesn't force a re-unlock (the idle auto-lock timer still applies).
       const st = useWalletStore.getState()
+      const activeIdx =
+        st.accounts.find((a) => a.keypair.shieldedAddress === stored.address)?.index ??
+        st.currentAccountIndex
+      if (activeIdx !== st.currentAccountIndex) {
+        st.switchAccount(activeIdx)
+      }
+      const postSt = useWalletStore.getState()
       await saveSession({
-        wallet,
-        accounts: st.accounts,
-        currentAccountIndex: st.currentAccountIndex,
-        seedPhrase: seedPhrase ?? st.seedPhrase
+        wallet: postSt.wallet ?? wallet,
+        accounts: postSt.accounts,
+        currentAccountIndex: postSt.currentAccountIndex,
+        seedPhrase: seedPhrase ?? postSt.seedPhrase
       })
 
       chrome.runtime.sendMessage({ type: "ACTIVITY" })

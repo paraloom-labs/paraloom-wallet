@@ -133,7 +133,10 @@ export async function setAutoLockMinutes(minutes: number): Promise<void> {
   }
 }
 
-export async function updateAccounts(accounts: Account[]): Promise<void> {
+export async function updateAccounts(
+  accounts: Account[],
+  activeAccountIndex?: number
+): Promise<void> {
   const result = await chrome.storage.local.get(STORAGE_KEY)
   const storage = result[STORAGE_KEY] as WalletStorage
 
@@ -144,6 +147,12 @@ export async function updateAccounts(accounts: Account[]): Promise<void> {
       address: acc.keypair.shieldedAddress,
       balance: acc.balance.toString()
     }))
+    if (activeAccountIndex !== undefined) {
+      const active = accounts.find((a) => a.index === activeAccountIndex)
+      if (active) {
+        storage.wallet.address = active.keypair.shieldedAddress
+      }
+    }
     await chrome.storage.local.set({ [STORAGE_KEY]: storage })
   }
 }

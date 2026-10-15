@@ -100,17 +100,45 @@ export async function loadSession(): Promise<WalletSession | null> {
   const result = await chrome.storage.session.get(SESSION_KEY)
   const ser = result[SESSION_KEY] as SerSession | undefined
   if (!ser) return null
+  const accounts: Account[] = ser.accounts.map((a) => ({
+    index: a.index,
+    name: a.name,
+    keypair: deKp(a.keypair),
+    balance: BigInt(a.balance)
+  }))
+  const currentAccountIndex = ser.currentAccountIndex ?? 0
+  const activeAccount = accounts.find((a) => a.index === currentAccountIndex)
   return {
-    wallet: deKp(ser.wallet),
-    accounts: ser.accounts.map((a) => ({
-      index: a.index,
-      name: a.name,
-      keypair: deKp(a.keypair),
-      balance: BigInt(a.balance)
-    })),
-    currentAccountIndex: ser.currentAccountIndex,
+    wallet: activeAccount ? activeAccount.keypair : deKp(ser.wallet),
+    accounts,
+    currentAccountIndex,
     seedPhrase: ser.seedPhrase
   }
+}
+
+export async function updateSessionAccount(
+  currentAccountIndex: number,
+  accounts?: Account[]
+): Promise<void> {
+  const result = await chrome.storage.session.get(SESSION_KEY)
+  const ser = result[SESSION_KEY] as SerSession | undefined
+  if (!ser) return
+  const nextAccounts = accounts
+    ? accounts.map((a) => ({
+        index: a.index,
+        name: a.name,
+        keypair: serKp(a.keypair),
+        balance: a.balance.toString()
+      }))
+    : ser.accounts
+  const active = nextAccounts.find((a) => a.index === currentAccountIndex)
+  const updated: SerSession = {
+    ...ser,
+    wallet: active ? active.keypair : ser.wallet,
+    accounts: nextAccounts,
+    currentAccountIndex
+  }
+  await chrome.storage.session.set({ [SESSION_KEY]: updated, [ACTIVITY_KEY]: Date.now() })
 }
 
 export async function clearSession(): Promise<void> {

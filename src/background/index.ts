@@ -599,6 +599,10 @@ async function handleGetAddress(sender: chrome.runtime.MessageSender) {
     return { address: null }
   }
 
+  const session = await loadSession()
+  if (session?.wallet?.shieldedAddress) {
+    return { address: session.wallet.shieldedAddress }
+  }
   const stored = await getStoredWallet()
   return { address: stored?.address || null }
 }

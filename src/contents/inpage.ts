@@ -1,4 +1,5 @@
 import type { PlasmoCSConfig } from "plasmo"
+import { connectWithRelay } from "~lib/storage/connections"
 
 const DEV_MATCHES =
   process.env.NODE_ENV === "development"
@@ -47,23 +48,7 @@ if (!(window as any).paraloom) {
     // actually injected (two extensions or a stale one caused confusion).
     __version: "1.5.6",
     connect: async () => {
-      // Trigger the approval flow, but do NOT depend on this call's held
-      // response. The background holds it across the user's approval; an MV3
-      // worker eviction mid-wait can silently drop it (no error), hanging
-      // connect() forever. So FIRE it without awaiting (it opens the approval
-      // popup for a new origin), then poll isConnected() — which reflects the
-      // DURABLE approval recorded when the user approves. The first poll also
-      // covers the already-approved fast path (returns immediately, no popup).
-      void relay("CONNECT_WALLET").catch(() => {})
-      for (let i = 0; i < 180; i++) {
-        const c = await relay("IS_CONNECTED").catch(() => null)
-        if (c?.connected) {
-          const a = await relay("GET_ADDRESS").catch(() => null)
-          if (a?.address) return { address: a.address, publicKey: a.address }
-        }
-        await new Promise((res) => setTimeout(res, 700))
-      }
-      throw new Error("Connection request timed out")
+      return connectWithRelay(relay)
     },
     disconnect: async () => {
       await relay("DISCONNECT_WALLET")

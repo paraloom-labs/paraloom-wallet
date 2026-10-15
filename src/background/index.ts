@@ -1,7 +1,13 @@
 import { Connection, PublicKey } from "@solana/web3.js"
 
 import { getAutoLockMinutes, getStoredWallet, isWalletLocked, setLockState } from "~lib/storage/secure"
-import { addApprovedOrigin, isOriginApproved, removeApprovedOrigin } from "~lib/storage/connections"
+import {
+  addApprovedOrigin,
+  disconnectOrigin,
+  isOriginApproved,
+  isOriginConnectionPending,
+  removeApprovedOrigin
+} from "~lib/storage/connections"
 import { clearSession, getLastActivity, loadSession, recordActivity } from "~lib/storage/session"
 import { addNote, getNotes, markNoteSpentByCommitment, shieldedBalance, shieldedTokenBalances, type ShieldedNote } from "~lib/paraloom/notes"
 import { scanForNotes } from "~lib/paraloom/scan"
@@ -203,14 +209,16 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     // A page may only disconnect ITSELF. Without the sender check any injected
     // *.paraloom.io page could revoke a different connected origin's approval
     // and force a surprise re-approval prompt (same #711/#719 shape). Revoke
-    // only when the caller is the connected origin.
+    // the caller's own origin in persistent storage even if the MV3 service
+    // worker restarted or auto-locked since the approval was recorded.
     const origin = senderOrigin(sender)
-    if (origin && connectedOrigin === origin) {
-      removeApprovedOrigin(connectedOrigin)
-      connectedOrigin = null
-    }
-    sendResponse({ success: true })
-    return false
+    disconnectOrigin(origin, connectedOrigin)
+      .then(({ nextConnectedOrigin }) => {
+        connectedOrigin = nextConnectedOrigin
+        sendResponse({ success: true })
+      })
+      .catch(() => sendResponse({ success: true }))
+    return true
   }
 
   // ── Connection-approval messages (from the popup) ──
@@ -250,12 +258,16 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   }
 
   if (message.type === "REJECT_CONNECTION") {
-    void chrome.storage.session.remove("pendingConn").catch(() => {})
-    if (pendingConnection && pendingConnection.id === message.id) {
-      pendingConnection.resolve(false)
-    }
-    sendResponse({ success: true })
-    return false
+    chrome.storage.session
+      .remove("pendingConn")
+      .catch(() => {})
+      .finally(() => {
+        if (pendingConnection && pendingConnection.id === message.id) {
+          pendingConnection.resolve(false)
+        }
+        sendResponse({ success: true })
+      })
+    return true
   }
 
   // ── Swap-approval messages (from the popup only) ──
@@ -302,9 +314,14 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     isAuthorizedSender(sender)
       .then(async (connected) => {
         const locked = connected ? !(await loadSession()) : false
-        sendResponse({ connected, locked })
+        const pending = connected
+          ? false
+          : await isOriginConnectionPending(senderOrigin(sender))
+        sendResponse({ connected, locked, pending })
       })
-      .catch(() => sendResponse({ connected: false, locked: false }))
+      .catch(() =>
+        sendResponse({ connected: false, locked: false, pending: false })
+      )
     return true
   }
 
@@ -494,8 +511,12 @@ async function handleConnect(sender: chrome.runtime.MessageSender) {
 // Register a pending connection request and resolve once the user approves or
 // rejects it in the popup (or the timeout elapses → treated as a rejection).
 function requestApproval(origin: string, timeoutMs: number): Promise<boolean> {
+  if (pendingConnection) {
+    pendingConnection.resolve(false)
+  }
   return new Promise((resolve) => {
-    const id = ++connectionIdCounter
+    connectionIdCounter = Math.max(connectionIdCounter + 1, Date.now())
+    const id = connectionIdCounter
     const clearPersisted = () =>
       void chrome.storage.session.remove("pendingConn").catch(() => {})
     const timer = setTimeout(() => {

@@ -199,6 +199,29 @@ function deriveKey(password: string, salt: Uint8Array, legacy: boolean): Uint8Ar
 }
 
 /**
+ * Open a vault with its recorded KDF and, when that fails authentication,
+ * retry once with the other supported KDF. The version marker lives beside
+ * the encrypted blobs in chrome.storage and is not authenticated, so a
+ * missing or stale marker must not make an otherwise valid vault look lost.
+ */
+function openWithKdfFallback(
+  encrypted: Uint8Array,
+  nonce: Uint8Array,
+  salt: Uint8Array,
+  password: string,
+  legacy: boolean
+): Uint8Array | null {
+  const primaryKey = deriveKey(password, salt, legacy)
+  const primary = nacl.secretbox.open(encrypted, nonce, primaryKey)
+  if (primary) return primary
+
+  // The authenticated secretbox tag makes this safe: a wrong password or a
+  // corrupt blob cannot produce plaintext that passes either attempt.
+  const fallbackKey = deriveKey(password, salt, !legacy)
+  return nacl.secretbox.open(encrypted, nonce, fallbackKey)
+}
+
+/**
  * Encrypt wallet with password.
  * Key derivation: scrypt. Cipher: NaCl secretbox (XSalsa20-Poly1305).
  */
@@ -246,11 +269,9 @@ export async function decryptWallet(
   const nonce = Buffer.from(encryptedWallet.nonce, "hex")
   const salt = Buffer.from(encryptedWallet.salt, "hex")
 
-  // Derive encryption key from password (scrypt, or legacy chain for old vaults)
-  const encryptionKey = deriveKey(password, salt, legacy)
-
-  // Decrypt
-  const decrypted = nacl.secretbox.open(encrypted, nonce, encryptionKey)
+  // Derive the selected KDF first, then retry the alternate KDF if the
+  // unauthenticated storage marker is missing or stale.
+  const decrypted = openWithKdfFallback(encrypted, nonce, salt, password, legacy)
 
   if (!decrypted) {
     throw new Error("Invalid password")
@@ -329,8 +350,7 @@ export function decryptSeedPhrase(
   const nonce = combined.subarray(32, 32 + nacl.secretbox.nonceLength)
   const encrypted = combined.subarray(32 + nacl.secretbox.nonceLength)
 
-  const encryptionKey = deriveKey(password, salt, legacy)
-  const decrypted = nacl.secretbox.open(encrypted, nonce, encryptionKey)
+  const decrypted = openWithKdfFallback(encrypted, nonce, salt, password, legacy)
 
   if (!decrypted) {
     throw new Error("Invalid password")

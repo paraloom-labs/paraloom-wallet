@@ -217,9 +217,17 @@ export function Home({ onLock }: HomeProps) {
   }
 
   async function handleLock() {
+    resetSettingsModals()
     lock()
     await setLockState(true)
     await clearSession()
+    await new Promise<void>((resolve) => {
+      try {
+        chrome.runtime.sendMessage({ type: "LOCK_WALLET" }, () => resolve())
+      } catch {
+        resolve()
+      }
+    })
     onLock()
   }
 
@@ -626,8 +634,16 @@ export function Home({ onLock }: HomeProps) {
 
   async function handleRemoveWallet() {
     if (removeConfirmText !== "DELETE") return
+    resetSettingsModals()
     await clearWallet()
     await clearSession()
+    await new Promise<void>((resolve) => {
+      try {
+        chrome.runtime.sendMessage({ type: "LOCK_WALLET" }, () => resolve())
+      } catch {
+        resolve()
+      }
+    })
     clear()
     onLock()
   }
@@ -721,6 +737,7 @@ export function Home({ onLock }: HomeProps) {
                   className={`account-item ${account.index === currentAccountIndex ? 'active' : ''}`}
                   onClick={() => {
                     if (account.index !== currentAccountIndex) {
+                      resetSettingsModals()
                       switchAccount(account.index)
                     }
                     setShowAccountSwitcher(false)

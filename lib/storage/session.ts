@@ -113,8 +113,10 @@ export async function loadSession(): Promise<WalletSession | null> {
   }
 }
 
+const PENDING_CONN_KEY = "pendingConn"
+
 export async function clearSession(): Promise<void> {
-  await chrome.storage.session.remove([SESSION_KEY, ACTIVITY_KEY])
+  await chrome.storage.session.remove([SESSION_KEY, ACTIVITY_KEY, PENDING_CONN_KEY])
 }
 
 export async function recordActivity(now: number): Promise<void> {

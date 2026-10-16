@@ -184,6 +184,12 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 
   if (message.type === "LOCK_WALLET") {
     connectedOrigin = null
+    if (pendingConnection) {
+      pendingConnection.resolve(false)
+    }
+    if (pendingSwap) {
+      pendingSwap.resolve(false)
+    }
     Promise.all([setLockState(true), clearSession()]).then(() => {
       sendResponse({ success: true })
     })

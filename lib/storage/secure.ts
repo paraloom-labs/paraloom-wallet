@@ -28,6 +28,15 @@ export interface WalletStorage {
 }
 
 const STORAGE_KEY = "paraloom_wallet"
+const NOTES_STORAGE_KEY = "paraloom_notes"
+const SWAP_OUTPUTS_STORAGE_KEY = "paraloom_swap_outputs"
+const CONNECTIONS_STORAGE_KEY = "paraloom_connections"
+const SESSION_CLEANUP_KEYS = [
+  "paraloom_session",
+  "paraloom_last_activity",
+  "pendingConn",
+  "swapJob"
+]
 
 export async function saveEncryptedWallet(
   encryptedWallet: EncryptedWallet,
@@ -98,7 +107,15 @@ export async function getStoredWallet(): Promise<StoredWallet | null> {
 }
 
 export async function clearWallet(): Promise<void> {
-  await chrome.storage.local.remove(STORAGE_KEY)
+  await chrome.storage.local.remove([
+    STORAGE_KEY,
+    NOTES_STORAGE_KEY,
+    SWAP_OUTPUTS_STORAGE_KEY,
+    CONNECTIONS_STORAGE_KEY
+  ])
+  if (chrome.storage.session) {
+    await chrome.storage.session.remove(SESSION_CLEANUP_KEYS).catch(() => {})
+  }
 }
 
 export async function isWalletLocked(): Promise<boolean> {

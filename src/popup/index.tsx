@@ -157,7 +157,7 @@ function Popup() {
 
   return (
     <div className="app">
-      <Home onLock={() => setLocked(true)} />
+      <Home onLock={() => void checkWalletState()} />
     </div>
   )
 }

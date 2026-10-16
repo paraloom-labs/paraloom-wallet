@@ -101,6 +101,9 @@ export async function scanForNotes(
     throw new Error(`Scan failed (${res.status})`)
   }
   const delivered = (await res.json()) as DeliveredNote[]
+  if (!Array.isArray(delivered)) {
+    throw new Error("Scan failed: invalid response payload")
+  }
 
   const known = new Set(
     (await getNotes(account)).map((n) => n.commitment).filter(Boolean) as string[]
@@ -109,6 +112,13 @@ export async function scanForNotes(
 
   let found = 0
   for (const d of delivered) {
+    if (
+      !d ||
+      typeof d.output_commitment !== "string" ||
+      typeof d.ciphertext !== "string"
+    ) {
+      continue
+    }
     if (known.has(d.output_commitment)) {
       continue
     }
@@ -122,10 +132,27 @@ export async function scanForNotes(
     // crafted or corrupt note — so drop it rather than store an unspendable
     // phantom. An SPL note's leaf binds its assetId, so a native-only
     // recomputation would reject every received token note (#23).
+    //
+    // Both commitment calls reach wasm `fr_be`, which throws on any 32-byte
+    // blinding or assetId >= the BN254 scalar modulus (~81% of 32-byte values).
+    // Because the box public key is public in every paraloom1 address, anyone
+    // can seal a 72-byte plaintext with an out-of-field blinding or assetId to
+    // this wallet; an uncaught throw here aborts `scanForNotes` and hides every
+    // note after the offending entry in the FIFO `/transact/scan` feed.
     const isNative = note.assetIdHex === NATIVE_ASSET_HEX
-    const expected = isNative
-      ? await v3NoteCommitment(note.amount, spendPubHex, note.blindingHex)
-      : await v3NoteCommitmentAsset(note.amount, spendPubHex, note.blindingHex, note.assetIdHex)
+    let expected: string
+    try {
+      expected = isNative
+        ? await v3NoteCommitment(note.amount, spendPubHex, note.blindingHex)
+        : await v3NoteCommitmentAsset(
+            note.amount,
+            spendPubHex,
+            note.blindingHex,
+            note.assetIdHex
+          )
+    } catch {
+      continue
+    }
     if (expected !== d.output_commitment) {
       continue
     }

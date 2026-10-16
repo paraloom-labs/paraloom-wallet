@@ -78,7 +78,12 @@ export function encryptNote(recipientBoxPubHex: string, note: NotePlaintext): st
  * every delivered note and silently skip the ones not for them).
  */
 export function tryDecryptNote(boxSecretKey: Uint8Array, bundleHex: string): NotePlaintext | null {
-  const bundle = hexToBytes(bundleHex)
+  if (typeof bundleHex !== "string") return null
+  const clean = bundleHex.startsWith("0x") ? bundleHex.slice(2) : bundleHex
+  if (clean.length === 0 || clean.length % 2 !== 0 || !/^[0-9a-fA-F]+$/.test(clean)) {
+    return null
+  }
+  const bundle = hexToBytes(clean)
 
   // Parse the v1-tagged envelope (epk at offset 1) and, for notes delivered
   // before the tag was added, the legacy untagged one (epk at offset 0). When

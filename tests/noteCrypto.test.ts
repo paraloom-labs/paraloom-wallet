@@ -248,4 +248,18 @@ describe("trial decryption", () => {
     bundle.set(ct, 57)
     expect(tryDecryptNote(RECIPIENT_SECRET, hex(bundle))).toBeNull()
   })
+
+  it.each([
+    ["odd-length hex", "01" + "ab".repeat(72) + "a"],
+    ["non-hex characters", "01" + "zz".repeat(144)],
+    ["0x prefix only", "0x"]
+  ])("returns null for a malformed hex string (%s)", (_label, bundleHex) => {
+    expect(tryDecryptNote(RECIPIENT_SECRET, bundleHex)).toBeNull()
+  })
+
+  it("returns null when bundleHex is not a string at runtime", () => {
+    expect(tryDecryptNote(RECIPIENT_SECRET, null as unknown as string)).toBeNull()
+    expect(tryDecryptNote(RECIPIENT_SECRET, undefined as unknown as string)).toBeNull()
+    expect(tryDecryptNote(RECIPIENT_SECRET, 12345 as unknown as string)).toBeNull()
+  })
 })

@@ -460,3 +460,110 @@ describe("ordinary scanning", () => {
     expect(await scan()).toBe(0)
   })
 })
+
+describe("out-of-field BN254 scalars and malformed scan entries", () => {
+  // In paraloom-prover-wasm, `v3_note_commitment` and `v3_note_commitment_asset`
+  // pass `blinding_hex` and `asset_id_hex` through `fr_be(&hex32(...)?)?`, which
+  // throws `JsValue("scalar >= BN254 modulus")` on any 32-byte big-endian value
+  // >= r (~81% of 32-byte values). Because every `paraloom1` address exposes its
+  // X25519 boxPublicKey, anyone can seal a 72-byte plaintext with blinding=0xff*32
+  // or assetId=0xff*32 to a victim wallet. An uncaught throw aborts `scanForNotes`
+  // before `known.add(...)`, permanently hiding every subsequent note in the FIFO
+  // `/transact/scan` feed on every rescan.
+  const BN254_FR_MODULUS =
+    0x30644e72e131a029b85045b68181585d2833e84879b9709143e1f593f0000001n
+  const IN_FIELD_BLINDING = "11".repeat(32)
+  const IN_FIELD_ASSET = "12".repeat(32)
+  const OUT_OF_FIELD_SCALAR = "ff".repeat(32)
+
+  function assertFrBe(hex32: string) {
+    if (!/^[0-9a-fA-F]{64}$/.test(hex32)) {
+      throw new Error("expected 32-byte hex")
+    }
+    if (BigInt("0x" + hex32) >= BN254_FR_MODULUS) {
+      throw new Error("scalar >= BN254 modulus")
+    }
+  }
+
+  beforeEach(() => {
+    v3NoteCommitment.mockImplementation(async (a: bigint, p: string, b: string) => {
+      assertFrBe(b)
+      return fakeCommitment(a, p, b)
+    })
+    v3NoteCommitmentAsset.mockImplementation(
+      async (a: bigint, p: string, b: string, s: string) => {
+        assertFrBe(b)
+        assertFrBe(s)
+        return fakeAssetCommitment(a, p, b, s)
+      }
+    )
+  })
+
+  it("drops a native note with an out-of-field blinding (>= BN254 modulus) and still discovers later notes", async () => {
+    const poisonedNative = {
+      output_commitment: "00".repeat(32),
+      ciphertext: encryptNote(hex(ourBox.publicKey), {
+        amount: 500n,
+        blindingHex: OUT_OF_FIELD_SCALAR,
+        assetIdHex: ASSET
+      })
+    }
+    const validAfter = honest(250n, IN_FIELD_BLINDING)
+    respondWith([poisonedNative, validAfter])
+
+    await expect(scan()).resolves.toBe(1)
+    expect(await shieldedBalance(ACCOUNT)).toBe(250n)
+  })
+
+  it("drops an SPL note with an out-of-field assetId or blinding (>= BN254 modulus) without aborting the scan", async () => {
+    const poisonedAsset = {
+      output_commitment: "00".repeat(32),
+      mint: MINT_HEX,
+      ciphertext: encryptNote(hex(ourBox.publicKey), {
+        amount: 500n,
+        blindingHex: IN_FIELD_BLINDING,
+        assetIdHex: OUT_OF_FIELD_SCALAR
+      })
+    }
+    const poisonedBlinding = {
+      output_commitment: "00".repeat(32),
+      mint: MINT_HEX,
+      ciphertext: encryptNote(hex(ourBox.publicKey), {
+        amount: 500n,
+        blindingHex: OUT_OF_FIELD_SCALAR,
+        assetIdHex: IN_FIELD_ASSET
+      })
+    }
+    const validAfter = honest(400n, IN_FIELD_BLINDING)
+    respondWith([poisonedAsset, poisonedBlinding, validAfter])
+
+    await expect(scan()).resolves.toBe(1)
+    expect(await shieldedBalance(ACCOUNT)).toBe(400n)
+  })
+
+  it("skips malformed delivered entries (null item, non-string fields, or odd-length ciphertext) and continues scanning", async () => {
+    const validAfter = honest(750n, IN_FIELD_BLINDING)
+    respondWith([
+      null,
+      { output_commitment: null, ciphertext: "01" },
+      { output_commitment: "aa".repeat(32), ciphertext: null },
+      { output_commitment: "bb".repeat(32), ciphertext: "01abc" },
+      validAfter
+    ])
+
+    await expect(scan()).resolves.toBe(1)
+    expect(await shieldedBalance(ACCOUNT)).toBe(750n)
+  })
+
+  it("throws a clear error when the scan payload is not an array", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => ({
+        ok: true,
+        status: 200,
+        json: async () => ({ error: "unexpected object" })
+      }))
+    )
+    await expect(scan()).rejects.toThrow(/invalid response payload/)
+  })
+})

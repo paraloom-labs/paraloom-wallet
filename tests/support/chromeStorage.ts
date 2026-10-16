@@ -57,9 +57,40 @@ export interface FakeChrome {
   storage: { local: FakeArea; session: FakeArea }
 }
 
+// One shared origin-wide lock manager, including independently imported module
+// instances (popup and service worker). Model the exclusive request form used
+// by the wallet, releasing the next waiter on both success and rejection.
+function makeLocks() {
+  const pending = new Map<string, Promise<void>>()
+  return {
+    async request<T>(name: string, callback: () => T | Promise<T>): Promise<T> {
+      const previous = pending.get(name) ?? Promise.resolve()
+      let release!: () => void
+      const done = new Promise<void>((resolve) => {
+        release = resolve
+      })
+      pending.set(name, done)
+      await previous
+      try {
+        return await callback()
+      } finally {
+        release()
+        if (pending.get(name) === done) pending.delete(name)
+      }
+    }
+  }
+}
+
 /** Install a fresh `globalThis.chrome`. Call in `beforeEach`. */
 export function installFakeChrome(): FakeChrome {
   const chrome: FakeChrome = { storage: { local: makeArea(), session: makeArea() } }
   ;(globalThis as unknown as { chrome: FakeChrome }).chrome = chrome
+  // Node 20 has no navigator; newer Node versions expose a read-only one.
+  // Keep this deterministic on both versions rather than depending on Node's
+  // experimental Web Locks implementation.
+  Object.defineProperty(globalThis, "navigator", {
+    configurable: true,
+    value: { locks: makeLocks() }
+  })
   return chrome
 }

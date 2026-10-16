@@ -42,44 +42,55 @@ async function writeAll(all: NotesByAccount): Promise<void> {
   await chrome.storage.local.set({ [NOTES_KEY]: all })
 }
 
+// Every account lives in the same storage value. Serialize the entire
+// read-modify-write, not just set(), so a concurrent scan, deposit, or spend
+// cannot overwrite another completed update. Web Locks are shared by the
+// extension's popup and service worker; a module-local queue is not.
+async function mutateNotes(update: (all: NotesByAccount) => void | boolean): Promise<void> {
+  await navigator.locks.request(NOTES_KEY, async () => {
+    const all = await readAll()
+    if (update(all) !== false) await writeAll(all)
+  })
+}
+
 export async function getNotes(account: string): Promise<ShieldedNote[]> {
   const all = await readAll()
   return all[account] ?? []
 }
 
 export async function addNote(account: string, note: ShieldedNote): Promise<void> {
-  const all = await readAll()
-  const existing = all[account] ?? []
-  // Idempotent by (non-empty) deposit signature: the same shielded note can be
-  // persisted more than once — the early on-submit persist AND the end-of-flow
-  // persist AND the recovery scan all target the same deposit — so dedupe here
-  // rather than double-counting the balance.
-  if (note.signature && existing.some((n) => n.signature === note.signature)) {
-    return
-  }
-  all[account] = [...existing, note]
-  await writeAll(all)
+  return mutateNotes((all) => {
+    const existing = all[account] ?? []
+    // Idempotent by (non-empty) deposit signature: the same shielded note can be
+    // persisted more than once — the early on-submit persist AND the end-of-flow
+    // persist AND the recovery scan all target the same deposit — so dedupe here
+    // rather than double-counting the balance.
+    if (note.signature && existing.some((n) => n.signature === note.signature)) {
+      return false
+    }
+    all[account] = [...existing, note]
+  })
 }
 
 // Mark the note with this deposit signature as spent (after a withdrawal
 // settles), so it no longer counts toward the shielded balance.
 export async function markNoteSpent(account: string, signature: string): Promise<void> {
-  const all = await readAll()
-  const notes = all[account] ?? []
-  all[account] = notes.map((n) => (n.signature === signature ? { ...n, spent: true } : n))
-  await writeAll(all)
+  return mutateNotes((all) => {
+    const notes = all[account] ?? []
+    all[account] = notes.map((n) => (n.signature === signature ? { ...n, spent: true } : n))
+  })
 }
 
 // Add a note discovered by scanning transfer ciphertexts (#196), de-duplicated
 // by commitment so re-scanning is idempotent.
 export async function addDiscoveredNote(account: string, note: ShieldedNote): Promise<void> {
-  const all = await readAll()
-  const notes = all[account] ?? []
-  if (notes.some((n) => n.commitment && n.commitment === note.commitment)) {
-    return
-  }
-  all[account] = [...notes, note]
-  await writeAll(all)
+  return mutateNotes((all) => {
+    const notes = all[account] ?? []
+    if (notes.some((n) => n.commitment && n.commitment === note.commitment)) {
+      return false
+    }
+    all[account] = [...notes, note]
+  })
 }
 
 // Fill in a deposit note's on-chain leaf index once it is known. The note is
@@ -91,26 +102,30 @@ export async function setNoteLeafIndex(
   commitment: string,
   leafIndex: number
 ): Promise<void> {
-  const all = await readAll()
-  const notes = all[account] ?? []
-  let changed = false
-  all[account] = notes.map((n) => {
-    if (n.commitment === commitment && n.leafIndex !== leafIndex) {
-      changed = true
-      return { ...n, leafIndex }
-    }
-    return n
+  return mutateNotes((all) => {
+    const notes = all[account] ?? []
+    let changed = false
+    all[account] = notes.map((n) => {
+      if (n.commitment === commitment && n.leafIndex !== leafIndex) {
+        changed = true
+        return { ...n, leafIndex }
+      }
+      return n
+    })
+    return changed
   })
-  if (changed) await writeAll(all)
 }
 
 // Mark a note spent by its commitment (used for transfer inputs/outputs, which
 // are identified by commitment rather than a deposit signature).
-export async function markNoteSpentByCommitment(account: string, commitment: string): Promise<void> {
-  const all = await readAll()
-  const notes = all[account] ?? []
-  all[account] = notes.map((n) => (n.commitment === commitment ? { ...n, spent: true } : n))
-  await writeAll(all)
+export async function markNoteSpentByCommitment(
+  account: string,
+  commitment: string
+): Promise<void> {
+  return mutateNotes((all) => {
+    const notes = all[account] ?? []
+    all[account] = notes.map((n) => (n.commitment === commitment ? { ...n, spent: true } : n))
+  })
 }
 
 // Mark exactly the given note spent, by whichever identity is unique to it
@@ -136,16 +151,12 @@ export async function markNoteSpentByIdentity(account: string, note: ShieldedNot
 // it carries no `mint`. Use shieldedTokenBalances() for the SPL side.
 export async function shieldedBalance(account: string): Promise<bigint> {
   const notes = await getNotes(account)
-  return notes
-    .filter((n) => !n.spent && !n.mint)
-    .reduce((sum, n) => sum + BigInt(n.amount), 0n)
+  return notes.filter((n) => !n.spent && !n.mint).reduce((sum, n) => sum + BigInt(n.amount), 0n)
 }
 
 // Unspent shielded SPL balances keyed by base58 mint (#779). Each amount is in
 // that mint's own base units, kept separate from the native lamports sum.
-export async function shieldedTokenBalances(
-  account: string
-): Promise<Record<string, bigint>> {
+export async function shieldedTokenBalances(account: string): Promise<Record<string, bigint>> {
   const notes = await getNotes(account)
   const byMint: Record<string, bigint> = {}
   for (const n of notes) {

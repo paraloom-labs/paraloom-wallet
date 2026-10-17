@@ -418,8 +418,9 @@ export function solanaAddress(publicKey: Uint8Array): string {
 const B58_ALPHABET =
   "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz"
 
-function base58Decode(s: string): Uint8Array {
-  const bytes: number[] = [0]
+export function base58Decode(s: string): Uint8Array {
+  if (s.length === 0) return new Uint8Array(0)
+  const bytes: number[] = []
   for (const ch of s) {
     const v = B58_ALPHABET.indexOf(ch)
     if (v < 0) throw new Error(`invalid base58 char: ${ch}`)
@@ -465,15 +466,29 @@ export async function recoverReshieldedNote(
       compiledInstructions?: { programIdIndex: number; data: Uint8Array }[]
       instructions?: { programIdIndex: number; data: string }[]
     }
-    const keys = msg.staticAccountKeys ?? msg.accountKeys ?? []
-    const ixs = msg.compiledInstructions ?? msg.instructions ?? []
+    const staticKeys = msg.staticAccountKeys ?? msg.accountKeys ?? []
+    const loadedWritable = (tx.meta?.loadedAddresses?.writable ?? []) as PublicKey[]
+    const loadedReadonly = (tx.meta?.loadedAddresses?.readonly ?? []) as PublicKey[]
+    const keys = [...staticKeys, ...loadedWritable, ...loadedReadonly]
+
+    const ixs: { programIdIndex: number; data: unknown }[] = [
+      ...(msg.compiledInstructions ?? msg.instructions ?? [])
+    ]
+    if (tx.meta?.innerInstructions) {
+      for (const inner of tx.meta.innerInstructions) {
+        if (inner.instructions) {
+          ixs.push(...(inner.instructions as any))
+        }
+      }
+    }
+
     for (const ix of ixs) {
       const prog = keys[ix.programIdIndex]
       if (!prog || prog.toBase58() !== programId.toBase58()) continue
       const data =
-        typeof (ix as { data: unknown }).data === "string"
-          ? base58Decode((ix as { data: string }).data)
-          : Uint8Array.from((ix as { data: Uint8Array }).data)
+        typeof ix.data === "string"
+          ? base58Decode(ix.data)
+          : Uint8Array.from((ix.data as Uint8Array) ?? [])
       if (data.length < 80 || !bytesStartWith(data, DEPOSIT_NOTE_SPL_DISCRIMINATOR)) {
         continue
       }

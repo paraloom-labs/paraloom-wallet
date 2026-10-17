@@ -100,24 +100,31 @@ export interface PrivateSwapResult {
 // Unlike connection.confirmTransaction (hard 30s deadline), this tolerates a
 // busy mainnet: it only rejects on a real on-chain error or if the tx never
 // confirms within the window.
-async function waitForSwapConfirmation(
+export async function waitForSwapConfirmation(
   connection: Connection,
   signature: string,
   timeoutMs = 90_000
 ): Promise<void> {
   const deadline = Date.now() + timeoutMs
   while (Date.now() < deadline) {
-    const st = await connection.getSignatureStatus(signature, {
-      searchTransactionHistory: true
-    })
-    const v = st.value
-    if (v) {
-      if (v.err) {
-        throw new Error(`swap transaction failed on-chain: ${JSON.stringify(v.err)}`)
+    try {
+      const st = await connection.getSignatureStatus(signature, {
+        searchTransactionHistory: true
+      })
+      const v = st.value
+      if (v) {
+        if (v.err) {
+          throw new Error(`swap transaction failed on-chain: ${JSON.stringify(v.err)}`)
+        }
+        if (v.confirmationStatus === "confirmed" || v.confirmationStatus === "finalized") {
+          return
+        }
       }
-      if (v.confirmationStatus === "confirmed" || v.confirmationStatus === "finalized") {
-        return
+    } catch (e) {
+      if (e instanceof Error && e.message.startsWith("swap transaction failed on-chain")) {
+        throw e
       }
+      // transient RPC error; keep polling until deadline
     }
     await new Promise((r) => setTimeout(r, 2000))
   }
@@ -269,15 +276,19 @@ async function reshieldToken(
   }
 }
 
-async function waitForFunding(
+export async function waitForFunding(
   connection: Connection,
   pubkey: Keypair["publicKey"]
 ): Promise<bigint> {
   const deadline = Date.now() + SETTLE_TIMEOUT_MS
   while (Date.now() < deadline) {
     await new Promise((r) => setTimeout(r, SETTLE_POLL_MS))
-    const bal = BigInt(await connection.getBalance(pubkey))
-    if (bal > 0n) return bal
+    try {
+      const bal = BigInt(await connection.getBalance(pubkey))
+      if (bal > 0n) return bal
+    } catch {
+      // transient RPC error; keep polling until deadline
+    }
   }
   throw new Error(
     "withdraw is still settling and has not funded the fresh address yet. Do NOT retry — the spent note is already committed and the funds will arrive at the saved address; reopen the wallet to let the swap resume once it lands."

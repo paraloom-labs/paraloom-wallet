@@ -24,19 +24,42 @@ export interface SwapOutput {
   createdAt: number
 }
 
+import { withExclusiveLock } from "~lib/storage/locks"
+
 const KEY = "paraloom_swap_outputs"
+const LOCK_NAME = "paraloom_swap_outputs:write"
 
 // Upsert by freshAddress: the key is saved early (before the withdraw) so it can
 // never be lost, then the same entry is updated with the realized amount +
 // signature once the swap lands. Keyed on the address so the two writes collapse
-// to one row.
+// to one row. Non-destructive merging ensures late/stale snapshot writes cannot
+// erase a persisted secret key, confirmed signature, realized amount, or reshield flags.
 export async function saveSwapOutput(output: SwapOutput): Promise<void> {
-  const stored = await chrome.storage.local.get(KEY)
-  const current = (stored[KEY] as SwapOutput[]) ?? []
-  const i = current.findIndex((o) => o.freshAddress === output.freshAddress)
-  if (i >= 0) current[i] = { ...current[i], ...output }
-  else current.push(output)
-  await chrome.storage.local.set({ [KEY]: current })
+  return withExclusiveLock(LOCK_NAME, async () => {
+    const stored = await chrome.storage.local.get(KEY)
+    const current = (stored[KEY] as SwapOutput[]) ?? []
+    const i = current.findIndex((o) => o.freshAddress === output.freshAddress)
+    if (i >= 0) {
+      const existing = current[i]
+      current[i] = {
+        freshAddress: existing.freshAddress,
+        freshSecretKeyHex: existing.freshSecretKeyHex || output.freshSecretKeyHex,
+        outputMint: output.outputMint || existing.outputMint,
+        outAmount: output.outAmount > 0 ? output.outAmount : existing.outAmount,
+        swapSignature: existing.swapSignature || output.swapSignature,
+        reshield:
+          existing.reshield === true ? true : (output.reshield ?? existing.reshield),
+        reshieldRecovered:
+          existing.reshieldRecovered === true
+            ? true
+            : (output.reshieldRecovered ?? existing.reshieldRecovered),
+        createdAt: existing.createdAt || output.createdAt
+      }
+    } else {
+      current.push(output)
+    }
+    await chrome.storage.local.set({ [KEY]: current })
+  })
 }
 
 export async function listSwapOutputs(): Promise<SwapOutput[]> {
@@ -49,8 +72,10 @@ export async function listSwapOutputs(): Promise<SwapOutput[]> {
 // swap either re-shielded into the pool or its input note was never spent), so
 // this only removes the misleading Activity entry, never any money.
 export async function dismissSwapOutput(freshAddress: string): Promise<void> {
-  const stored = await chrome.storage.local.get(KEY)
-  const current = (stored[KEY] as SwapOutput[]) ?? []
-  const next = current.filter((o) => o.freshAddress !== freshAddress)
-  await chrome.storage.local.set({ [KEY]: next })
+  return withExclusiveLock(LOCK_NAME, async () => {
+    const stored = await chrome.storage.local.get(KEY)
+    const current = (stored[KEY] as SwapOutput[]) ?? []
+    const next = current.filter((o) => o.freshAddress !== freshAddress)
+    await chrome.storage.local.set({ [KEY]: next })
+  })
 }

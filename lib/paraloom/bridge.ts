@@ -27,26 +27,48 @@ import {
 
 export type Network = "mainnet-beta" | "devnet"
 
-// A `fetch` that retries the RPC on a transient upstream failure (5xx or a
-// network error) with backoff, so a single Helius/proxy blip mid-swap cannot
-// abort the whole flow ("failed to get balance ... 500 Internal server error").
+// A `fetch` that retries the RPC on a transient upstream failure (5xx, 429, 408, or
+// a network error) with backoff, so a single Helius/proxy blip or rate limit mid-swap
+// cannot abort the whole flow ("failed to get balance ... 500 Internal server error").
 // JSON-RPC reads are idempotent, and sendTransaction is deduped by signature, so
-// re-issuing the same request is safe. 4xx is returned as-is (a real client
-// error, not worth retrying).
-async function retryingFetch(
+// re-issuing the same request is safe. 4xx is returned as-is (a real client error,
+// not worth retrying) except 429 Too Many Requests and 408 Request Timeout.
+export async function retryingFetch(
   input: RequestInfo | URL,
   init?: RequestInit
 ): Promise<Response> {
   let lastErr: unknown
   for (let attempt = 0; attempt < 4; attempt++) {
+    let retryAfterMs: number | null = null
     try {
       const res = await fetch(input, init)
-      if (res.status < 500) return res
+      if (res.status < 500 && res.status !== 429 && res.status !== 408) {
+        return res
+      }
+      if (res.status === 429) {
+        const header =
+          res.headers?.get("retry-after") ?? res.headers?.get("Retry-After")
+        if (header) {
+          const sec = parseFloat(header)
+          if (!isNaN(sec) && sec >= 0) {
+            retryAfterMs = Math.min(sec * 1000, 5000)
+          } else {
+            const dateMs = Date.parse(header)
+            if (!isNaN(dateMs)) {
+              const diff = dateMs - Date.now()
+              if (diff > 0) retryAfterMs = Math.min(diff, 5000)
+            }
+          }
+        }
+      }
       lastErr = new Error(`RPC ${res.status}`)
     } catch (e) {
       lastErr = e
     }
-    if (attempt < 3) await new Promise((r) => setTimeout(r, 300 * 2 ** attempt))
+    if (attempt < 3) {
+      const delay = retryAfterMs ?? 300 * 2 ** attempt
+      await new Promise((r) => setTimeout(r, delay))
+    }
   }
   // Exhausted retries: one last attempt, letting a genuine failure surface.
   try {

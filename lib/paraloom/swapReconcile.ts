@@ -27,12 +27,14 @@ import {
   RESUME_GRACE_MS,
   RESUME_MIN_LAMPORTS
 } from "./swapReconcileClassify"
+import { withNonBlockingLock } from "~lib/storage/locks"
 import { listSwapOutputs, saveSwapOutput } from "./swapOutputs"
 
 export { classifyStrand, RESUME_GRACE_MS, RESUME_MIN_LAMPORTS }
 export type { StrandAction } from "./swapReconcileClassify"
 
 let reconcileInFlight = false
+const RECONCILE_LOCK_NAME = "paraloom_swap_reconcile"
 
 /// Resolve every stranded swap row for `shieldedAddress` to its true on-chain
 /// outcome. Best-effort and idempotent: a row it cannot positively account for is
@@ -42,113 +44,129 @@ export async function reconcileSwapOutputs(
   shieldedAddress: string
 ): Promise<number> {
   if (reconcileInFlight) return 0
-  reconcileInFlight = true
-  let resolved = 0
-  try {
-    const outputs = await listSwapOutputs()
-    const now = Date.now()
-    for (const o of outputs) {
-      if (o.swapSignature) continue
-      if (now - o.createdAt < RESUME_GRACE_MS) continue
 
-      const freshPub = new PublicKey(o.freshAddress)
-      let solLamports = 0n
-      try {
-        solLamports = BigInt(await connection.getBalance(freshPub))
-      } catch {
-        continue // RPC blip: retry on the next open rather than guess
-      }
+  const run = async (): Promise<number> => {
+    if (reconcileInFlight) return 0
+    reconcileInFlight = true
+    let resolved = 0
+    try {
+      const outputs = await listSwapOutputs()
+      const now = Date.now()
+      for (const o of outputs) {
+        if (o.swapSignature) continue
+        if (now - o.createdAt < RESUME_GRACE_MS) continue
 
-      let tokenAmount = 0n
-      if (solLamports <= RESUME_MIN_LAMPORTS && !isNativeSolOutput(o.outputMint)) {
+        const freshPub = new PublicKey(o.freshAddress)
+        let solLamports = 0n
         try {
-          const accts = await connection.getParsedTokenAccountsByOwner(freshPub, {
-            mint: new PublicKey(o.outputMint)
-          })
-          tokenAmount = accts.value.reduce(
-            (s, a) =>
-              s +
-              BigInt(
-                (a.account.data as { parsed: { info: { tokenAmount: { amount: string } } } })
-                  .parsed.info.tokenAmount.amount
-              ),
-            0n
-          )
+          solLamports = BigInt(await connection.getBalance(freshPub))
         } catch {
-          // no token account yet — leave as unresolved below
+          continue // RPC blip: retry on the next open rather than guess
         }
-      }
 
-      let action = classifyStrand({
-        hasSignature: false,
-        ageMs: now - o.createdAt,
-        solLamports,
-        tokenAmount
-      })
-
-      // A "SOL" output means this was a token -> SOL swap (or its stranded gas
-      // leg): the SOL at the fresh address is the OUTPUT, never a SOL input to
-      // swap again, so never resume it (that would route SOL -> SOL). Record the
-      // SOL as landed instead; it is real and recoverable with the saved key.
-      if (action === "resume" && isNativeSolOutput(o.outputMint)) {
-        action = "landed"
-        tokenAmount = solLamports
-      }
-
-      if (action === "resume") {
-        try {
-          const r = await resumeSwapAtFreshAddress(
-            connection,
-            shieldedAddress,
-            o.freshSecretKeyHex,
-            o.outputMint,
-            o.reshield ?? false,
-            (note) => persistReshieldedNote(shieldedAddress, note)
-          )
-          await saveSwapOutput({
-            ...o,
-            outAmount: r.outAmount,
-            swapSignature: r.swapSignature
-          })
-          if (r.reshielded) {
-            await persistReshieldedNote(shieldedAddress, r.reshielded)
+        let tokenAmount = 0n
+        if (solLamports <= RESUME_MIN_LAMPORTS && !isNativeSolOutput(o.outputMint)) {
+          try {
+            const accts = await connection.getParsedTokenAccountsByOwner(freshPub, {
+              mint: new PublicKey(o.outputMint)
+            })
+            tokenAmount = accts.value.reduce(
+              (s, a) =>
+                s +
+                BigInt(
+                  (a.account.data as { parsed: { info: { tokenAmount: { amount: string } } } })
+                    .parsed.info.tokenAmount.amount
+                ),
+              0n
+            )
+          } catch {
+            // no token account yet — leave as unresolved below
           }
-          resolved++
-        } catch (e) {
-          console.log(
-            `[paraloom] could not resume swap at ${o.freshAddress}: ${
-              e instanceof Error ? e.message : String(e)
-            }`
-          )
         }
-      } else if (action === "landed") {
-        try {
-          // The swap already landed; the fresh address holds the bought token.
-          // Record the realized amount and the tx that put it there so the row
-          // resolves and links to the explorer. No re-shield here: the fresh
-          // address has no gas SOL left to pay for it, and the token stays
-          // recoverable at the address the wallet still holds the key for.
-          const sigs = await connection.getSignaturesForAddress(freshPub, { limit: 1 })
-          const sig = sigs[0]?.signature
-          if (!sig) continue // cannot attest it landed → leave for manual dismiss
-          await saveSwapOutput({
-            ...o,
-            outAmount: Number(tokenAmount),
-            swapSignature: sig
-          })
-          resolved++
-        } catch (e) {
-          console.log(
-            `[paraloom] could not record landed swap at ${o.freshAddress}: ${
-              e instanceof Error ? e.message : String(e)
-            }`
-          )
+
+        let action = classifyStrand({
+          hasSignature: false,
+          ageMs: now - o.createdAt,
+          solLamports,
+          tokenAmount
+        })
+
+        // A "SOL" output means this was a token -> SOL swap (or its stranded gas
+        // leg): the SOL at the fresh address is the OUTPUT, never a SOL input to
+        // swap again, so never resume it (that would route SOL -> SOL). Record the
+        // SOL as landed instead; it is real and recoverable with the saved key.
+        if (action === "resume" && isNativeSolOutput(o.outputMint)) {
+          action = "landed"
+          tokenAmount = solLamports
         }
+
+        if (action === "resume") {
+          // Re-verify the latest row state in listSwapOutputs() immediately before calling resumeSwapAtFreshAddress
+          const latestOutputs = await listSwapOutputs()
+          const latest = latestOutputs.find((x) => x.freshAddress === o.freshAddress)
+          if (!latest || latest.swapSignature) continue
+
+          try {
+            const r = await resumeSwapAtFreshAddress(
+              connection,
+              shieldedAddress,
+              latest.freshSecretKeyHex,
+              latest.outputMint,
+              latest.reshield ?? false,
+              (note) => persistReshieldedNote(shieldedAddress, note)
+            )
+            await saveSwapOutput({
+              ...latest,
+              outAmount: r.outAmount,
+              swapSignature: r.swapSignature
+            })
+            if (r.reshielded) {
+              await persistReshieldedNote(shieldedAddress, r.reshielded)
+            }
+            resolved++
+          } catch (e) {
+            console.log(
+              `[paraloom] could not resume swap at ${o.freshAddress}: ${
+                e instanceof Error ? e.message : String(e)
+              }`
+            )
+          }
+        } else if (action === "landed") {
+          const latestOutputs = await listSwapOutputs()
+          const latest = latestOutputs.find((x) => x.freshAddress === o.freshAddress)
+          if (!latest || latest.swapSignature) continue
+
+          try {
+            // The swap already landed; the fresh address holds the bought token.
+            // Record the realized amount and the tx that put it there so the row
+            // resolves and links to the explorer. No re-shield here: the fresh
+            // address has no gas SOL left to pay for it, and the token stays
+            // recoverable at the address the wallet still holds the key for.
+            const sigs = await connection.getSignaturesForAddress(freshPub, { limit: 1 })
+            const sig = sigs[0]?.signature
+            if (!sig) continue // cannot attest it landed → leave for manual dismiss
+            await saveSwapOutput({
+              ...latest,
+              outAmount: Number(tokenAmount),
+              swapSignature: sig
+            })
+            resolved++
+          } catch (e) {
+            console.log(
+              `[paraloom] could not record landed swap at ${o.freshAddress}: ${
+                e instanceof Error ? e.message : String(e)
+              }`
+            )
+          }
+        }
+        // "unresolved" / "skip": leave untouched.
       }
-      // "unresolved" / "skip": leave untouched.
+    } finally {
+      reconcileInFlight = false
     }
-  } finally {
-    reconcileInFlight = false
+    return resolved
   }
-  return resolved
+
+  const result = await withNonBlockingLock(RECONCILE_LOCK_NAME, run, () => 0)
+  return result ?? 0
 }

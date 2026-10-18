@@ -28,6 +28,37 @@ export interface WalletStorage {
 }
 
 const STORAGE_KEY = "paraloom_wallet"
+const WALLET_STORAGE_WRITE_LOCK = "paraloom_wallet:write"
+
+let fallbackQueue: Promise<unknown> = Promise.resolve()
+
+function withWalletStorageWriteLock<T>(fn: () => Promise<T>): Promise<T> {
+  const runInQueue = (): Promise<T> => {
+    const next = fallbackQueue.then(fn, fn)
+    fallbackQueue = next.then(
+      () => undefined,
+      () => undefined
+    )
+    return next
+  }
+  const locks = (
+    globalThis as unknown as {
+      navigator?: {
+        locks?: {
+          request?: <R>(
+            name: string,
+            optionsOrCallback: { mode?: "exclusive" | "shared" } | (() => Promise<R>),
+            callback?: () => Promise<R>
+          ) => Promise<R>
+        }
+      }
+    }
+  ).navigator?.locks
+  if (locks && typeof locks.request === "function") {
+    return locks.request(WALLET_STORAGE_WRITE_LOCK, { mode: "exclusive" }, runInQueue)
+  }
+  return runInQueue()
+}
 
 export async function saveEncryptedWallet(
   encryptedWallet: EncryptedWallet,
@@ -58,12 +89,14 @@ export async function saveEncryptedWallet(
     }))
   }
 
-  await chrome.storage.local.set({
-    [STORAGE_KEY]: {
-      wallet: data,
-      locked: true,
-      autoLockMinutes: 60
-    }
+  await withWalletStorageWriteLock(async () => {
+    await chrome.storage.local.set({
+      [STORAGE_KEY]: {
+        wallet: data,
+        locked: true,
+        autoLockMinutes: 60
+      }
+    })
   })
 }
 
@@ -78,17 +111,20 @@ export async function migrateWalletToScrypt(
   seedPhrase: string | undefined,
   password: string
 ): Promise<void> {
-  const result = await chrome.storage.local.get(STORAGE_KEY)
-  const storage = result[STORAGE_KEY] as WalletStorage | undefined
-  if (!storage?.wallet) return
+  const encryptedSeed = seedPhrase ? encryptSeedPhrase(seedPhrase, password) : undefined
+  await withWalletStorageWriteLock(async () => {
+    const result = await chrome.storage.local.get(STORAGE_KEY)
+    const storage = result[STORAGE_KEY] as WalletStorage | undefined
+    if (!storage?.wallet) return
 
-  storage.wallet.encryptedData = encryptedWallet
-  storage.wallet.kdfVersion = KDF_VERSION_SCRYPT
-  if (seedPhrase) {
-    storage.wallet.encryptedSeedPhrase = encryptSeedPhrase(seedPhrase, password)
-  }
+    storage.wallet.encryptedData = encryptedWallet
+    storage.wallet.kdfVersion = KDF_VERSION_SCRYPT
+    if (encryptedSeed !== undefined) {
+      storage.wallet.encryptedSeedPhrase = encryptedSeed
+    }
 
-  await chrome.storage.local.set({ [STORAGE_KEY]: storage })
+    await chrome.storage.local.set({ [STORAGE_KEY]: storage })
+  })
 }
 
 export async function getStoredWallet(): Promise<StoredWallet | null> {
@@ -98,7 +134,9 @@ export async function getStoredWallet(): Promise<StoredWallet | null> {
 }
 
 export async function clearWallet(): Promise<void> {
-  await chrome.storage.local.remove(STORAGE_KEY)
+  await withWalletStorageWriteLock(async () => {
+    await chrome.storage.local.remove(STORAGE_KEY)
+  })
 }
 
 export async function isWalletLocked(): Promise<boolean> {
@@ -108,13 +146,15 @@ export async function isWalletLocked(): Promise<boolean> {
 }
 
 export async function setLockState(locked: boolean): Promise<void> {
-  const result = await chrome.storage.local.get(STORAGE_KEY)
-  const storage = result[STORAGE_KEY] as WalletStorage
+  await withWalletStorageWriteLock(async () => {
+    const result = await chrome.storage.local.get(STORAGE_KEY)
+    const storage = result[STORAGE_KEY] as WalletStorage
 
-  if (storage) {
-    storage.locked = locked
-    await chrome.storage.local.set({ [STORAGE_KEY]: storage })
-  }
+    if (storage) {
+      storage.locked = locked
+      await chrome.storage.local.set({ [STORAGE_KEY]: storage })
+    }
+  })
 }
 
 export async function getAutoLockMinutes(): Promise<number> {
@@ -124,28 +164,32 @@ export async function getAutoLockMinutes(): Promise<number> {
 }
 
 export async function setAutoLockMinutes(minutes: number): Promise<void> {
-  const result = await chrome.storage.local.get(STORAGE_KEY)
-  const storage = result[STORAGE_KEY] as WalletStorage
+  await withWalletStorageWriteLock(async () => {
+    const result = await chrome.storage.local.get(STORAGE_KEY)
+    const storage = result[STORAGE_KEY] as WalletStorage
 
-  if (storage) {
-    storage.autoLockMinutes = minutes
-    await chrome.storage.local.set({ [STORAGE_KEY]: storage })
-  }
+    if (storage) {
+      storage.autoLockMinutes = minutes
+      await chrome.storage.local.set({ [STORAGE_KEY]: storage })
+    }
+  })
 }
 
 export async function updateAccounts(accounts: Account[]): Promise<void> {
-  const result = await chrome.storage.local.get(STORAGE_KEY)
-  const storage = result[STORAGE_KEY] as WalletStorage
+  await withWalletStorageWriteLock(async () => {
+    const result = await chrome.storage.local.get(STORAGE_KEY)
+    const storage = result[STORAGE_KEY] as WalletStorage
 
-  if (storage?.wallet) {
-    storage.wallet.accounts = accounts.map(acc => ({
-      index: acc.index,
-      name: acc.name,
-      address: acc.keypair.shieldedAddress,
-      balance: acc.balance.toString()
-    }))
-    await chrome.storage.local.set({ [STORAGE_KEY]: storage })
-  }
+    if (storage?.wallet) {
+      storage.wallet.accounts = accounts.map(acc => ({
+        index: acc.index,
+        name: acc.name,
+        address: acc.keypair.shieldedAddress,
+        balance: acc.balance.toString()
+      }))
+      await chrome.storage.local.set({ [STORAGE_KEY]: storage })
+    }
+  })
 }
 
 export async function getNetwork(): Promise<"mainnet-beta" | "devnet"> {
@@ -157,11 +201,13 @@ export async function getNetwork(): Promise<"mainnet-beta" | "devnet"> {
 }
 
 export async function setNetwork(network: "mainnet-beta" | "devnet"): Promise<void> {
-  const result = await chrome.storage.local.get(STORAGE_KEY)
-  const storage = result[STORAGE_KEY] as WalletStorage
+  await withWalletStorageWriteLock(async () => {
+    const result = await chrome.storage.local.get(STORAGE_KEY)
+    const storage = result[STORAGE_KEY] as WalletStorage
 
-  if (storage) {
-    storage.network = network
-    await chrome.storage.local.set({ [STORAGE_KEY]: storage })
-  }
+    if (storage) {
+      storage.network = network
+      await chrome.storage.local.set({ [STORAGE_KEY]: storage })
+    }
+  })
 }

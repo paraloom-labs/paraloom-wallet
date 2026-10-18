@@ -391,6 +391,7 @@ export async function privateSwap(
     outputMint: params.outputMint,
     outAmount: out_amount,
     swapSignature,
+    reshield: params.reshield ?? false,
     createdAt: Date.now()
   })
 
@@ -597,6 +598,7 @@ export async function privateSwapFromToken(
     outputMint: params.outputMint,
     outAmount: out_amount,
     swapSignature,
+    reshield: params.reshield ?? false,
     createdAt: Date.now()
   })
   await waitForSwapConfirmation(connection, swapSignature)

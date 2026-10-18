@@ -36,6 +36,92 @@ export async function persistReshieldedNote(
   })
 }
 
+let recoverInFlight = false
+const RESHIELD_RECOVERY_LOCK = "paraloom_reshield_recovery"
+
+async function runRecoverReshields(
+  connection: Connection,
+  shieldedAddress: string
+): Promise<number> {
+  if (recoverInFlight) return 0
+  recoverInFlight = true
+  let recovered = 0
+  try {
+    const outputs = await listSwapOutputs()
+    for (const o of outputs) {
+      if (!o.reshield || !o.swapSignature || o.outputMint === "SOL") continue
+      if (o.reshieldRecovered) continue
+      try {
+        const mint = new PublicKey(o.outputMint)
+        const mintHex = Buffer.from(mint.toBytes()).toString("hex")
+
+        // Case A: the deposit already landed — recover its note (blinding) from
+        // the on-chain instruction so the balance is visible and spendable.
+        const rec = await recoverReshieldedNote(connection, o.freshAddress)
+        if (rec) {
+          await persistReshieldedNote(shieldedAddress, {
+            assetId: await assetIdForMint(mintHex),
+            mint: o.outputMint,
+            amount: rec.amount,
+            blindingHex: rec.blindingHex,
+            depositSignature: rec.signature
+          })
+          await saveSwapOutput({ ...o, reshieldRecovered: true })
+          recovered++
+          console.log(`[paraloom] recovered orphaned reshield note at ${o.freshAddress}`)
+          continue
+        }
+
+        // Case B: the deposit never ran but the token is still at the fresh
+        // address — finish the re-shield now.
+        const latest = (await listSwapOutputs()).find(
+          (row) => row.freshAddress === o.freshAddress
+        )
+        if (!latest || latest.reshieldRecovered) continue
+
+        const fresh = Keypair.fromSecretKey(
+          Uint8Array.from(Buffer.from(latest.freshSecretKeyHex, "hex"))
+        )
+        const ata = associatedTokenAddress(fresh.publicKey, mint)
+        const bal = await connection.getTokenAccountBalance(ata).catch(() => null)
+        const tokenAmount = bal ? BigInt(bal.value.amount) : 0n
+        if (tokenAmount > 0n) {
+          const assetId = await assetIdForMint(mintHex)
+          await depositSpl(
+            connection,
+            fresh,
+            shieldedAddress,
+            mint,
+            tokenAmount,
+            assetId,
+            undefined,
+            (note) =>
+              persistReshieldedNote(shieldedAddress, {
+                assetId,
+                mint: latest.outputMint,
+                amount: tokenAmount.toString(),
+                blindingHex: Buffer.from(note.blinding).toString("hex"),
+                depositSignature: note.signature
+              })
+          )
+          await saveSwapOutput({ ...latest, reshieldRecovered: true })
+          recovered++
+          console.log(`[paraloom] finished pending reshield at ${o.freshAddress}`)
+        }
+      } catch (e) {
+        console.log(
+          `[paraloom] reshield recovery failed at ${o.freshAddress}: ${
+            e instanceof Error ? e.message : String(e)
+          }`
+        )
+      }
+    }
+  } finally {
+    recoverInFlight = false
+  }
+  return recovered
+}
+
 // Recover re-shield notes that landed on-chain but were never persisted (a
 // confirmation timeout / worker eviction before the on-submit persist existed),
 // AND finish re-shields whose deposit never ran but whose token is still at the
@@ -46,70 +132,25 @@ export async function recoverReshields(
   connection: Connection,
   shieldedAddress: string
 ): Promise<number> {
-  let recovered = 0
-  const outputs = await listSwapOutputs()
-  for (const o of outputs) {
-    if (!o.reshield || !o.swapSignature || o.outputMint === "SOL") continue
-    if (o.reshieldRecovered) continue
-    try {
-      const mint = new PublicKey(o.outputMint)
-      const mintHex = Buffer.from(mint.toBytes()).toString("hex")
-
-      // Case A: the deposit already landed — recover its note (blinding) from
-      // the on-chain instruction so the balance is visible and spendable.
-      const rec = await recoverReshieldedNote(connection, o.freshAddress)
-      if (rec) {
-        await persistReshieldedNote(shieldedAddress, {
-          assetId: await assetIdForMint(mintHex),
-          mint: o.outputMint,
-          amount: rec.amount,
-          blindingHex: rec.blindingHex,
-          depositSignature: rec.signature
-        })
-        await saveSwapOutput({ ...o, reshieldRecovered: true })
-        recovered++
-        console.log(`[paraloom] recovered orphaned reshield note at ${o.freshAddress}`)
-        continue
+  if (recoverInFlight) return 0
+  const locks = (
+    globalThis as unknown as {
+      navigator?: {
+        locks?: {
+          request?: <R>(
+            name: string,
+            options: { ifAvailable?: boolean },
+            callback: (lock: unknown) => Promise<R>
+          ) => Promise<R>
+        }
       }
-
-      // Case B: the deposit never ran but the token is still at the fresh
-      // address — finish the re-shield now.
-      const fresh = Keypair.fromSecretKey(
-        Uint8Array.from(Buffer.from(o.freshSecretKeyHex, "hex"))
-      )
-      const ata = associatedTokenAddress(fresh.publicKey, mint)
-      const bal = await connection.getTokenAccountBalance(ata).catch(() => null)
-      const tokenAmount = bal ? BigInt(bal.value.amount) : 0n
-      if (tokenAmount > 0n) {
-        const assetId = await assetIdForMint(mintHex)
-        await depositSpl(
-          connection,
-          fresh,
-          shieldedAddress,
-          mint,
-          tokenAmount,
-          assetId,
-          undefined,
-          (note) =>
-            persistReshieldedNote(shieldedAddress, {
-              assetId,
-              mint: o.outputMint,
-              amount: tokenAmount.toString(),
-              blindingHex: Buffer.from(note.blinding).toString("hex"),
-              depositSignature: note.signature
-            })
-        )
-        await saveSwapOutput({ ...o, reshieldRecovered: true })
-        recovered++
-        console.log(`[paraloom] finished pending reshield at ${o.freshAddress}`)
-      }
-    } catch (e) {
-      console.log(
-        `[paraloom] reshield recovery failed at ${o.freshAddress}: ${
-          e instanceof Error ? e.message : String(e)
-        }`
-      )
     }
+  ).navigator?.locks
+  if (locks && typeof locks.request === "function") {
+    return locks.request(RESHIELD_RECOVERY_LOCK, { ifAvailable: true }, async (lock) => {
+      if (!lock) return 0
+      return runRecoverReshields(connection, shieldedAddress)
+    })
   }
-  return recovered
+  return runRecoverReshields(connection, shieldedAddress)
 }

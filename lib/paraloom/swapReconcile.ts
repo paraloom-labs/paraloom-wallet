@@ -33,11 +33,9 @@ export { classifyStrand, RESUME_GRACE_MS, RESUME_MIN_LAMPORTS }
 export type { StrandAction } from "./swapReconcileClassify"
 
 let reconcileInFlight = false
+const SWAP_RECONCILE_LOCK = "paraloom_swap_reconcile"
 
-/// Resolve every stranded swap row for `shieldedAddress` to its true on-chain
-/// outcome. Best-effort and idempotent: a row it cannot positively account for is
-/// left as-is. Returns the number of rows it moved out of the pending state.
-export async function reconcileSwapOutputs(
+async function runReconcileSwapOutputs(
   connection: Connection,
   shieldedAddress: string
 ): Promise<number> {
@@ -97,16 +95,20 @@ export async function reconcileSwapOutputs(
 
       if (action === "resume") {
         try {
+          const latest = (await listSwapOutputs()).find(
+            (row) => row.freshAddress === o.freshAddress
+          )
+          if (!latest || latest.swapSignature) continue
           const r = await resumeSwapAtFreshAddress(
             connection,
             shieldedAddress,
-            o.freshSecretKeyHex,
-            o.outputMint,
-            o.reshield ?? false,
+            latest.freshSecretKeyHex,
+            latest.outputMint,
+            latest.reshield ?? false,
             (note) => persistReshieldedNote(shieldedAddress, note)
           )
           await saveSwapOutput({
-            ...o,
+            ...latest,
             outAmount: r.outAmount,
             swapSignature: r.swapSignature
           })
@@ -151,4 +153,34 @@ export async function reconcileSwapOutputs(
     reconcileInFlight = false
   }
   return resolved
+}
+
+/// Resolve every stranded swap row for `shieldedAddress` to its true on-chain
+/// outcome. Best-effort and idempotent: a row it cannot positively account for is
+/// left as-is. Returns the number of rows it moved out of the pending state.
+export async function reconcileSwapOutputs(
+  connection: Connection,
+  shieldedAddress: string
+): Promise<number> {
+  if (reconcileInFlight) return 0
+  const locks = (
+    globalThis as unknown as {
+      navigator?: {
+        locks?: {
+          request?: <R>(
+            name: string,
+            options: { ifAvailable?: boolean },
+            callback: (lock: unknown) => Promise<R>
+          ) => Promise<R>
+        }
+      }
+    }
+  ).navigator?.locks
+  if (locks && typeof locks.request === "function") {
+    return locks.request(SWAP_RECONCILE_LOCK, { ifAvailable: true }, async (lock) => {
+      if (!lock) return 0
+      return runReconcileSwapOutputs(connection, shieldedAddress)
+    })
+  }
+  return runReconcileSwapOutputs(connection, shieldedAddress)
 }

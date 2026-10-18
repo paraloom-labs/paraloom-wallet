@@ -39,10 +39,19 @@ const {
   fakeAssetCommitment,
   fakeCommitment,
   fakeAssetIdForMint,
+  fetchV3Leaves,
+  setOnchainLeaves,
   v3NoteCommitment,
   v3NoteCommitmentAsset,
   v3NotePubkey
 } = vi.hoisted(() => {
+  let currentLeaves: { index: number; commitmentHex: string }[] = []
+  const setOnchainLeaves = (commitments: string[]) => {
+    currentLeaves = commitments.map((commitmentHex, index) => ({
+      index,
+      commitmentHex
+    }))
+  }
   const fakeCommitment = (amount: bigint, pubkeyHex: string, blindingHex: string) =>
     `c${amount.toString(16)}_${pubkeyHex.slice(0, 8)}_${blindingHex.slice(0, 8)}`
   // A DIFFERENT function, not the native one with an extra argument, so a note
@@ -60,10 +69,20 @@ const {
       .map((b) => (parseInt(b, 16) ^ 0x5a).toString(16).padStart(2, "0"))
       .join("")
 
+  if (typeof (globalThis as { document?: unknown }).document === "undefined") {
+    ;(globalThis as { document?: unknown }).document = {
+      getElementById: () => null,
+      addEventListener: () => {},
+      removeEventListener: () => {}
+    }
+  }
+
   return {
     fakeCommitment,
     fakeAssetCommitment,
     fakeAssetIdForMint,
+    setOnchainLeaves,
+    fetchV3Leaves: vi.fn(async () => currentLeaves),
     v3NoteCommitment: vi.fn(async (a: bigint, p: string, b: string) => fakeCommitment(a, p, b)),
     v3NoteCommitmentAsset: vi.fn(async (a: bigint, p: string, b: string, s: string) =>
       fakeAssetCommitment(a, p, b, s)
@@ -88,6 +107,19 @@ vi.mock("~lib/prover", () => ({
   assetIdForMint,
   NATIVE_ASSET_HEX: "00".repeat(32)
 }))
+
+vi.mock("~lib/paraloom/transact", () => ({
+  fetchV3Leaves
+}))
+
+vi.mock("react-dom/client", () => ({
+  createRoot: vi.fn(() => ({ render: vi.fn() }))
+}))
+vi.mock("~src/popup/Home", () => ({ Home: () => null }))
+vi.mock("~src/popup/Unlock", () => ({ Unlock: () => null }))
+vi.mock("~src/popup/Onboarding", () => ({ Onboarding: () => null }))
+vi.mock("~src/popup/ConnectApprove", () => ({ ConnectApprove: () => null }))
+vi.mock("~src/popup/SwapApprove", () => ({ SwapApprove: () => null }))
 
 const ACCOUNT = "paraloom1" + "11".repeat(64)
 const SPEND_PRIVKEY = "ab".repeat(32)
@@ -181,6 +213,11 @@ function splNote(amount: bigint, mint: string | null = MINT_HEX, assetIdHex = MI
 }
 
 function respondWith(delivered: unknown[], ok = true, status = 200) {
+  setOnchainLeaves(
+    delivered
+      .map((d) => (d as { output_commitment?: unknown })?.output_commitment)
+      .filter((c): c is string => typeof c === "string" && c.length > 0)
+  )
   const fetchMock = vi.fn(async () => ({
     ok,
     status,
@@ -195,6 +232,8 @@ const scan = () => scanForNotes(ACCOUNT, ourBox.secretKey, SPEND_PRIVKEY)
 beforeEach(() => {
   installFakeChrome()
   ourBox = nacl.box.keyPair()
+  setOnchainLeaves([])
+  fetchV3Leaves.mockClear()
   v3NoteCommitment.mockClear()
   v3NoteCommitmentAsset.mockClear()
   v3NotePubkey.mockClear()
@@ -460,3 +499,147 @@ describe("ordinary scanning", () => {
     expect(await scan()).toBe(0)
   })
 })
+
+describe("on-chain leaf membership (#724 A1)", () => {
+  it("drops a self-consistent forged note whose commitment is absent from the on-chain leaf set", async () => {
+    respondWith([honest(1_000_000n)])
+    setOnchainLeaves([])
+
+    expect(await scan()).toBe(0)
+    expect(fetchV3Leaves).toHaveBeenCalledOnce()
+    expect(await getNotes(ACCOUNT)).toEqual([])
+    expect(await shieldedBalance(ACCOUNT)).toBe(0n)
+  })
+
+  it("credits only notes confirmed in fetchV3Leaves when the feed mixes on-chain and off-chain notes", async () => {
+    const confirmed = honest(250n, "aa".repeat(32))
+    const forgedOffchain = honest(999_999n, "bb".repeat(32))
+    respondWith([forgedOffchain, confirmed])
+    setOnchainLeaves([confirmed.output_commitment])
+
+    expect(await scan()).toBe(1)
+    expect(await shieldedBalance(ACCOUNT)).toBe(250n)
+    const notes = await getNotes(ACCOUNT)
+    expect(notes).toHaveLength(1)
+    expect(notes[0].commitment).toBe(confirmed.output_commitment)
+  })
+
+  it("verifies on-chain leaf membership for received SPL notes before crediting token balance", async () => {
+    respondWith([splNote(500n)])
+    setOnchainLeaves([])
+
+    expect(await scan()).toBe(0)
+    expect(await shieldedTokenBalances(ACCOUNT)).toEqual({})
+  })
+
+  it("queries fetchV3Leaves lazily at most once per scan and skips it when no note verifies", async () => {
+    respondWith([forSomeoneElse(100n), phantom(200n)])
+    expect(await scan()).toBe(0)
+    expect(fetchV3Leaves).not.toHaveBeenCalled()
+
+    const first = honest(100n, "aa".repeat(32))
+    const second = honest(200n, "bb".repeat(32))
+    respondWith([first, second])
+    expect(await scan()).toBe(2)
+    expect(fetchV3Leaves).toHaveBeenCalledOnce()
+  })
+
+  it("does not credit unconfirmed notes when fetchV3Leaves rejects", async () => {
+    respondWith([honest(100n)])
+    fetchV3Leaves.mockRejectedValueOnce(new Error("leaf history may be incomplete"))
+
+    await expect(scan()).rejects.toThrow(/leaf history may be incomplete/)
+    expect(await getNotes(ACCOUNT)).toEqual([])
+    expect(await shieldedBalance(ACCOUNT)).toBe(0n)
+  })
+})
+
+describe("popup interaction activity deferral (#724 B1)", () => {
+  function makeEventTarget() {
+    const listeners = new Map<string, Set<() => void>>()
+    return {
+      addEventListener: vi.fn((type: string, fn: () => void) => {
+        if (!listeners.has(type)) listeners.set(type, new Set())
+        listeners.get(type)!.add(fn)
+      }),
+      removeEventListener: vi.fn((type: string, fn: () => void) => {
+        listeners.get(type)?.delete(fn)
+      }),
+      emit(type: string) {
+        for (const fn of listeners.get(type) ?? []) fn()
+      }
+    }
+  }
+
+  it("sends ACTIVITY on real user interaction (click, keydown, input, pointerdown)", async () => {
+    const popupMod = (await import("~src/popup/index")) as {
+      attachPopupActivityListeners?: (
+        target: unknown,
+        opts?: { throttleMs?: number; now?: () => number; notify?: () => void }
+      ) => () => void
+    }
+    expect(typeof popupMod.attachPopupActivityListeners).toBe("function")
+
+    const sendMessage = vi.fn((_msg: unknown, cb?: (res: unknown) => void) => cb?.({ success: true }))
+    ;(globalThis as unknown as { chrome: { runtime: { sendMessage: typeof sendMessage } } }).chrome.runtime = {
+      sendMessage
+    }
+
+    let now = 1_000
+    const target = makeEventTarget()
+    const detach = popupMod.attachPopupActivityListeners!(target, {
+      throttleMs: 15_000,
+      now: () => now
+    })
+
+    for (const type of ["click", "keydown", "input", "pointerdown"]) {
+      target.emit(type)
+      expect(sendMessage).toHaveBeenLastCalledWith(
+        { type: "ACTIVITY" },
+        expect.any(Function)
+      )
+      now += 15_000
+    }
+    expect(sendMessage).toHaveBeenCalledTimes(4)
+    detach()
+  })
+
+  it("throttles rapid interactions and resumes reporting after the throttle window", async () => {
+    const popupMod = (await import("~src/popup/index")) as {
+      ACTIVITY_THROTTLE_MS?: number
+      attachPopupActivityListeners?: (
+        target: unknown,
+        opts?: { throttleMs?: number; now?: () => number; notify?: () => void }
+      ) => () => void
+    }
+    expect(typeof popupMod.attachPopupActivityListeners).toBe("function")
+    const throttleMs = popupMod.ACTIVITY_THROTTLE_MS ?? 15_000
+
+    let now = 10_000
+    const notify = vi.fn()
+    const target = makeEventTarget()
+    const detach = popupMod.attachPopupActivityListeners!(target, {
+      throttleMs,
+      now: () => now,
+      notify
+    })
+
+    target.emit("click")
+    expect(notify).toHaveBeenCalledTimes(1)
+
+    now += Math.floor(throttleMs / 2)
+    target.emit("keydown")
+    target.emit("input")
+    expect(notify).toHaveBeenCalledTimes(1)
+
+    now += throttleMs
+    target.emit("input")
+    expect(notify).toHaveBeenCalledTimes(2)
+
+    detach()
+    now += throttleMs * 2
+    target.emit("click")
+    expect(notify).toHaveBeenCalledTimes(2)
+  })
+})
+

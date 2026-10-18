@@ -3,7 +3,7 @@
 // the notes that decrypt as spendable. Failed decrypts are silent. Shielded
 // balance then reflects received transfer notes, not just local deposits.
 
-import { PublicKey } from "@solana/web3.js"
+import { PublicKey, type Connection } from "@solana/web3.js"
 import {
   assetIdForMint,
   NATIVE_ASSET_HEX,
@@ -11,9 +11,12 @@ import {
   v3NoteCommitmentAsset,
   v3NotePubkey
 } from "~lib/prover"
+import { getNetwork } from "~lib/storage/secure"
+import { getConnection } from "./bridge"
 import { TRANSACT_INGRESS_URL } from "./constants"
 import { tryDecryptNote } from "./noteCrypto"
 import { addDiscoveredNote, getNotes } from "./notes"
+import { fetchV3Leaves } from "./transact"
 
 interface DeliveredNote {
   output_commitment: string
@@ -94,7 +97,8 @@ async function verifiedMint(
 export async function scanForNotes(
   account: string,
   boxSecretKey: Uint8Array,
-  spendPrivkeyHex: string
+  spendPrivkeyHex: string,
+  connection?: Connection
 ): Promise<number> {
   const res = await fetch(`${TRANSACT_INGRESS_URL}/transact/scan`)
   if (!res.ok) {
@@ -106,6 +110,7 @@ export async function scanForNotes(
     (await getNotes(account)).map((n) => n.commitment).filter(Boolean) as string[]
   )
   const spendPubHex = await v3NotePubkey(spendPrivkeyHex)
+  let onchainCommitments: Set<string> | null = null
 
   let found = 0
   for (const d of delivered) {
@@ -135,6 +140,18 @@ export async function scanForNotes(
     // applies to every field the node hands us, not just the commitment.
     const mint = await verifiedMint(d.mint, note.assetIdHex, isNative)
     if (mint === REJECT) {
+      continue
+    }
+    // Confirm the commitment is present in the on-chain leaf set before
+    // crediting the balance (#724 A1): a griefing scan endpoint could serve a
+    // self-consistent forged (amount, spendPub, blinding) triple that was
+    // never appended on-chain.
+    if (!onchainCommitments) {
+      const conn = connection ?? getConnection(await getNetwork())
+      const leaves = await fetchV3Leaves(conn)
+      onchainCommitments = new Set(leaves.map((l) => l.commitmentHex))
+    }
+    if (!onchainCommitments.has(d.output_commitment)) {
       continue
     }
     await addDiscoveredNote(account, {

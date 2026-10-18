@@ -27,6 +27,65 @@ function sendMessage(message: Record<string, unknown>): Promise<unknown> {
   return new Promise((resolve) => chrome.runtime.sendMessage(message, resolve))
 }
 
+export const ACTIVITY_THROTTLE_MS = 15_000
+export const POPUP_ACTIVITY_EVENTS = [
+  "click",
+  "keydown",
+  "input",
+  "pointerdown"
+] as const
+
+export interface ActivityEventTarget {
+  addEventListener(
+    type: string,
+    listener: () => void,
+    options?: boolean | AddEventListenerOptions
+  ): void
+  removeEventListener(
+    type: string,
+    listener: () => void,
+    options?: boolean | EventListenerOptions
+  ): void
+}
+
+// Report real user interaction in the popup to the background service worker so
+// active use defers the idle auto-lock timer (#724 B1), throttled so rapid
+// typing/clicking does not flood storage writes.
+export function attachPopupActivityListeners(
+  target: ActivityEventTarget,
+  options: {
+    throttleMs?: number
+    now?: () => number
+    notify?: () => void
+  } = {}
+): () => void {
+  const throttleMs = options.throttleMs ?? ACTIVITY_THROTTLE_MS
+  const getNow = options.now ?? Date.now
+  const notify =
+    options.notify ??
+    (() => {
+      void sendMessage({ type: "ACTIVITY" }).catch(() => {})
+    })
+
+  let lastReportedAt = -Infinity
+  const handleActivity = () => {
+    const ts = getNow()
+    if (ts - lastReportedAt < throttleMs) return
+    lastReportedAt = ts
+    notify()
+  }
+
+  for (const type of POPUP_ACTIVITY_EVENTS) {
+    target.addEventListener(type, handleActivity, { capture: true, passive: true })
+  }
+
+  return () => {
+    for (const type of POPUP_ACTIVITY_EVENTS) {
+      target.removeEventListener(type, handleActivity, { capture: true })
+    }
+  }
+}
+
 function Popup() {
   const [hasWallet, setHasWallet] = useState(false)
   const [locked, setLocked] = useState(true)
@@ -42,6 +101,11 @@ function Popup() {
       void checkWalletState().catch(() => setLoading(false))
     })
   }, [])
+
+  useEffect(() => {
+    if (loading || !hasWallet || locked || typeof document === "undefined") return
+    return attachPopupActivityListeners(document)
+  }, [loading, hasWallet, locked])
 
   async function initWallet() {
     const wallet = await getStoredWallet()
@@ -162,5 +226,8 @@ function Popup() {
   )
 }
 
-const root = createRoot(document.getElementById("root")!)
-root.render(<Popup />)
+const rootEl = typeof document !== "undefined" ? document.getElementById("root") : null
+if (rootEl) {
+  const root = createRoot(rootEl)
+  root.render(<Popup />)
+}

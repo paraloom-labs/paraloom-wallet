@@ -9,12 +9,7 @@ import { NATIVE_ASSET_HEX, noteCommitmentV2, proveTransferV2 } from "~lib/prover
 
 import { PATH_SERVER_URL, TRANSFER_INGRESS_URL } from "./constants"
 import { encryptNote } from "./noteCrypto"
-import {
-  addDiscoveredNote,
-  markNoteSpent,
-  markNoteSpentByCommitment,
-  type ShieldedNote
-} from "./notes"
+import { addDiscoveredNote, markNoteSpentByIdentity, type ShieldedNote } from "./notes"
 
 interface MerklePathResponse {
   root: string
@@ -139,28 +134,32 @@ export async function transfer(
   }
   const { request_id } = (await res.json()) as { request_id: string }
 
-  // Mark the spent inputs and store the change note locally (the recipient
-  // discovers their output by scanning). A deposit note is identified by its
-  // signature, a discovered transfer note by its commitment.
-  for (const note of inputs) {
-    if (note.signature) {
-      await markNoteSpent(account, note.signature)
-    }
-    if (note.commitment) {
-      await markNoteSpentByCommitment(account, note.commitment)
-    }
-  }
+  // Persist the change note BEFORE invalidating the inputs. `outBlind1` is an
+  // ephemeral ZK randomizer held only in memory — if it is lost the change
+  // output in the tree can never be reconstructed or spent. Writing it first
+  // means an interrupted flow (IndexedDB lock, quota, tab unload) leaves the
+  // inputs unspent so the user can simply retry, instead of stranding funds.
+  // The recipient discovers their output by scanning.
   const changeCommitment = output_commitments[1]
-  await addDiscoveredNote(account, {
-    amount: change.toString(),
-    blinding: outBlind1,
-    assetId: NATIVE_ASSET_HEX,
-    signature: "",
-    createdAt: Date.now(),
-    spent: false,
-    commitment: changeCommitment,
-    source: "transfer"
-  })
+  if (change > 0n) {
+    await addDiscoveredNote(account, {
+      amount: change.toString(),
+      blinding: outBlind1,
+      assetId: NATIVE_ASSET_HEX,
+      signature: "",
+      createdAt: Date.now(),
+      spent: false,
+      commitment: changeCommitment,
+      source: "transfer"
+    })
+  }
+
+  // Only now retire the inputs, using canonical identity matching (#718):
+  // transfer notes carry `signature: ""`, so matching on the signature would
+  // collide across every empty-signature note.
+  for (const note of inputs) {
+    await markNoteSpentByIdentity(account, note)
+  }
 
   return { requestId: request_id, changeCommitment }
 }

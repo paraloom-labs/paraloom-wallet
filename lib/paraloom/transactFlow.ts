@@ -352,8 +352,8 @@ export async function spendV3(
     outputs[0].blindingHex
   )
   const settled = opts.confirmSettled
-    ? await opts.confirmSettled()
-    : await confirmSettledByTree(connection, settleCommitmentHex)
+    ? await opts.confirmSettled().catch(() => false)
+    : await confirmSettledByTree(connection, settleCommitmentHex).catch(() => false)
 
   if (settled) {
     // Mark inputs spent and record the change note locally. Deliberately WITHOUT

@@ -209,11 +209,21 @@ export async function fetchV3Leaves(connection: Connection): Promise<V3Leaf[]> {
       )
     }
     const logs = tx.meta?.logMessages ?? []
-    for (const payload of eventPayloads(logs, PROGRAM_ID)) {
+    const payloads = eventPayloads(logs, PROGRAM_ID)
+    // Process deposit events first within this transaction so explicit leafIndices
+    // advance transactLeafCursor before TransactEvents infer their indices.
+    const sortedPayloads = [...payloads].sort((a, b) => {
+      const aIsTransact = startsWith(a, TRANSACT_EVENT_DISCRIMINATOR) ? 1 : 0
+      const bIsTransact = startsWith(b, TRANSACT_EVENT_DISCRIMINATOR) ? 1 : 0
+      return aIsTransact - bIsTransact
+    })
+    for (const payload of sortedPayloads) {
       if (startsWith(payload, DEPOSIT_NOTE_EVENT_DISCRIMINATOR)) {
         const body = payload.slice(8)
-        const commitment = body.slice(40, 72)
+        if (body.length < 80) continue
         const leafIndex = Number(new DataView(body.buffer, body.byteOffset + 72, 8).getBigUint64(0, true))
+        if (!Number.isSafeInteger(leafIndex) || leafIndex < 0) continue
+        const commitment = body.slice(40, 72)
         leaves.push({ index: leafIndex, commitmentHex: Buffer.from(commitment).toString("hex") })
         transactLeafCursor = Math.max(transactLeafCursor ?? 0, leafIndex + 1)
       } else if (startsWith(payload, DEPOSIT_NOTE_SPL_EVENT_DISCRIMINATOR)) {
@@ -222,14 +232,17 @@ export async function fetchV3Leaves(connection: Connection): Promise<V3Leaf[]> {
         // | leaf_index(8) | timestamp(8). Its leaf MUST be included or the tree
         // diverges from on-chain and every spend freezes.
         const body = payload.slice(8)
-        const commitment = body.slice(72, 104)
+        if (body.length < 112) continue
         const leafIndex = Number(
           new DataView(body.buffer, body.byteOffset + 104, 8).getBigUint64(0, true)
         )
+        if (!Number.isSafeInteger(leafIndex) || leafIndex < 0) continue
+        const commitment = body.slice(72, 104)
         leaves.push({ index: leafIndex, commitmentHex: Buffer.from(commitment).toString("hex") })
         transactLeafCursor = Math.max(transactLeafCursor ?? 0, leafIndex + 1)
       } else if (startsWith(payload, TRANSACT_EVENT_DISCRIMINATOR)) {
         const body = payload.slice(8)
+        if (body.length < 128) continue
         const oc0 = body.slice(64, 96)
         const oc1 = body.slice(96, 128)
         const base = transactLeafCursor ?? leaves.length

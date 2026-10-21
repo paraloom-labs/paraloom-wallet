@@ -382,11 +382,15 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     // response can't (the setInterval keep-alive is unreliable in a service
     // worker, so the worker was evicted mid-swap: "message channel closed").
     isAuthorizedSender(sender)
-      .then((ok) => {
+      .then(async (ok) => {
         if (!ok) return sendResponse({ success: false, error: "not authorized" })
-        void setSwapJob({ status: "pending", startedAt: Date.now() })
-        void runSwapJob(message.params, sender)
-        sendResponse({ success: true, pending: true })
+        if (await swapInFlight()) {
+          return sendResponse({ success: false, error: "another swap is already in flight" })
+        }
+        const startedAt = Date.now()
+        await setSwapJob({ status: "pending", startedAt })
+        void runSwapJob(message.params, sender, startedAt)
+        sendResponse({ success: true, pending: true, startedAt })
       })
       .catch((err) => sendResponse({ success: false, error: err.message }))
     return true
@@ -398,7 +402,13 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         if (!ok) return sendResponse(null)
         chrome.storage.session
           .get("swapJob")
-          .then((r) => sendResponse(r.swapJob ?? null))
+          .then((r) => {
+            const job = (r?.swapJob as SwapJob) ?? null
+            if (message.startedAt && job && job.startedAt !== message.startedAt) {
+              return sendResponse({ status: "pending", startedAt: message.startedAt })
+            }
+            sendResponse(job)
+          })
           .catch(() => sendResponse(null))
       })
       .catch(() => sendResponse(null))
@@ -754,8 +764,10 @@ async function setSwapJob(job: SwapJob): Promise<void> {
 // the ~2-3 min swap.
 async function runSwapJob(
   params: SwapRequestParams,
-  sender: chrome.runtime.MessageSender
+  sender: chrome.runtime.MessageSender,
+  startedAt?: number
 ): Promise<void> {
+  const jobStartedAt = startedAt ?? Date.now()
   try {
     // Starting a swap is activity: reset the idle clock so the 15-min auto-lock
     // measured from the LAST popup interaction can't fire in the middle of a
@@ -763,7 +775,7 @@ async function runSwapJob(
     void recordActivity(Date.now())
     const origin = senderOrigin(sender)
     if (!origin) {
-      await setSwapJob({ status: "error", error: "unknown origin" })
+      await setSwapJob({ status: "error", error: "unknown origin", startedAt: jobStartedAt })
       return
     }
     if (
@@ -771,22 +783,23 @@ async function runSwapJob(
       typeof params.outputMint !== "string" ||
       typeof params.amountLamports !== "string"
     ) {
-      await setSwapJob({ status: "error", error: "invalid params" })
+      await setSwapJob({ status: "error", error: "invalid params", startedAt: jobStartedAt })
       return
     }
     const decision = requestSwapApproval(origin, params, 180_000)
     await openWalletWindow()
     const approved = await decision
     if (!approved) {
-      await setSwapJob({ status: "error", error: "rejected" })
+      await setSwapJob({ status: "error", error: "rejected", startedAt: jobStartedAt })
       return
     }
     const result = await handlePrivateSwap(params)
-    await setSwapJob({ status: "done", result: result.data })
+    await setSwapJob({ status: "done", result: result.data, startedAt: jobStartedAt })
   } catch (e) {
     await setSwapJob({
       status: "error",
-      error: e instanceof Error ? e.message : String(e)
+      error: e instanceof Error ? e.message : String(e),
+      startedAt: jobStartedAt
     })
   }
 }

@@ -419,7 +419,8 @@ const B58_ALPHABET =
   "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz"
 
 function base58Decode(s: string): Uint8Array {
-  const bytes: number[] = [0]
+  if (s.length === 0) return new Uint8Array(0)
+  const bytes: number[] = []
   for (const ch of s) {
     const v = B58_ALPHABET.indexOf(ch)
     if (v < 0) throw new Error(`invalid base58 char: ${ch}`)
@@ -465,15 +466,32 @@ export async function recoverReshieldedNote(
       compiledInstructions?: { programIdIndex: number; data: Uint8Array }[]
       instructions?: { programIdIndex: number; data: string }[]
     }
-    const keys = msg.staticAccountKeys ?? msg.accountKeys ?? []
-    const ixs = msg.compiledInstructions ?? msg.instructions ?? []
-    for (const ix of ixs) {
+    const staticKeys = msg.staticAccountKeys ?? msg.accountKeys ?? []
+    const loadedWritable = (tx.meta as any)?.loadedAddresses?.writable ?? []
+    const loadedReadonly = (tx.meta as any)?.loadedAddresses?.readonly ?? []
+    const keys: (PublicKey | string)[] = [...staticKeys, ...loadedWritable, ...loadedReadonly]
+
+    const topIxs = msg.compiledInstructions ?? msg.instructions ?? []
+    const allIxs: { programIdIndex: number; data: unknown }[] = [...topIxs]
+    if (tx.meta?.innerInstructions) {
+      for (const inner of tx.meta.innerInstructions) {
+        if (inner.instructions) {
+          allIxs.push(...(inner.instructions as any))
+        }
+      }
+    }
+
+    for (const ix of allIxs) {
       const prog = keys[ix.programIdIndex]
-      if (!prog || prog.toBase58() !== programId.toBase58()) continue
+      const progStr = typeof (prog as any)?.toBase58 === "function" ? (prog as PublicKey).toBase58() : String(prog ?? "")
+      if (progStr !== programId.toBase58()) continue
+      const rawData = (ix as { data: unknown }).data
       const data =
-        typeof (ix as { data: unknown }).data === "string"
-          ? base58Decode((ix as { data: string }).data)
-          : Uint8Array.from((ix as { data: Uint8Array }).data)
+        typeof rawData === "string"
+          ? base58Decode(rawData)
+          : rawData instanceof Uint8Array
+            ? rawData
+            : Uint8Array.from((rawData as ArrayLike<number>) ?? [])
       if (data.length < 80 || !bytesStartWith(data, DEPOSIT_NOTE_SPL_DISCRIMINATOR)) {
         continue
       }

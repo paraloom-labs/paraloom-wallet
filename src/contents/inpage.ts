@@ -25,13 +25,18 @@ const RES = "paraloom:response"
 
 let counter = 0
 
-function relay(type: string, payload?: Record<string, unknown>): Promise<any> {
+function relay(type: string, payload?: Record<string, unknown>, timeoutMs = 30_000): Promise<any> {
   return new Promise((resolve, reject) => {
     const id = ++counter
+    const timer = setTimeout(() => {
+      window.removeEventListener("message", onMessage)
+      reject(new Error(`relay request ${type} timed out`))
+    }, timeoutMs)
     const onMessage = (event: MessageEvent) => {
       if (event.source !== window) return
       const data = event.data
       if (!data || data.channel !== RES || data.id !== id) return
+      clearTimeout(timer)
       window.removeEventListener("message", onMessage)
       if (data.error) reject(new Error(data.error))
       else resolve(data.result)
@@ -93,16 +98,21 @@ if (!(window as any).paraloom) {
       // The polling keeps the MV3 worker alive through the approval + the
       // ~2-3 min swap; a single held response could not (worker eviction dropped
       // it as "message channel closed").
-      const ack = await relay("PRIVATE_SWAP", { params }).catch(() => null)
-      if (ack && ack.success === false) {
-        throw new Error(ack.error || "Private swap failed")
+      const ack = await relay("PRIVATE_SWAP", { params }).catch((err) => {
+        throw new Error(err?.message || "Private swap request failed")
+      })
+      if (!ack || ack.success !== true) {
+        throw new Error(ack?.error || "Private swap request rejected")
       }
+      const startedAt = ack.startedAt
       for (let i = 0; i < 200; i++) {
         await new Promise((res) => setTimeout(res, 1500))
-        const st = await relay("GET_SWAP_STATUS").catch(() => null)
-        if (st?.status === "done") return st.result
-        if (st?.status === "error") {
-          throw new Error(st.error || "Private swap failed")
+        const st = await relay("GET_SWAP_STATUS", { startedAt }).catch(() => null)
+        if (st && (!startedAt || st.startedAt === startedAt)) {
+          if (st.status === "done") return st.result
+          if (st.status === "error") {
+            throw new Error(st.error || "Private swap failed")
+          }
         }
       }
       throw new Error("Private swap timed out")

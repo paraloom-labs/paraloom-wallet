@@ -107,17 +107,24 @@ async function waitForSwapConfirmation(
 ): Promise<void> {
   const deadline = Date.now() + timeoutMs
   while (Date.now() < deadline) {
-    const st = await connection.getSignatureStatus(signature, {
-      searchTransactionHistory: true
-    })
-    const v = st.value
-    if (v) {
-      if (v.err) {
-        throw new Error(`swap transaction failed on-chain: ${JSON.stringify(v.err)}`)
+    try {
+      const st = await connection.getSignatureStatus(signature, {
+        searchTransactionHistory: true
+      })
+      const v = st.value
+      if (v) {
+        if (v.err) {
+          throw new Error(`swap transaction failed on-chain: ${JSON.stringify(v.err)}`)
+        }
+        if (v.confirmationStatus === "confirmed" || v.confirmationStatus === "finalized") {
+          return
+        }
       }
-      if (v.confirmationStatus === "confirmed" || v.confirmationStatus === "finalized") {
-        return
+    } catch (e) {
+      if (e instanceof Error && e.message.includes("swap transaction failed on-chain")) {
+        throw e
       }
+      // transient RPC error (rate limit, 503, timeout) — continue polling until deadline
     }
     await new Promise((r) => setTimeout(r, 2000))
   }
@@ -276,8 +283,12 @@ async function waitForFunding(
   const deadline = Date.now() + SETTLE_TIMEOUT_MS
   while (Date.now() < deadline) {
     await new Promise((r) => setTimeout(r, SETTLE_POLL_MS))
-    const bal = BigInt(await connection.getBalance(pubkey))
-    if (bal > 0n) return bal
+    try {
+      const bal = BigInt(await connection.getBalance(pubkey))
+      if (bal > 0n) return bal
+    } catch {
+      // transient RPC error (rate limit, 503, timeout) — continue polling until deadline
+    }
   }
   throw new Error(
     "withdraw is still settling and has not funded the fresh address yet. Do NOT retry — the spent note is already committed and the funds will arrive at the saved address; reopen the wallet to let the swap resume once it lands."

@@ -42,6 +42,24 @@ export async function reconcileSwapOutputs(
   shieldedAddress: string
 ): Promise<number> {
   if (reconcileInFlight) return 0
+  if (typeof navigator !== "undefined" && navigator.locks?.request) {
+    return await navigator.locks.request(
+      "paraloom_swap_reconcile",
+      { mode: "exclusive", ifAvailable: true },
+      async (lock) => {
+        if (!lock) return 0
+        return await doReconcileSwapOutputs(connection, shieldedAddress)
+      }
+    )
+  }
+  return await doReconcileSwapOutputs(connection, shieldedAddress)
+}
+
+async function doReconcileSwapOutputs(
+  connection: Connection,
+  shieldedAddress: string
+): Promise<number> {
+  if (reconcileInFlight) return 0
   reconcileInFlight = true
   let resolved = 0
   try {
@@ -96,6 +114,10 @@ export async function reconcileSwapOutputs(
       }
 
       if (action === "resume") {
+        const latestOutputs = await listSwapOutputs()
+        const latest = latestOutputs.find((x) => x.freshAddress === o.freshAddress)
+        if (latest?.swapSignature) continue
+
         try {
           const r = await resumeSwapAtFreshAddress(
             connection,

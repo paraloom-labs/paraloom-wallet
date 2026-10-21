@@ -18,13 +18,13 @@ export async function fetchPrices(
 ): Promise<Record<string, TokenPrice>> {
   const ids = Array.from(new Set([SOL_MINT, ...mints])).filter(Boolean)
   if (ids.length === 0) return {}
+  const ctrl = new AbortController()
+  const t = setTimeout(() => ctrl.abort(), 8000)
   try {
-    const ctrl = new AbortController()
-    const t = setTimeout(() => ctrl.abort(), 8000)
-    const res = await fetch(`${JUP_PRICE_URL}?ids=${ids.join(",")}`, {
+    const encodedIds = ids.map((id) => encodeURIComponent(id)).join(",")
+    const res = await fetch(`${JUP_PRICE_URL}?ids=${encodedIds}`, {
       signal: ctrl.signal
     })
-    clearTimeout(t)
     if (!res.ok) return {}
     const data = (await res.json()) as Record<
       string,
@@ -32,15 +32,25 @@ export async function fetchPrices(
     >
     const out: Record<string, TokenPrice> = {}
     for (const [mint, v] of Object.entries(data)) {
-      if (v && typeof v.usdPrice === "number") {
+      if (
+        v &&
+        typeof v.usdPrice === "number" &&
+        Number.isFinite(v.usdPrice) &&
+        v.usdPrice >= 0
+      ) {
         out[mint] = {
           usdPrice: v.usdPrice,
-          priceChange24h: typeof v.priceChange24h === "number" ? v.priceChange24h : 0
+          priceChange24h:
+            typeof v.priceChange24h === "number" && Number.isFinite(v.priceChange24h)
+              ? v.priceChange24h
+              : 0
         }
       }
     }
     return out
   } catch {
     return {}
+  } finally {
+    clearTimeout(t)
   }
 }

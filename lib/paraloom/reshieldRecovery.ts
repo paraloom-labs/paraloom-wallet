@@ -36,6 +36,8 @@ export async function persistReshieldedNote(
   })
 }
 
+let recoveryInFlight = false
+
 // Recover re-shield notes that landed on-chain but were never persisted (a
 // confirmation timeout / worker eviction before the on-submit persist existed),
 // AND finish re-shields whose deposit never ran but whose token is still at the
@@ -46,37 +48,62 @@ export async function recoverReshields(
   connection: Connection,
   shieldedAddress: string
 ): Promise<number> {
-  let recovered = 0
-  const outputs = await listSwapOutputs()
-  for (const o of outputs) {
-    if (!o.reshield || !o.swapSignature || o.outputMint === "SOL") continue
-    if (o.reshieldRecovered) continue
-    try {
-      const mint = new PublicKey(o.outputMint)
-      const mintHex = Buffer.from(mint.toBytes()).toString("hex")
-
-      // Case A: the deposit already landed — recover its note (blinding) from
-      // the on-chain instruction so the balance is visible and spendable.
-      const rec = await recoverReshieldedNote(connection, o.freshAddress)
-      if (rec) {
-        await persistReshieldedNote(shieldedAddress, {
-          assetId: await assetIdForMint(mintHex),
-          mint: o.outputMint,
-          amount: rec.amount,
-          blindingHex: rec.blindingHex,
-          depositSignature: rec.signature
-        })
-        await saveSwapOutput({ ...o, reshieldRecovered: true })
-        recovered++
-        console.log(`[paraloom] recovered orphaned reshield note at ${o.freshAddress}`)
-        continue
+  if (recoveryInFlight) return 0
+  if (typeof navigator !== "undefined" && navigator.locks?.request) {
+    return await navigator.locks.request(
+      "paraloom_reshield_recovery",
+      { mode: "exclusive", ifAvailable: true },
+      async (lock) => {
+        if (!lock) return 0
+        return await doRecoverReshields(connection, shieldedAddress)
       }
+    )
+  }
+  return await doRecoverReshields(connection, shieldedAddress)
+}
 
-      // Case B: the deposit never ran but the token is still at the fresh
-      // address — finish the re-shield now.
-      const fresh = Keypair.fromSecretKey(
-        Uint8Array.from(Buffer.from(o.freshSecretKeyHex, "hex"))
-      )
+async function doRecoverReshields(
+  connection: Connection,
+  shieldedAddress: string
+): Promise<number> {
+  if (recoveryInFlight) return 0
+  recoveryInFlight = true
+  let recovered = 0
+  try {
+    const outputs = await listSwapOutputs()
+    for (const o of outputs) {
+      if (!o.reshield || !o.swapSignature || o.outputMint === "SOL") continue
+      if (o.reshieldRecovered) continue
+      try {
+        const mint = new PublicKey(o.outputMint)
+        const mintHex = Buffer.from(mint.toBytes()).toString("hex")
+
+        // Case A: the deposit already landed — recover its note (blinding) from
+        // the on-chain instruction so the balance is visible and spendable.
+        const rec = await recoverReshieldedNote(connection, o.freshAddress)
+        if (rec) {
+          await persistReshieldedNote(shieldedAddress, {
+            assetId: await assetIdForMint(mintHex),
+            mint: o.outputMint,
+            amount: rec.amount,
+            blindingHex: rec.blindingHex,
+            depositSignature: rec.signature
+          })
+          await saveSwapOutput({ ...o, reshieldRecovered: true })
+          recovered++
+          console.log(`[paraloom] recovered orphaned reshield note at ${o.freshAddress}`)
+          continue
+        }
+
+        // Case B: the deposit never ran but the token is still at the fresh
+        // address — finish the re-shield now.
+        const freshOutputs = await listSwapOutputs()
+        const latest = freshOutputs.find((x) => x.freshAddress === o.freshAddress)
+        if (latest?.reshieldRecovered) continue
+
+        const fresh = Keypair.fromSecretKey(
+          Uint8Array.from(Buffer.from(o.freshSecretKeyHex, "hex"))
+        )
       const ata = associatedTokenAddress(fresh.publicKey, mint)
       const bal = await connection.getTokenAccountBalance(ata).catch(() => null)
       const tokenAmount = bal ? BigInt(bal.value.amount) : 0n

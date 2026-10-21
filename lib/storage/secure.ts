@@ -29,6 +29,30 @@ export interface WalletStorage {
 
 const STORAGE_KEY = "paraloom_wallet"
 
+let walletStorageQueue: Promise<unknown> = Promise.resolve()
+
+async function withWalletStorageLock<T>(fn: () => Promise<T>): Promise<T> {
+  const runWithQueue = async () => {
+    let release: () => void = () => {}
+    const waitPromise = new Promise<void>((resolve) => {
+      release = resolve
+    })
+    const prev = walletStorageQueue
+    walletStorageQueue = prev.then(() => waitPromise)
+    await prev
+    try {
+      return await fn()
+    } finally {
+      release()
+    }
+  }
+
+  if (typeof navigator !== "undefined" && navigator.locks?.request) {
+    return await navigator.locks.request("paraloom_wallet:write", { mode: "exclusive" }, () => runWithQueue())
+  }
+  return await runWithQueue()
+}
+
 export async function saveEncryptedWallet(
   encryptedWallet: EncryptedWallet,
   address: string,
@@ -36,34 +60,36 @@ export async function saveEncryptedWallet(
   password?: string,
   accounts?: Account[]
 ): Promise<void> {
-  const data: StoredWallet = {
-    encryptedData: encryptedWallet,
-    address,
-    createdAt: Date.now(),
-    kdfVersion: KDF_VERSION_SCRYPT
-  }
-
-  // Encrypt and save seed phrase if provided
-  if (seedPhrase && password) {
-    data.encryptedSeedPhrase = encryptSeedPhrase(seedPhrase, password)
-  }
-
-  // Serialize accounts if provided (convert keypair to address, balance to string)
-  if (accounts && accounts.length > 0) {
-    data.accounts = accounts.map(acc => ({
-      index: acc.index,
-      name: acc.name,
-      address: acc.keypair.shieldedAddress,
-      balance: acc.balance.toString()
-    }))
-  }
-
-  await chrome.storage.local.set({
-    [STORAGE_KEY]: {
-      wallet: data,
-      locked: true,
-      autoLockMinutes: 60
+  return withWalletStorageLock(async () => {
+    const data: StoredWallet = {
+      encryptedData: encryptedWallet,
+      address,
+      createdAt: Date.now(),
+      kdfVersion: KDF_VERSION_SCRYPT
     }
+
+    // Encrypt and save seed phrase if provided
+    if (seedPhrase && password) {
+      data.encryptedSeedPhrase = encryptSeedPhrase(seedPhrase, password)
+    }
+
+    // Serialize accounts if provided (convert keypair to address, balance to string)
+    if (accounts && accounts.length > 0) {
+      data.accounts = accounts.map(acc => ({
+        index: acc.index,
+        name: acc.name,
+        address: acc.keypair.shieldedAddress,
+        balance: acc.balance.toString()
+      }))
+    }
+
+    await chrome.storage.local.set({
+      [STORAGE_KEY]: {
+        wallet: data,
+        locked: true,
+        autoLockMinutes: 60
+      }
+    })
   })
 }
 
@@ -78,17 +104,19 @@ export async function migrateWalletToScrypt(
   seedPhrase: string | undefined,
   password: string
 ): Promise<void> {
-  const result = await chrome.storage.local.get(STORAGE_KEY)
-  const storage = result[STORAGE_KEY] as WalletStorage | undefined
-  if (!storage?.wallet) return
+  return withWalletStorageLock(async () => {
+    const result = await chrome.storage.local.get(STORAGE_KEY)
+    const storage = result[STORAGE_KEY] as WalletStorage | undefined
+    if (!storage?.wallet) return
 
-  storage.wallet.encryptedData = encryptedWallet
-  storage.wallet.kdfVersion = KDF_VERSION_SCRYPT
-  if (seedPhrase) {
-    storage.wallet.encryptedSeedPhrase = encryptSeedPhrase(seedPhrase, password)
-  }
+    storage.wallet.encryptedData = encryptedWallet
+    storage.wallet.kdfVersion = KDF_VERSION_SCRYPT
+    if (seedPhrase) {
+      storage.wallet.encryptedSeedPhrase = encryptSeedPhrase(seedPhrase, password)
+    }
 
-  await chrome.storage.local.set({ [STORAGE_KEY]: storage })
+    await chrome.storage.local.set({ [STORAGE_KEY]: storage })
+  })
 }
 
 export async function getStoredWallet(): Promise<StoredWallet | null> {
@@ -98,7 +126,9 @@ export async function getStoredWallet(): Promise<StoredWallet | null> {
 }
 
 export async function clearWallet(): Promise<void> {
-  await chrome.storage.local.remove(STORAGE_KEY)
+  return withWalletStorageLock(async () => {
+    await chrome.storage.local.remove(STORAGE_KEY)
+  })
 }
 
 export async function isWalletLocked(): Promise<boolean> {
@@ -108,13 +138,15 @@ export async function isWalletLocked(): Promise<boolean> {
 }
 
 export async function setLockState(locked: boolean): Promise<void> {
-  const result = await chrome.storage.local.get(STORAGE_KEY)
-  const storage = result[STORAGE_KEY] as WalletStorage
+  return withWalletStorageLock(async () => {
+    const result = await chrome.storage.local.get(STORAGE_KEY)
+    const storage = result[STORAGE_KEY] as WalletStorage
 
-  if (storage) {
-    storage.locked = locked
-    await chrome.storage.local.set({ [STORAGE_KEY]: storage })
-  }
+    if (storage) {
+      storage.locked = locked
+      await chrome.storage.local.set({ [STORAGE_KEY]: storage })
+    }
+  })
 }
 
 export async function getAutoLockMinutes(): Promise<number> {
@@ -124,28 +156,32 @@ export async function getAutoLockMinutes(): Promise<number> {
 }
 
 export async function setAutoLockMinutes(minutes: number): Promise<void> {
-  const result = await chrome.storage.local.get(STORAGE_KEY)
-  const storage = result[STORAGE_KEY] as WalletStorage
+  return withWalletStorageLock(async () => {
+    const result = await chrome.storage.local.get(STORAGE_KEY)
+    const storage = result[STORAGE_KEY] as WalletStorage
 
-  if (storage) {
-    storage.autoLockMinutes = minutes
-    await chrome.storage.local.set({ [STORAGE_KEY]: storage })
-  }
+    if (storage) {
+      storage.autoLockMinutes = minutes
+      await chrome.storage.local.set({ [STORAGE_KEY]: storage })
+    }
+  })
 }
 
 export async function updateAccounts(accounts: Account[]): Promise<void> {
-  const result = await chrome.storage.local.get(STORAGE_KEY)
-  const storage = result[STORAGE_KEY] as WalletStorage
+  return withWalletStorageLock(async () => {
+    const result = await chrome.storage.local.get(STORAGE_KEY)
+    const storage = result[STORAGE_KEY] as WalletStorage
 
-  if (storage?.wallet) {
-    storage.wallet.accounts = accounts.map(acc => ({
-      index: acc.index,
-      name: acc.name,
-      address: acc.keypair.shieldedAddress,
-      balance: acc.balance.toString()
-    }))
-    await chrome.storage.local.set({ [STORAGE_KEY]: storage })
-  }
+    if (storage?.wallet) {
+      storage.wallet.accounts = accounts.map(acc => ({
+        index: acc.index,
+        name: acc.name,
+        address: acc.keypair.shieldedAddress,
+        balance: acc.balance.toString()
+      }))
+      await chrome.storage.local.set({ [STORAGE_KEY]: storage })
+    }
+  })
 }
 
 export async function getNetwork(): Promise<"mainnet-beta" | "devnet"> {
@@ -157,11 +193,13 @@ export async function getNetwork(): Promise<"mainnet-beta" | "devnet"> {
 }
 
 export async function setNetwork(network: "mainnet-beta" | "devnet"): Promise<void> {
-  const result = await chrome.storage.local.get(STORAGE_KEY)
-  const storage = result[STORAGE_KEY] as WalletStorage
+  return withWalletStorageLock(async () => {
+    const result = await chrome.storage.local.get(STORAGE_KEY)
+    const storage = result[STORAGE_KEY] as WalletStorage
 
-  if (storage) {
-    storage.network = network
-    await chrome.storage.local.set({ [STORAGE_KEY]: storage })
-  }
+    if (storage) {
+      storage.network = network
+      await chrome.storage.local.set({ [STORAGE_KEY]: storage })
+    }
+  })
 }

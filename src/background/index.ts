@@ -18,6 +18,7 @@ import {
   privateSwapFromToken,
   type ReshieldedNote
 } from "~lib/paraloom/privateSwap"
+import { retryingFetch } from "~lib/paraloom/bridge"
 import { persistReshieldedNote, recoverReshields } from "~lib/paraloom/reshieldRecovery"
 import { reconcileSwapOutputs } from "~lib/paraloom/swapReconcile"
 import { assetIdForMint, NATIVE_ASSET_HEX } from "~lib/prover"
@@ -26,6 +27,13 @@ import { assetIdForMint, NATIVE_ASSET_HEX } from "~lib/prover"
 // needs an archival RPC, so the swap always runs against the node's archival
 // proxy regardless of the wallet's selected network.
 const PRIVATE_SWAP_RPC_URL = "https://node.paraloom.io/rpc"
+
+function getPrivateSwapConnection(): Connection {
+  return new Connection(PRIVATE_SWAP_RPC_URL, {
+    commitment: "confirmed",
+    fetch: retryingFetch
+  })
+}
 
 // Connected dApp state (in-memory only)
 let connectedOrigin: string | null = null
@@ -70,6 +78,11 @@ async function maybeAutoLock(): Promise<void> {
   }
   const minutes = await getAutoLockMinutes()
   if (Date.now() - last >= minutes * 60 * 1000) {
+    // Re-verify swapInFlight and latest activity to avoid TOCTOU race
+    if (await swapInFlight()) return
+    const latestLast = await getLastActivity()
+    if (latestLast !== null && Date.now() - latestLast < minutes * 60 * 1000) return
+
     connectedOrigin = null
     await setLockState(true)
     await clearSession()
@@ -415,7 +428,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         if (!ok) return sendResponse({ success: false, error: "not authorized" })
         const session = await loadSession()
         if (!session) return sendResponse({ success: false, error: "locked" })
-        const connection = new Connection(PRIVATE_SWAP_RPC_URL, "confirmed")
+        const connection = getPrivateSwapConnection()
         const recovered = await reconcileSwapOutputs(
           connection,
           session.wallet.shieldedAddress
@@ -851,7 +864,7 @@ async function handlePrivateSwap(
   const spendPrivkeyHex = Buffer.from(session.wallet.spendPrivkey).toString("hex")
   const ownBoxPubHex = Buffer.from(session.wallet.boxPublicKey).toString("hex")
 
-  const connection = new Connection(PRIVATE_SWAP_RPC_URL, "confirmed")
+  const connection = getPrivateSwapConnection()
 
   // Recover earlier stranded swaps in the BACKGROUND, not on the critical path.
   // Awaiting this made every swap wait on a full history + strand scan that

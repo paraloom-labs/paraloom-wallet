@@ -32,7 +32,14 @@ import type { ShieldedNote } from "./notes"
 import { saveSwapOutput } from "./swapOutputs"
 import { depositV3, spendV3 } from "./transactFlow"
 
-import { WSOL_MINT, isNativeSolOutput } from "./swapReconcileClassify"
+import {
+  MIN_SOL_SWAP_WITHDRAW_LAMPORTS,
+  RESHIELD_FEE_RESERVE_LAMPORTS,
+  WSOL_MINT,
+  expectedNetWithdrawLamports,
+  isNativeSolOutput,
+  isSubReserveRecoverableSol
+} from "./swapReconcileClassify"
 export { WSOL_MINT, isNativeSolOutput }
 
 /** Lamports left at the fresh address to cover the swap's own costs: the output
@@ -303,6 +310,25 @@ export async function privateSwap(
 ): Promise<PrivateSwapResult> {
   if (params.amountLamports <= 0n) throw new Error("amount must be > 0")
 
+  // Reject an unswappable withdraw BEFORE anything is spent. `transact` takes
+  // the 25 bps protocol withdrawal fee on-chain and the input note is marked
+  // spent the moment the withdraw settles, so a withdraw that cannot leave a
+  // swappable balance after that fee plus the swap overhead reserve would burn
+  // the user's shielded SOL and then throw with nothing to show for it. The
+  // floor is the smallest amount whose NET credit still clears the reserve.
+  if (expectedNetWithdrawLamports(params.amountLamports) <= SWAP_OVERHEAD_LAMPORTS) {
+    throw new Error(
+      `amount must be at least ${Number(MIN_SOL_SWAP_WITHDRAW_LAMPORTS) / Number(LAMPORTS_PER_SOL)} SOL: the swap overhead reserve plus the 25 bps protocol withdrawal fee would otherwise consume the whole withdraw`
+    )
+  }
+  // A native-SOL output would mean swapping SOL for SOL — the withdraw would be
+  // spent, the protocol fee burned, and the round trip pointless.
+  if (isNativeSolOutput(params.outputMint)) {
+    throw new Error(
+      "output mint must be an SPL token: a private swap cannot output native SOL (use a plain withdraw instead)"
+    )
+  }
+
   // 1. Fresh ephemeral key — generated here, never sent anywhere.
   const fresh = Keypair.generate()
   const freshHex = Buffer.from(fresh.publicKey.toBytes()).toString("hex")
@@ -415,6 +441,19 @@ export async function privateSwap(
     )
   }
 
+  // 8. Sweep the unused part of the swap overhead reserve back into the pool.
+  //    The 0.006 SOL reserve only pays a few lamport-scale costs (ATA rent, swap
+  //    fee, re-shield fee), so ~0.004 SOL would otherwise be dropped at an
+  //    address the wallet no longer tracks. Runs after the re-shield so the
+  //    deposit tx fee is already paid. Best-effort: a failure just leaves the
+  //    lamports at the fresh address, recoverable with its saved key.
+  await sweepResidualSolToPool(
+    connection,
+    fresh,
+    shieldedAddress,
+    spendPrivkeyHex
+  )
+
   return {
     freshAddress: fresh.publicKey.toBase58(),
     freshSecretKey: fresh.secretKey,
@@ -432,8 +471,46 @@ export async function privateSwap(
  *  The unused remainder is swept back into the pool by the re-shield. */
 export const GAS_LAMPORTS = 9_000_000n
 /** Left at the fresh address to pay the re-shield deposit tx when sweeping the
- *  swapped SOL back into the pool. */
-const RESHIELD_FEE_RESERVE = 1_000_000n
+ *  swapped SOL back into the pool. Mirrors RESHIELD_FEE_RESERVE_LAMPORTS. */
+const RESHIELD_FEE_RESERVE = RESHIELD_FEE_RESERVE_LAMPORTS
+
+/**
+ * Sweep the SOL left over at a fresh address back into the shielded pool.
+ *
+ * Every native-SOL swap withholds `SWAP_OVERHEAD_LAMPORTS` from the Jupiter leg
+ * to pay for the output ATA rent, the swap tx fee and the re-shield tx fee — but
+ * those costs are only ~2.05M of the 6M withheld, so ~3.95M–5.98M lamports are
+ * left behind at an address the wallet stops tracking. Deposit that remainder as
+ * a native shielded note so it is not silently dropped after the swap.
+ *
+ * `reserve` stays behind to pay for moving anything still at the fresh address
+ * (e.g. a private-buy token). Best-effort: on failure the lamports simply stay
+ * at the fresh address, where the saved key can still recover them.
+ */
+async function sweepResidualSolToPool(
+  connection: Connection,
+  fresh: Keypair,
+  shieldedAddress: string,
+  spendPrivkeyHex: string,
+  reserve: bigint = RESHIELD_FEE_RESERVE
+): Promise<bigint> {
+  try {
+    const solBal = BigInt(await connection.getBalance(fresh.publicKey))
+    const sweepable = solBal - reserve
+    if (sweepable <= 0n) return 0n
+    await depositV3(
+      connection,
+      { secretKey: fresh.secretKey },
+      shieldedAddress,
+      spendPrivkeyHex,
+      sweepable
+    )
+    return sweepable
+  } catch {
+    // Leave the residual SOL at the fresh address — recoverable with its key.
+    return 0n
+  }
+}
 
 // Poll an SPL token account until the withdrawn balance actually lands.
 async function waitForTokenFunding(
@@ -665,6 +742,7 @@ export async function resumeSwapAtFreshAddress(
   freshSecretKeyHex: string,
   outputMint: string,
   reshield: boolean,
+  spendPrivkeyHex?: string,
   onReshielded?: (note: ReshieldedNote) => Promise<void>
 ): Promise<ResumeSwapResult> {
   const fresh = Keypair.fromSecretKey(
@@ -673,6 +751,23 @@ export async function resumeSwapAtFreshAddress(
   const funded = BigInt(await connection.getBalance(fresh.publicKey))
   const swapLamports = funded - SWAP_OVERHEAD_LAMPORTS
   if (swapLamports <= 0n) {
+    // Too little SOL to ever fund the swap leg — but anything above the
+    // re-shield fee reserve is still the user's money sitting at an address the
+    // wallet stops tracking. Sweep it back into the shielded pool instead of
+    // leaving it stranded for the user to "dismiss" away.
+    if (spendPrivkeyHex && isSubReserveRecoverableSol(funded)) {
+      const swept = await sweepResidualSolToPool(
+        connection,
+        fresh,
+        shieldedAddress,
+        spendPrivkeyHex
+      )
+      if (swept > 0n) {
+        throw new Error(
+          `fresh address balance is below the swap overhead reserve; swept ${swept} lamports back into the shielded pool, nothing left to swap`
+        )
+      }
+    }
     throw new Error("fresh address balance is below the swap overhead reserve")
   }
 
@@ -684,13 +779,25 @@ export async function resumeSwapAtFreshAddress(
   )
 
   let reshielded: ReshieldedNote | undefined
-  if (reshield && outputMint !== "SOL") {
+  if (reshield && !isNativeSolOutput(outputMint)) {
     reshielded = await reshieldToken(
       connection,
       fresh,
       shieldedAddress,
       outputMint,
       onReshielded
+    )
+  }
+
+  // Sweep the unused part of the swap overhead reserve back into the pool. For a
+  // native-SOL output this IS the re-shield: the swapped SOL is deposited as a
+  // native shielded note instead of being left at the fresh address.
+  if (spendPrivkeyHex) {
+    await sweepResidualSolToPool(
+      connection,
+      fresh,
+      shieldedAddress,
+      spendPrivkeyHex
     )
   }
 

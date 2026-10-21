@@ -418,7 +418,8 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         const connection = new Connection(PRIVATE_SWAP_RPC_URL, "confirmed")
         const recovered = await reconcileSwapOutputs(
           connection,
-          session.wallet.shieldedAddress
+          session.wallet.shieldedAddress,
+          Buffer.from(session.wallet.spendPrivkey).toString("hex")
         )
         const reshielded = await recoverReshields(
           connection,
@@ -859,7 +860,9 @@ async function handlePrivateSwap(
   // gas withdraw was even submitted. It already runs on connect (resumeSwaps)
   // and is guarded against double-runs; the new swap uses its own fresh address,
   // so a concurrent background reconcile cannot conflict with it.
-  void reconcileSwapOutputs(connection, shieldedAddress).catch(() => 0)
+  void reconcileSwapOutputs(connection, shieldedAddress, spendPrivkeyHex).catch(
+    () => 0
+  )
   void recoverReshields(connection, shieldedAddress).catch(() => 0)
 
   // Token-input swap (e.g. USDC -> SOL): spend a shielded SPL note and self-fund

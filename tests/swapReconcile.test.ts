@@ -79,12 +79,34 @@ describe("classifyStrand", () => {
     ).toBe("resume")
   })
 
-  it("does not resume on exactly the reserve threshold (nothing left to swap)", () => {
+  it("recovers sub-reserve SOL instead of leaving it to be dismissed away", () => {
+    // At or below the swap overhead reserve the swap leg can never run, but the
+    // lamports are real: Dismiss deletes the fresh key, so they must be swept
+    // back into the pool rather than reported "unresolved".
     expect(
       classifyStrand({
         hasSignature: false,
         ageMs: OLD,
         solLamports: RESUME_MIN_LAMPORTS,
+        tokenAmount: 0n
+      })
+    ).toBe("resume")
+    expect(
+      classifyStrand({
+        hasSignature: false,
+        ageMs: OLD,
+        solLamports: 2_000_000n,
+        tokenAmount: 0n
+      })
+    ).toBe("resume")
+  })
+
+  it("still leaves rent-only dust unresolved", () => {
+    expect(
+      classifyStrand({
+        hasSignature: false,
+        ageMs: OLD,
+        solLamports: 890_880n,
         tokenAmount: 0n
       })
     ).toBe("unresolved")

@@ -39,7 +39,8 @@ let reconcileInFlight = false
 /// left as-is. Returns the number of rows it moved out of the pending state.
 export async function reconcileSwapOutputs(
   connection: Connection,
-  shieldedAddress: string
+  shieldedAddress: string,
+  spendPrivkeyHex?: string
 ): Promise<number> {
   if (reconcileInFlight) return 0
   reconcileInFlight = true
@@ -103,6 +104,7 @@ export async function reconcileSwapOutputs(
             o.freshSecretKeyHex,
             o.outputMint,
             o.reshield ?? false,
+            spendPrivkeyHex,
             (note) => persistReshieldedNote(shieldedAddress, note)
           )
           await saveSwapOutput({

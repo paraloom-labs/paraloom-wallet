@@ -11,8 +11,7 @@ import { PATH_SERVER_URL, TRANSFER_INGRESS_URL } from "./constants"
 import { encryptNote } from "./noteCrypto"
 import {
   addDiscoveredNote,
-  markNoteSpent,
-  markNoteSpentByCommitment,
+  markNoteSpentByIdentity,
   type ShieldedNote
 } from "./notes"
 
@@ -139,28 +138,29 @@ export async function transfer(
   }
   const { request_id } = (await res.json()) as { request_id: string }
 
-  // Mark the spent inputs and store the change note locally (the recipient
-  // discovers their output by scanning). A deposit note is identified by its
-  // signature, a discovered transfer note by its commitment.
-  for (const note of inputs) {
-    if (note.signature) {
-      await markNoteSpent(account, note.signature)
-    }
-    if (note.commitment) {
-      await markNoteSpentByCommitment(account, note.commitment)
-    }
-  }
+  // Persist the change note FIRST if change > 0 (#transfer-change-safety).
+  // The change blinding was generated on-the-fly in memory and lives only here;
+  // persisting it before marking inputs spent prevents an interrupted flow or
+  // storage exception from permanently orphaning unrecoverable change funds.
   const changeCommitment = output_commitments[1]
-  await addDiscoveredNote(account, {
-    amount: change.toString(),
-    blinding: outBlind1,
-    assetId: NATIVE_ASSET_HEX,
-    signature: "",
-    createdAt: Date.now(),
-    spent: false,
-    commitment: changeCommitment,
-    source: "transfer"
-  })
+  if (change > 0n) {
+    await addDiscoveredNote(account, {
+      amount: change.toString(),
+      blinding: outBlind1,
+      assetId: NATIVE_ASSET_HEX,
+      signature: "",
+      createdAt: Date.now(),
+      spent: false,
+      commitment: changeCommitment,
+      source: "transfer"
+    })
+  }
+
+  // Mark spent inputs by unique identity (#718) so empty-signature transfer/change
+  // notes are accurately identified by commitment rather than signature matching.
+  for (const note of inputs) {
+    await markNoteSpentByIdentity(account, note)
+  }
 
   return { requestId: request_id, changeCommitment }
 }

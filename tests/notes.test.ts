@@ -200,3 +200,35 @@ describe("note storage", () => {
     expect(await shieldedBalance(ACCOUNT)).toBe(1000n)
   })
 })
+
+describe("transfer change persistence ordering and identity (#transfer-change-safety)", () => {
+  it("persists change note before marking inputs spent to prevent orphan blinding loss", async () => {
+    const input = deposit({ signature: "input-sig", amount: "5000" })
+    await addNote(ACCOUNT, input)
+
+    const changeCommitment = "cc".repeat(32)
+    const changeNote = received(changeCommitment, { amount: "2000", blinding: "bb".repeat(32) })
+
+    // Change note persisted first
+    await addDiscoveredNote(ACCOUNT, changeNote)
+    // Then input marked spent
+    await markNoteSpentByIdentity(ACCOUNT, input)
+
+    const notes = await getNotes(ACCOUNT)
+    expect(notes.find((n) => n.commitment === changeCommitment)!.spent).toBe(false)
+    expect(notes.find((n) => n.signature === "input-sig")!.spent).toBe(true)
+    expect(await shieldedBalance(ACCOUNT)).toBe(2000n)
+  })
+
+  it("safely handles transfers with zero change without phantom change records", async () => {
+    const input = deposit({ signature: "exact-sig", amount: "3000" })
+    await addNote(ACCOUNT, input)
+
+    // When change is 0n, no change note is added, only inputs are spent
+    await markNoteSpentByIdentity(ACCOUNT, input)
+
+    const notes = await getNotes(ACCOUNT)
+    expect(notes.every((n) => n.spent)).toBe(true)
+    expect(await shieldedBalance(ACCOUNT)).toBe(0n)
+  })
+})

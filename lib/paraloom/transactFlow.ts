@@ -114,7 +114,13 @@ export async function depositV3(
   let leafIndex = -1
   for (const line of tx?.meta?.logMessages ?? []) {
     const m = line.match(/^Program log: Deposit note appended at leaf (\d+)$/)
-    if (m) leafIndex = Number(m[1])
+    if (m) {
+      const rawIndex = BigInt(m[1])
+      if (rawIndex > BigInt(Number.MAX_SAFE_INTEGER)) {
+        throw new Error("Deposit leaf index exceeds safe integer precision")
+      }
+      leafIndex = Number(rawIndex)
+    }
   }
   if (leafIndex < 0) {
     // Fallback: locate our commitment in the rebuilt leaf list.
@@ -254,13 +260,14 @@ export async function spendV3(
   // Pad a single-note spend with a zero-value dummy (membership is skipped
   // in-circuit for zero notes; the path just needs the right shape).
   if (inputSpecs.length === 1) {
-    const { path } = await v3MerklePath(leavesHex, inputSpecs[0].leafIndex)
+    // Pad with an isolated Merkle path for leaf 0 to avoid mirroring the real input's tree branch topology
+    const { path: dummyPath } = await v3MerklePath(leavesHex, 0)
     inputSpecs.push({
       amount: 0n,
       privkeyHex: randomHex32(),
       blindingHex: randomHex32(),
       leafIndex: 0,
-      pathHex: path
+      pathHex: dummyPath
     })
   }
 

@@ -1,4 +1,9 @@
-import { describe, expect, it } from "vitest"
+import { describe, expect, it, vi } from "vitest"
+
+vi.mock("~lib/prover", () => ({
+  NATIVE_ASSET_HEX: "00".repeat(32),
+  v3NotePubkey: vi.fn()
+}))
 
 import {
   isValidShieldedAddress,
@@ -6,6 +11,7 @@ import {
   shieldedChecksum,
   withChecksum
 } from "../lib/crypto/addressChecksum"
+import { addressBoxPubHex, addressSpendPubHex } from "../lib/crypto/keyManagement"
 
 // A representative 128-hex body: box pubkey (64) + spend pubkey (64).
 const BODY128 = "0123456789abcdef".repeat(8)
@@ -15,6 +21,21 @@ describe("shielded address checksum (#781)", () => {
   it("accepts a correctly checksummed address and returns its body", () => {
     expect(isValidShieldedAddress(ADDR)).toBe(true)
     expect(parseShieldedAddress(ADDR)).toBe(BODY128)
+  })
+
+  it("normalizes uppercase hex in body and checksum to lowercase", () => {
+    const upperBody = BODY128.toUpperCase()
+    const upperCsum = shieldedChecksum(upperBody).toUpperCase()
+    const upperAddr = `paraloom1${upperBody}${upperCsum}`
+    expect(isValidShieldedAddress(upperAddr)).toBe(true)
+    expect(parseShieldedAddress(upperAddr)).toBe(BODY128) // normalized to lowercase
+    expect(addressBoxPubHex(upperAddr)).toBe(BODY128.slice(0, 64))
+    expect(addressSpendPubHex(upperAddr)).toBe(BODY128.slice(64, 128))
+  })
+
+  it("ensures case variants of same shielded address evaluate equal after parsing", () => {
+    const upperAddr = `paraloom1${withChecksum(BODY128).toUpperCase()}`
+    expect(parseShieldedAddress(upperAddr)).toBe(parseShieldedAddress(ADDR))
   })
 
   it("rejects a one-character substitution in the body (the core #781 case)", () => {

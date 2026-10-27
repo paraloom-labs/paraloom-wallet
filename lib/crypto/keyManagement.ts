@@ -3,7 +3,7 @@ import { sha256 } from "@noble/hashes/sha256"
 import { scrypt } from "@noble/hashes/scrypt"
 import { randomBytes } from "@noble/hashes/utils"
 
-import { withChecksum } from "./addressChecksum"
+import { parseShieldedAddress, withChecksum } from "./addressChecksum"
 import * as nacl from "tweetnacl"
 
 // Circuit v3 (#350): the address carries the circom-Poseidon spend pubkey the
@@ -77,12 +77,20 @@ export async function deriveShieldedAddress(
 
 /** The box (encryption) public key half of a v2 shielded address, hex. */
 export function addressBoxPubHex(shieldedAddress: string): string {
-  return shieldedAddress.replace(/^paraloom1/, "").slice(0, 64)
+  const body = parseShieldedAddress(shieldedAddress)
+  if (body) {
+    return body.slice(0, 64)
+  }
+  return shieldedAddress.replace(/^paraloom1/i, "").slice(0, 64).toLowerCase()
 }
 
 /** The spend (commitment-binding) public key half of a v2 shielded address, hex. */
 export function addressSpendPubHex(shieldedAddress: string): string {
-  return shieldedAddress.replace(/^paraloom1/, "").slice(64, 128)
+  const body = parseShieldedAddress(shieldedAddress)
+  if (body) {
+    return body.slice(64, 128)
+  }
+  return shieldedAddress.replace(/^paraloom1/i, "").slice(64, 128).toLowerCase()
 }
 
 export interface EncryptedWallet {

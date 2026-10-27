@@ -391,6 +391,7 @@ export async function privateSwap(
     outputMint: params.outputMint,
     outAmount: out_amount,
     swapSignature,
+    swapStatus: "submitted",
     createdAt: Date.now()
   })
 
@@ -399,6 +400,13 @@ export async function privateSwap(
   // when the swap actually lands. We wait up to ~90s and only fail on a real
   // on-chain error (or if it truly never confirms).
   await waitForSwapConfirmation(connection, swapSignature)
+
+  // Mark the row confirmed: the signature is now attested on-chain.
+  await saveSwapOutput({
+    freshAddress: fresh.publicKey.toBase58(),
+    swapSignature,
+    swapStatus: "confirmed"
+  })
 
   // 7. Optional round trip: re-shield the swapped token back into the pool. The
   //    token is already safely at the fresh address (persisted above), so this
@@ -597,9 +605,17 @@ export async function privateSwapFromToken(
     outputMint: params.outputMint,
     outAmount: out_amount,
     swapSignature,
+    swapStatus: "submitted",
     createdAt: Date.now()
   })
   await waitForSwapConfirmation(connection, swapSignature)
+
+  // Mark the row confirmed: the signature is now attested on-chain.
+  await saveSwapOutput({
+    freshAddress: fresh.publicKey.toBase58(),
+    swapSignature,
+    swapStatus: "confirmed"
+  })
 
   // 5. Round trip: sweep the swapped output back into the shielded pool. For a
   //    "SOL" output this is a native deposit_note (depositV3 persists the note

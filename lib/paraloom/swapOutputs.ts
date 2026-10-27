@@ -15,6 +15,9 @@ export interface SwapOutput {
   /** The swap transaction signature. Empty until the swap leg completes; a
    *  non-empty value marks the swap done (used to find resumable strands). */
   swapSignature: string
+  /** Swap lifecycle: "submitted" (tx sent, awaiting confirmation) or
+   *  "confirmed" (on-chain confirmation observed). Absent on legacy rows. */
+  swapStatus?: "submitted" | "confirmed"
   /** Whether the user asked to re-shield the bought token (a round trip). Saved
    *  so a resumed/recovered swap honors the original intent. */
   reshield?: boolean
@@ -29,13 +32,30 @@ const KEY = "paraloom_swap_outputs"
 // Upsert by freshAddress: the key is saved early (before the withdraw) so it can
 // never be lost, then the same entry is updated with the realized amount +
 // signature once the swap lands. Keyed on the address so the two writes collapse
-// to one row.
-export async function saveSwapOutput(output: SwapOutput): Promise<void> {
+// to one row. Partial updates (only freshAddress + fields to change) are allowed
+// so callers can flip swapStatus without re-reading the full row.
+export type SwapOutputUpdate = Pick<SwapOutput, "freshAddress"> &
+  Partial<Omit<SwapOutput, "freshAddress">>
+
+export async function saveSwapOutput(output: SwapOutputUpdate): Promise<void> {
   const stored = await chrome.storage.local.get(KEY)
   const current = (stored[KEY] as SwapOutput[]) ?? []
   const i = current.findIndex((o) => o.freshAddress === output.freshAddress)
   if (i >= 0) current[i] = { ...current[i], ...output }
-  else current.push(output)
+  else {
+    const full = output as SwapOutput
+    if (
+      full.freshSecretKeyHex === undefined ||
+      full.outputMint === undefined ||
+      full.outAmount === undefined ||
+      full.swapSignature === undefined ||
+      full.createdAt === undefined
+    ) {
+      // Partial update on a missing row: cannot create a new row from a partial.
+      return
+    }
+    current.push(full)
+  }
   await chrome.storage.local.set({ [KEY]: current })
 }
 

@@ -48,8 +48,32 @@ export async function reconcileSwapOutputs(
     const outputs = await listSwapOutputs()
     const now = Date.now()
     for (const o of outputs) {
-      if (o.swapSignature) continue
       if (now - o.createdAt < RESUME_GRACE_MS) continue
+
+      // Confirmed swaps are done; skip them.
+      if (o.swapSignature && o.swapStatus === "confirmed") continue
+
+      // Submitted (or legacy with signature but no status) rows: verify the
+      // signature actually confirmed on-chain before trusting it.
+      if (o.swapSignature) {
+        try {
+          const status = await connection.getSignatureStatus(o.swapSignature)
+          if (
+            status.value.confirmationStatus === "confirmed" ||
+            status.value.confirmationStatus === "finalized"
+          ) {
+            // The swap did confirm — the early save just lacked the marker.
+            await saveSwapOutput({ ...o, swapStatus: "confirmed" })
+            resolved++
+            continue
+          }
+        } catch {
+          // RPC blip — retry on the next open rather than guess
+          continue
+        }
+        // Signature not confirmed: the tx dropped. The fresh address may still
+        // hold the input funds. Fall through to the balance/recovery checks below.
+      }
 
       const freshPub = new PublicKey(o.freshAddress)
       let solLamports = 0n
@@ -80,7 +104,8 @@ export async function reconcileSwapOutputs(
       }
 
       let action = classifyStrand({
-        hasSignature: false,
+        hasSignature: false, // rows with confirmed sigs are skipped above;
+        // submitted-but-unconfirmed rows fall through to balance checks
         ageMs: now - o.createdAt,
         solLamports,
         tokenAmount

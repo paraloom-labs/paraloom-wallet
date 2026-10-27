@@ -946,7 +946,13 @@ export function Home({ onLock }: HomeProps) {
                         {g.items.map((e, i) => {
                           if (e.kind === "buy") {
                             const s = e.s
-                            const done = s.outAmount > 0 && !!s.swapSignature
+                          // "done" requires a confirmed swap: the signature
+                          // must be attested on-chain, not merely submitted.
+                          // Legacy rows (no swapStatus) are treated as confirmed.
+                          const done =
+                            s.outAmount > 0 &&
+                            !!s.swapSignature &&
+                            (s.swapStatus === undefined || s.swapStatus === "confirmed")
                             const isSolOut =
                               s.outputMint === "SOL" || s.outputMint === WSOL_MINT
                             const sym = isSolOut

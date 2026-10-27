@@ -21,6 +21,9 @@ export interface SwapOutput {
   /** Set once the re-shield note has been persisted (either normally or via the
    *  recovery scan), so recovery does not re-scan a settled reshield each connect. */
   reshieldRecovered?: boolean
+  /** True when the user dismissed this row. The key is preserved in storage so
+   *  funds at the fresh address remain recoverable (paraloom-core#854). */
+  dismissed?: boolean
   createdAt: number
 }
 
@@ -41,16 +44,21 @@ export async function saveSwapOutput(output: SwapOutput): Promise<void> {
 
 export async function listSwapOutputs(): Promise<SwapOutput[]> {
   const stored = await chrome.storage.local.get(KEY)
-  return (stored[KEY] as SwapOutput[]) ?? []
+  const current = (stored[KEY] as SwapOutput[]) ?? []
+  // Dismissed rows stay in storage (the fresh key is preserved for recovery)
+  // but are hidden from the Activity feed.
+  return current.filter((o) => !o.dismissed)
 }
 
-// Drop a swap row by its fresh address. Used to clear a stale "pending" row the
-// reconciler could not positively account for — the funds are already safe (the
-// swap either re-shielded into the pool or its input note was never spent), so
-// this only removes the misleading Activity entry, never any money.
+// Hide a swap row from the Activity feed. The row and its fresh key are
+// preserved in storage so that funds stranded at the fresh address remain
+// recoverable — a hard delete destroyed the only copy of the key and made
+// any leftover balance permanently unrecoverable (paraloom-core#854).
 export async function dismissSwapOutput(freshAddress: string): Promise<void> {
   const stored = await chrome.storage.local.get(KEY)
   const current = (stored[KEY] as SwapOutput[]) ?? []
-  const next = current.filter((o) => o.freshAddress !== freshAddress)
+  const next = current.map((o) =>
+    o.freshAddress === freshAddress ? { ...o, dismissed: true } : o
+  )
   await chrome.storage.local.set({ [KEY]: next })
 }

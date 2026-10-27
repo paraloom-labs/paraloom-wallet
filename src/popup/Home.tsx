@@ -1179,8 +1179,10 @@ export function Home({ onLock }: HomeProps) {
 
                   {activityDetail.kind === "buy" && activityDetail.pending && (
                     <p className="detail-note">
-                      Still pending after a while? Your funds are safe in your shielded
-                      balance. Dismissing only clears this row.
+                      Still pending. Dismissing hides this row but keeps the
+                      fresh address's key in storage so funds at that address
+                      remain recoverable. Check the fresh address on Solscan
+                      before dismissing.
                     </p>
                   )}
 

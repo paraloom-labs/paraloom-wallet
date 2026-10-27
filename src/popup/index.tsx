@@ -72,7 +72,12 @@ function Popup() {
 
   async function checkWalletState() {
     const wallet = await getStoredWallet()
-    const isLocked = await isWalletLocked()
+    const storedLocked = await isWalletLocked()
+    const session = !storedLocked ? await loadSession() : null
+    if (wallet && !storedLocked && !session) {
+      await setLockState(true)
+    }
+    const isLocked = storedLocked || !session
 
     // Resolve any pending dapp connection request BEFORE flipping state, so the
     // first unlocked render already carries it — otherwise Home flashes for one

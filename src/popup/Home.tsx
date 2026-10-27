@@ -183,6 +183,9 @@ export function Home({ onLock }: HomeProps) {
 
   async function handleRevokeSite(origin: string) {
     await removeApprovedOrigin(origin)
+    try {
+      chrome.runtime.sendMessage({ type: "REVOKE_ORIGIN", origin })
+    } catch {}
     setConnectedSites((prev) => prev.filter((o) => o !== origin))
   }
 
@@ -220,6 +223,9 @@ export function Home({ onLock }: HomeProps) {
     lock()
     await setLockState(true)
     await clearSession()
+    try {
+      chrome.runtime.sendMessage({ type: "LOCK_WALLET" })
+    } catch {}
     onLock()
   }
 

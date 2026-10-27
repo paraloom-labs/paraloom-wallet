@@ -4,6 +4,7 @@
 // recipient's shielded address (#196) so only they can discover and spend it.
 // The spend secrets never leave the wallet.
 
+import { isValidShieldedAddress } from "~lib/crypto/addressChecksum"
 import { addressBoxPubHex, addressSpendPubHex } from "~lib/crypto/keyManagement"
 import { NATIVE_ASSET_HEX, noteCommitmentV2, proveTransferV2 } from "~lib/prover"
 
@@ -63,6 +64,14 @@ export async function transfer(
     throw new Error("Selected notes do not cover the transfer amount")
   }
   const change = inputTotal - amount
+
+  // Validate shielded addresses before spending or proving to prevent typo-induced note loss (#116)
+  if (!isValidShieldedAddress(recipientShieldedAddress)) {
+    throw new Error(`Recipient shielded address failed checksum validation: ${recipientShieldedAddress}`)
+  }
+  if (!isValidShieldedAddress(ownShieldedAddress)) {
+    throw new Error(`Own shielded address failed checksum validation: ${ownShieldedAddress}`)
+  }
 
   // v2 (#293): an output binds the recipient's spend pubkey (so only they can
   // spend it) and is encrypted to their box pubkey (so only they can read it).

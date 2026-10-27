@@ -5,6 +5,7 @@
 
 import { Connection, Keypair, PublicKey } from "@solana/web3.js"
 
+import { isValidShieldedAddress } from "~lib/crypto/addressChecksum"
 import { addressBoxPubHex, addressSpendPubHex } from "~lib/crypto/keyManagement"
 import {
   proveTransact,
@@ -295,6 +296,9 @@ export async function spendV3(
       })
     ]
   } else {
+    if (!isValidShieldedAddress(dest.recipientShielded)) {
+      throw new Error(`Recipient shielded address failed checksum validation: ${dest.recipientShielded}`)
+    }
     extAmount = 0n
     recipientHex = "00".repeat(32)
     const toSpendPub = addressSpendPubHex(dest.recipientShielded)

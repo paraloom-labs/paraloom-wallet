@@ -1,5 +1,7 @@
 import { describe, expect, it } from "vitest"
 
+import { addressBoxPubHex, addressSpendPubHex } from "../lib/crypto/keyManagement"
+
 import {
   isValidShieldedAddress,
   parseShieldedAddress,
@@ -47,5 +49,21 @@ describe("shielded address checksum (#781)", () => {
 
   it("round-trips: withChecksum then parse returns the same body", () => {
     expect(parseShieldedAddress(`paraloom1${withChecksum(BODY128)}`)).toBe(BODY128)
+  })
+
+  it("addressBoxPubHex and addressSpendPubHex slice valid checksummed address correctly", () => {
+    expect(addressBoxPubHex(ADDR)).toBe(BODY128.slice(0, 64))
+    expect(addressSpendPubHex(ADDR)).toBe(BODY128.slice(64, 128))
+  })
+
+  it("addressBoxPubHex and addressSpendPubHex throw on typo or invalid shielded address (#116)", () => {
+    const flipped = (BODY128[0] === "1" ? "2" : "1") + BODY128.slice(1)
+    const bad = `paraloom1${flipped}${shieldedChecksum(BODY128)}`
+    expect(() => addressBoxPubHex(bad)).toThrow(/Invalid shielded address or checksum mismatch/)
+    expect(() => addressSpendPubHex(bad)).toThrow(/Invalid shielded address or checksum mismatch/)
+    expect(() => addressBoxPubHex(`paraloom1${BODY128}`)).toThrow(/Invalid shielded address or checksum mismatch/)
+    expect(() => addressSpendPubHex(`paraloom1${BODY128}`)).toThrow(/Invalid shielded address or checksum mismatch/)
+    expect(() => addressBoxPubHex(`wrongprefix${withChecksum(BODY128)}`)).toThrow(/Invalid shielded address or checksum mismatch/)
+    expect(() => addressSpendPubHex(`wrongprefix${withChecksum(BODY128)}`)).toThrow(/Invalid shielded address or checksum mismatch/)
   })
 })

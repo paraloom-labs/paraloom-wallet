@@ -18,6 +18,7 @@ import { NATIVE_ASSET_HEX } from "~lib/prover"
 import { encryptNote } from "./noteCrypto"
 import {
   addNote,
+  addDiscoveredNote,
   markNoteSpentByIdentity,
   setNoteLeafIndex,
   type ShieldedNote
@@ -379,6 +380,22 @@ export async function spendV3(
         spent: false,
         source: "transfer",
         commitment: await noteCommitment(change, ownPubHex, changeBlind)
+      })
+    }
+    if (
+      dest.kind === "transfer" &&
+      dest.recipientShielded.toLowerCase() === shieldedAddress.toLowerCase()
+    ) {
+      await addDiscoveredNote(shieldedAddress, {
+        amount: outputs[0].amount.toString(),
+        blinding: outputs[0].blindingHex,
+        assetId: assetIdHex,
+        mint: isSpl ? inputs[0].mint : undefined,
+        signature: "",
+        createdAt: Date.now(),
+        spent: false,
+        source: "transfer",
+        commitment: settleCommitmentHex
       })
     }
   }

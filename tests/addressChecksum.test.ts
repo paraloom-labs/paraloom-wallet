@@ -17,6 +17,13 @@ describe("shielded address checksum (#781)", () => {
     expect(parseShieldedAddress(ADDR)).toBe(BODY128)
   })
 
+  it("normalizes uppercase hex to lowercase so self-transfer guards compare consistently", () => {
+    const uppercase = BODY128.toUpperCase()
+    const addr = `paraloom1${uppercase}${shieldedChecksum(uppercase)}`
+    expect(isValidShieldedAddress(addr)).toBe(true)
+    expect(parseShieldedAddress(addr)).toBe(BODY128)
+  })
+
   it("rejects a one-character substitution in the body (the core #781 case)", () => {
     // Flip the first body hex digit; length is unchanged.
     const flipped = (BODY128[0] === "1" ? "2" : "1") + BODY128.slice(1)

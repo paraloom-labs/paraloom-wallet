@@ -32,7 +32,7 @@ export function parseShieldedAddress(addr: string): string | null {
   const rest = addr.slice("paraloom1".length)
   if (rest.length !== SHIELDED_BODY_HEX + SHIELDED_CHECKSUM_HEX) return null
   if (!/^[0-9a-fA-F]+$/.test(rest)) return null
-  const body = rest.slice(0, SHIELDED_BODY_HEX)
+  const body = rest.slice(0, SHIELDED_BODY_HEX).toLowerCase()
   const csum = rest.slice(SHIELDED_BODY_HEX).toLowerCase()
   if (shieldedChecksum(body) !== csum) return null
   return body

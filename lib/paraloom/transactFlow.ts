@@ -368,6 +368,22 @@ export async function spendV3(
     for (const note of inputs) {
       await markNoteSpentByIdentity(shieldedAddress, note)
     }
+    const isSelfTransfer =
+      dest.kind === "transfer" &&
+      outputs[0].pubkeyHex.toLowerCase() === ownPubHex.toLowerCase()
+    if (isSelfTransfer && outputs[0].amount > 0n) {
+      await addNote(shieldedAddress, {
+        amount: outputs[0].amount.toString(),
+        blinding: outputs[0].blindingHex,
+        assetId: assetIdHex,
+        mint: isSpl ? inputs[0].mint : undefined,
+        signature: "",
+        createdAt: Date.now(),
+        spent: false,
+        source: "transfer",
+        commitment: settleCommitmentHex
+      })
+    }
     if (change > 0n) {
       await addNote(shieldedAddress, {
         amount: change.toString(),

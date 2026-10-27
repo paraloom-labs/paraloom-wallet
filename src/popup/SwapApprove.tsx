@@ -1,5 +1,6 @@
 import { useState } from "react"
 import logoImg from "data-base64:~/../assets/icon.png"
+import { effectiveSlippageBps } from "~lib/paraloom/slippage"
 
 interface SwapParams {
   outputMint: string
@@ -106,6 +107,7 @@ export function SwapApprove({ id, origin, params, onResolved }: SwapApproveProps
         {params.reshield
           ? "The result is re-shielded back into your Paraloom balance."
           : "The result stays at that address (it is not re-shielded)."}{" "}
+        Max slippage: <strong>{effectiveSlippageBps(params.slippageBps) / 100} %</strong>.{" "}
         Only approve swaps you started.
       </p>
       <div className="connect-actions">

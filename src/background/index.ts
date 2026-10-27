@@ -18,6 +18,7 @@ import {
   privateSwapFromToken,
   type ReshieldedNote
 } from "~lib/paraloom/privateSwap"
+import { effectiveSlippageBps } from "~lib/paraloom/slippage"
 import { persistReshieldedNote, recoverReshields } from "~lib/paraloom/reshieldRecovery"
 import { reconcileSwapOutputs } from "~lib/paraloom/swapReconcile"
 import { assetIdForMint, NATIVE_ASSET_HEX } from "~lib/prover"
@@ -847,6 +848,10 @@ async function handlePrivateSwap(
   const amount = BigInt(params.amountLamports)
   if (amount <= 0n) throw new Error("amount must be > 0")
 
+  // Clamp the page-supplied tolerance once, so the value the router is asked
+  // for is the value the approval screen showed.
+  const slippageBps = effectiveSlippageBps(params.slippageBps)
+
   const shieldedAddress = session.wallet.shieldedAddress
   const spendPrivkeyHex = Buffer.from(session.wallet.spendPrivkey).toString("hex")
   const ownBoxPubHex = Buffer.from(session.wallet.boxPublicKey).toString("hex")
@@ -901,7 +906,7 @@ async function handlePrivateSwap(
         inputMint: params.inputMint,
         amountTokenUnits: amount,
         outputMint: params.outputMint,
-        slippageBps: params.slippageBps ?? 100,
+        slippageBps,
         reshield: params.reshield ?? true
       },
       undefined,
@@ -939,7 +944,7 @@ async function handlePrivateSwap(
     {
       outputMint: params.outputMint,
       amountLamports: amount,
-      slippageBps: params.slippageBps ?? 100,
+      slippageBps,
       reshield: params.reshield ?? false
     },
     undefined,

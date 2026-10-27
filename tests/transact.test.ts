@@ -12,7 +12,7 @@ import {
   PROGRAM_ID,
   TRANSACT_EVENT_DISCRIMINATOR
 } from "~lib/paraloom/constants"
-import { fetchV3Leaves } from "~lib/paraloom/transact"
+import { fetchV3Leaves, submitTransact } from "~lib/paraloom/transact"
 import { describe, expect, it, vi } from "vitest"
 
 // transact.ts now reaches ~lib/prover through bridge.ts, and the wasm module
@@ -361,5 +361,53 @@ describe("refusing an unsafe tree", () => {
       { logs: emittedBy(PROGRAM_ID, depositEvent(0xa0, 0)), nullFor: Infinity }
     ])
     await expect(fetchV3Leaves(connection)).rejects.toThrow(/leaf history may be incomplete/)
+  })
+})
+
+describe("submitTransact safe integer bounds (#121)", () => {
+  const dummyBundle = JSON.stringify({
+    nullifiers: ["11".repeat(32), "22".repeat(32)],
+    output_commitments: ["33".repeat(32), "44".repeat(32)],
+    proof: "55".repeat(96)
+  })
+
+  it("throws when extAmount exceeds Number.MAX_SAFE_INTEGER", async () => {
+    const tooLarge = BigInt(Number.MAX_SAFE_INTEGER) + 1n
+    await expect(
+      submitTransact("00".repeat(32), tooLarge, "aa".repeat(32), dummyBundle, ["", ""])
+    ).rejects.toThrow(/safe integer limit/)
+  })
+
+  it("throws when negative extAmount exceeds Number.MIN_SAFE_INTEGER", async () => {
+    const tooNegative = BigInt(Number.MIN_SAFE_INTEGER) - 1n
+    await expect(
+      submitTransact("00".repeat(32), tooNegative, "aa".repeat(32), dummyBundle, ["", ""])
+    ).rejects.toThrow(/safe integer limit/)
+  })
+
+  it("serializes ext_amount correctly within safe integer bounds", async () => {
+    const originalFetch = global.fetch
+    let capturedBody: any = null
+    global.fetch = vi.fn().mockImplementation(async (_url, options) => {
+      capturedBody = JSON.parse(options.body)
+      return {
+        ok: true,
+        json: async () => ({ request_id: "req_123" })
+      }
+    })
+
+    try {
+      const res = await submitTransact(
+        "00".repeat(32),
+        -5_000_000n,
+        "aa".repeat(32),
+        dummyBundle,
+        ["ct0", "ct1"]
+      )
+      expect(res.requestId).toBe("req_123")
+      expect(capturedBody.ext_amount).toBe(-5_000_000)
+    } finally {
+      global.fetch = originalFetch
+    }
   })
 })

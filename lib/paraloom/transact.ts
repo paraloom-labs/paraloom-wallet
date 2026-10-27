@@ -289,6 +289,14 @@ export async function submitTransact(
   // `recipientHex` is the recipient token account.
   mintHex?: string
 ): Promise<TransactSubmission> {
+  if (
+    extAmount < BigInt(Number.MIN_SAFE_INTEGER) ||
+    extAmount > BigInt(Number.MAX_SAFE_INTEGER)
+  ) {
+    throw new Error(
+      `extAmount ${extAmount.toString()} exceeds JavaScript safe integer limit; precision loss corrupts proof verification`
+    )
+  }
   const bundle = JSON.parse(proofBundleJson)
   const body: Record<string, unknown> = {
     recipient: recipientHex,

@@ -145,12 +145,18 @@ async function fetchWithTimeout(
 
 // Ask the routing service for an UNSIGNED swap tx, with a bounded timeout and a
 // few retries. The service holds no key; it only builds the tx for `freshPubkey`.
-async function routeSwap(
+export async function routeSwap(
   freshPubkey: string,
   outputMint: string,
   amount: bigint,
   inputMint = "SOL"
 ): Promise<{ out_amount: number; swap_transaction: string }> {
+  const num = Number(amount)
+  if (!Number.isSafeInteger(num)) {
+    throw new Error(
+      `Swap amount ${amount} exceeds JavaScript safe integer limit; must transmit as string or bounded value`
+    )
+  }
   let lastErr: unknown
   for (let attempt = 1; attempt <= ROUTE_RETRIES; attempt++) {
     try {
@@ -162,7 +168,7 @@ async function routeSwap(
           body: JSON.stringify({
             input_mint: inputMint,
             output_mint: outputMint,
-            amount: Number(amount),
+            amount: num,
             user_public_key: freshPubkey
           })
         },

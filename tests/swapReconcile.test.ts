@@ -1,5 +1,16 @@
-import { describe, expect, it } from "vitest"
+import { beforeEach, describe, expect, it, vi } from "vitest"
+import { Keypair } from "@solana/web3.js"
 
+// privateSwap.ts and swapReconcile.ts reach ~lib/prover, whose wasm module
+// cannot load under vitest.
+vi.mock("~lib/prover", () => ({
+  NATIVE_ASSET_HEX: "00".repeat(32),
+  assetIdForMint: async () => "00".repeat(32)
+}))
+
+import { routeSwap } from "../lib/paraloom/privateSwap"
+import { listSwapOutputs, saveSwapOutput } from "../lib/paraloom/swapOutputs"
+import { reconcileSwapOutputs } from "../lib/paraloom/swapReconcile"
 import {
   classifyStrand,
   isNativeSolOutput,
@@ -7,6 +18,7 @@ import {
   RESUME_MIN_LAMPORTS,
   WSOL_MINT
 } from "../lib/paraloom/swapReconcileClassify"
+import { installFakeChrome } from "./support/chromeStorage"
 
 const OLD = RESUME_GRACE_MS + 1
 
@@ -102,5 +114,103 @@ describe("isNativeSolOutput", () => {
 
   it("treats USDC (any SPL mint) as NOT native SOL", () => {
     expect(isNativeSolOutput("EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v")).toBe(false)
+  })
+})
+
+describe("routeSwap IEEE-754 safe integer guard (#127)", () => {
+  it("throws before making network requests when bigint amount exceeds Number.MAX_SAFE_INTEGER", async () => {
+    const fetchSpy = vi.spyOn(globalThis, "fetch")
+    const unsafeAmount = 9_007_199_254_740_993n // 2^53 + 1
+    await expect(
+      routeSwap(
+        Keypair.generate().publicKey.toBase58(),
+        "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
+        unsafeAmount
+      )
+    ).rejects.toThrow(/exceeds JavaScript safe integer limit/)
+    expect(fetchSpy).not.toHaveBeenCalled()
+    fetchSpy.mockRestore()
+  })
+})
+
+describe("reconcileSwapOutputs landed precision and signature err validation (#127)", () => {
+  beforeEach(() => {
+    installFakeChrome()
+  })
+
+  it("does not attest a landed swap when the latest signature has an on-chain error (sigInfo.err !== null)", async () => {
+    const fresh = Keypair.generate()
+    await saveSwapOutput({
+      freshAddress: fresh.publicKey.toBase58(),
+      freshSecretKeyHex: Buffer.from(fresh.secretKey).toString("hex"),
+      outputMint: "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
+      outAmount: 0,
+      swapSignature: "",
+      createdAt: Date.now() - (RESUME_GRACE_MS + 5_000)
+    })
+
+    const fakeConnection = {
+      getBalance: async () => 0,
+      getParsedTokenAccountsByOwner: async () => ({
+        value: [
+          {
+            account: {
+              data: {
+                parsed: { info: { tokenAmount: { amount: "9007199254740993" } } }
+              }
+            }
+          }
+        ]
+      }),
+      getSignaturesForAddress: async () => [
+        {
+          signature: "FailedSig1111111111111111111111111111111111",
+          err: { InstructionError: [0, "Custom"] }
+        }
+      ]
+    } as any
+
+    const resolved = await reconcileSwapOutputs(fakeConnection, "shielded-addr")
+    expect(resolved).toBe(0)
+    const rows = await listSwapOutputs()
+    expect(rows[0].swapSignature).toBe("")
+    expect(rows[0].outAmount).toBe(0)
+  })
+
+  it("persists landed outAmount as an exact decimal string without 53-bit truncation when sigInfo.err is null", async () => {
+    const fresh = Keypair.generate()
+    const largeAmountStr = "9007199254740993" // 2^53 + 1 (truncates to 9007199254740992 under Number())
+    await saveSwapOutput({
+      freshAddress: fresh.publicKey.toBase58(),
+      freshSecretKeyHex: Buffer.from(fresh.secretKey).toString("hex"),
+      outputMint: "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
+      outAmount: 0,
+      swapSignature: "",
+      createdAt: Date.now() - (RESUME_GRACE_MS + 5_000)
+    })
+
+    const fakeConnection = {
+      getBalance: async () => 0,
+      getParsedTokenAccountsByOwner: async () => ({
+        value: [
+          {
+            account: {
+              data: {
+                parsed: { info: { tokenAmount: { amount: largeAmountStr } } }
+              }
+            }
+          }
+        ]
+      }),
+      getSignaturesForAddress: async () => [
+        { signature: "ValidSig11111111111111111111111111111111111", err: null }
+      ]
+    } as any
+
+    const resolved = await reconcileSwapOutputs(fakeConnection, "shielded-addr")
+    expect(resolved).toBe(1)
+    const rows = await listSwapOutputs()
+    expect(rows[0].swapSignature).toBe("ValidSig11111111111111111111111111111111111")
+    expect(rows[0].outAmount).toBe(largeAmountStr)
   })
 })

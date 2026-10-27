@@ -123,9 +123,17 @@ export async function scanForNotes(
     // phantom. An SPL note's leaf binds its assetId, so a native-only
     // recomputation would reject every received token note (#23).
     const isNative = note.assetIdHex === NATIVE_ASSET_HEX
-    const expected = isNative
-      ? await v3NoteCommitment(note.amount, spendPubHex, note.blindingHex)
-      : await v3NoteCommitmentAsset(note.amount, spendPubHex, note.blindingHex, note.assetIdHex)
+    let expected: string
+    try {
+      expected = isNative
+        ? await v3NoteCommitment(note.amount, spendPubHex, note.blindingHex)
+        : await v3NoteCommitmentAsset(note.amount, spendPubHex, note.blindingHex, note.assetIdHex)
+    } catch {
+      // Recomputation throws on malformed hex (e.g. invalid chars or length != 32 bytes)
+      // or prover rejection. Catching it drops this malformed note rather than
+      // letting the exception abort scanForNotes and drop the rest of the feed (#119).
+      continue
+    }
     if (expected !== d.output_commitment) {
       continue
     }

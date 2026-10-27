@@ -383,6 +383,34 @@ describe("received SPL notes (#23)", () => {
   })
 })
 
+describe("commitment calculation exception handling (#119)", () => {
+  it("drops a native note when v3NoteCommitment throws rather than crashing scanForNotes", async () => {
+    v3NoteCommitment.mockRejectedValueOnce(new Error("bad hex: invalid character"))
+    respondWith([honest(100n)])
+
+    await expect(scan()).resolves.toBe(0)
+    expect(await shieldedBalance(ACCOUNT)).toBe(0n)
+  })
+
+  it("drops an SPL note when v3NoteCommitmentAsset throws rather than crashing scanForNotes", async () => {
+    v3NoteCommitmentAsset.mockRejectedValueOnce(new Error("expected 32-byte hex"))
+    respondWith([splNote(500n)])
+
+    await expect(scan()).resolves.toBe(0)
+    expect(await shieldedTokenBalances(ACCOUNT)).toEqual({})
+  })
+
+  it("still finds subsequent legitimate notes when an earlier note throws during commitment calculation", async () => {
+    // /transact/scan serves notes chronologically in arrival order; an uncaught throw
+    // would terminate the loop and starve all subsequent notes on the feed.
+    v3NoteCommitment.mockRejectedValueOnce(new Error("bad hex: prover error"))
+    respondWith([honest(100n), honest(200n)])
+
+    await expect(scan()).resolves.toBe(1)
+    expect(await shieldedBalance(ACCOUNT)).toBe(200n)
+  })
+})
+
 describe("ordinary scanning", () => {
   it("stores a note that decrypts and verifies", async () => {
     respondWith([honest(4_200n)])

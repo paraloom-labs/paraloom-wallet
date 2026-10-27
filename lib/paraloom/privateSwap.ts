@@ -162,7 +162,7 @@ async function routeSwap(
           body: JSON.stringify({
             input_mint: inputMint,
             output_mint: outputMint,
-            amount: Number(amount),
+            amount: amount.toString(),
             user_public_key: freshPubkey
           })
         },

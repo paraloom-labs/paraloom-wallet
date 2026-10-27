@@ -64,6 +64,25 @@ export async function transfer(
   }
   const change = inputTotal - amount
 
+  const MAX_SAFE = BigInt(Number.MAX_SAFE_INTEGER)
+  for (const note of inputs) {
+    if (BigInt(note.amount) > MAX_SAFE) {
+      throw new Error(
+        `Input note amount (${note.amount}) exceeds JavaScript safe integer limit (${Number.MAX_SAFE_INTEGER}); precision loss in prover interface`
+      )
+    }
+  }
+  if (amount > MAX_SAFE) {
+    throw new Error(
+      `Transfer amount (${amount.toString()}) exceeds JavaScript safe integer limit (${Number.MAX_SAFE_INTEGER}); precision loss in prover interface`
+    )
+  }
+  if (change > MAX_SAFE) {
+    throw new Error(
+      `Change amount (${change.toString()}) exceeds JavaScript safe integer limit (${Number.MAX_SAFE_INTEGER}); precision loss in prover interface`
+    )
+  }
+
   // v2 (#293): an output binds the recipient's spend pubkey (so only they can
   // spend it) and is encrypted to their box pubkey (so only they can read it).
   const recipientSpendPub = addressSpendPubHex(recipientShieldedAddress)

@@ -126,7 +126,7 @@ export async function proveWithdrawalV2(input: WithdrawalProofInput): Promise<Wi
 
 // One spent input note + its Merkle path (mirrors core's `TransferInputV2`).
 export interface TransferProofInputNote {
-  amount: number // lamports (JSON number; serde u64)
+  amount: number | bigint // lamports (JSON number; serde u64)
   blinding_hex: string
   privkey_hex: string
   path_hex: string[]
@@ -136,7 +136,7 @@ export interface TransferProofInputNote {
 // One created output note (mirrors core's `TransferOutputV2`). `pubkey_hex` is
 // the recipient's spend public key, so only they can later spend the note.
 export interface TransferProofOutputNote {
-  amount: number
+  amount: number | bigint
   blinding_hex: string
   pubkey_hex: string
 }
@@ -155,13 +155,38 @@ export async function proveTransferV2(
   inputs: TransferProofInputNote[],
   outputs: TransferProofOutputNote[]
 ): Promise<TransferProof> {
+  const MAX_SAFE = BigInt(Number.MAX_SAFE_INTEGER)
+  const safeInputs = inputs.map((i) => {
+    const amt = BigInt(i.amount)
+    if (amt > MAX_SAFE) {
+      throw new Error(
+        `Transfer input note amount (${i.amount.toString()}) exceeds JavaScript safe integer limit (${Number.MAX_SAFE_INTEGER}); precision loss in prover interface`
+      )
+    }
+    return {
+      ...i,
+      amount: Number(amt)
+    }
+  })
+  const safeOutputs = outputs.map((o) => {
+    const amt = BigInt(o.amount)
+    if (amt > MAX_SAFE) {
+      throw new Error(
+        `Transfer output note amount (${o.amount.toString()}) exceeds JavaScript safe integer limit (${Number.MAX_SAFE_INTEGER}); precision loss in prover interface`
+      )
+    }
+    return {
+      ...o,
+      amount: Number(amt)
+    }
+  })
   const key = await ensureTransferReady()
   const json = prove_transfer_v2(
     key,
     root,
     assetIdHex,
-    JSON.stringify(inputs),
-    JSON.stringify(outputs)
+    JSON.stringify(safeInputs),
+    JSON.stringify(safeOutputs)
   )
   return JSON.parse(json) as TransferProof
 }
@@ -235,6 +260,21 @@ export async function proveTransact(
   inputs: [TransactProofInput, TransactProofInput],
   outputs: [TransactProofOutput, TransactProofOutput]
 ): Promise<string> {
+  const MAX_SAFE = BigInt(Number.MAX_SAFE_INTEGER)
+  for (const i of inputs) {
+    if (i.amount > MAX_SAFE) {
+      throw new Error(
+        `Transact input note amount (${i.amount.toString()}) exceeds JavaScript safe integer limit (${Number.MAX_SAFE_INTEGER}); precision loss in prover interface`
+      )
+    }
+  }
+  for (const o of outputs) {
+    if (o.amount > MAX_SAFE) {
+      throw new Error(
+        `Transact output note amount (${o.amount.toString()}) exceeds JavaScript safe integer limit (${Number.MAX_SAFE_INTEGER}); precision loss in prover interface`
+      )
+    }
+  }
   const pk = await ensureTransactReady()
   const inputsJson = JSON.stringify(
     inputs.map((i) => ({

@@ -32,6 +32,12 @@ export async function withdraw(
   spendPrivkeyHex: string
 ): Promise<WithdrawResult> {
   const amount = BigInt(note.amount)
+  const MAX_SAFE = BigInt(Number.MAX_SAFE_INTEGER)
+  if (amount > MAX_SAFE) {
+    throw new Error(
+      `Withdrawal amount (${amount.toString()}) exceeds JavaScript safe integer limit (${Number.MAX_SAFE_INTEGER}); precision loss in ingress payload`
+    )
+  }
 
   const commitment = await noteCommitmentV2(amount, spendPrivkeyHex, note.blinding, note.assetId)
 

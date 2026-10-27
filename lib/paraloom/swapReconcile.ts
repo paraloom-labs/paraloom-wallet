@@ -129,12 +129,12 @@ export async function reconcileSwapOutputs(
           // address has no gas SOL left to pay for it, and the token stays
           // recoverable at the address the wallet still holds the key for.
           const sigs = await connection.getSignaturesForAddress(freshPub, { limit: 1 })
-          const sig = sigs[0]?.signature
-          if (!sig) continue // cannot attest it landed → leave for manual dismiss
+          const sigInfo = sigs[0]
+          if (!sigInfo || sigInfo.err) continue // cannot attest it landed or transaction errored → leave for manual dismiss
           await saveSwapOutput({
             ...o,
-            outAmount: Number(tokenAmount),
-            swapSignature: sig
+            outAmount: tokenAmount.toString(),
+            swapSignature: sigInfo.signature
           })
           resolved++
         } catch (e) {

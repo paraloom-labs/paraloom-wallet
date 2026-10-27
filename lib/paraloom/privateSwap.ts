@@ -33,7 +33,7 @@ import { saveSwapOutput } from "./swapOutputs"
 import { depositV3, spendV3 } from "./transactFlow"
 
 import { WSOL_MINT, isNativeSolOutput } from "./swapReconcileClassify"
-export { WSOL_MINT, isNativeSolOutput }
+export { WSOL_MINT, isNativeSolOutput, routeSwap }
 
 /** Lamports left at the fresh address to cover the swap's own costs: the output
  *  token ATA rent (~0.00204), the fresh account's rent-exempt floor (~0.00089),
@@ -151,6 +151,12 @@ async function routeSwap(
   amount: bigint,
   inputMint = "SOL"
 ): Promise<{ out_amount: number; swap_transaction: string }> {
+  const num = Number(amount)
+  if (!Number.isSafeInteger(num)) {
+    throw new Error(
+      `Swap amount ${amount} exceeds JavaScript safe integer limit; must transmit as string or bounded value`
+    )
+  }
   let lastErr: unknown
   for (let attempt = 1; attempt <= ROUTE_RETRIES; attempt++) {
     try {
@@ -162,7 +168,7 @@ async function routeSwap(
           body: JSON.stringify({
             input_mint: inputMint,
             output_mint: outputMint,
-            amount: Number(amount),
+            amount: num,
             user_public_key: freshPubkey
           })
         },

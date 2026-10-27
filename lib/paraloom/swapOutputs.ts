@@ -11,7 +11,7 @@ export interface SwapOutput {
   /** Output mint (base58) or "SOL". */
   outputMint: string
   /** Output amount the route reported, in the out mint's base units. */
-  outAmount: number
+  outAmount: number | string
   /** The swap transaction signature. Empty until the swap leg completes; a
    *  non-empty value marks the swap done (used to find resumable strands). */
   swapSignature: string

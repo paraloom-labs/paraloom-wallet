@@ -946,7 +946,8 @@ export function Home({ onLock }: HomeProps) {
                         {g.items.map((e, i) => {
                           if (e.kind === "buy") {
                             const s = e.s
-                            const done = s.outAmount > 0 && !!s.swapSignature
+                            const outNum = Number(s.outAmount)
+                            const done = outNum > 0 && !!s.swapSignature
                             const isSolOut =
                               s.outputMint === "SOL" || s.outputMint === WSOL_MINT
                             const sym = isSolOut
@@ -966,7 +967,7 @@ export function Home({ onLock }: HomeProps) {
                                     kind: "buy",
                                     pending: !done,
                                     amount: done
-                                      ? `+${(s.outAmount / outDiv).toFixed(4)} ${sym}`
+                                      ? `+${(outNum / outDiv).toFixed(4)} ${sym}`
                                       : "",
                                     sym,
                                     address: s.freshAddress,
@@ -1001,7 +1002,7 @@ export function Home({ onLock }: HomeProps) {
                                     <span className="activity-title">Private buy</span>
                                     {done ? (
                                       <span className="activity-amount pos">
-                                        +{(s.outAmount / outDiv).toFixed(4)} {sym}
+                                        +{(outNum / outDiv).toFixed(4)} {sym}
                                       </span>
                                     ) : (
                                       <span className="activity-pill">Pending</span>

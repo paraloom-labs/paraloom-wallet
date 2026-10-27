@@ -784,7 +784,7 @@ export function Home({ onLock }: HomeProps) {
                   symbol: meta?.symbol ?? `${mint.slice(0, 4)}…`,
                   usdcMark: mint === USDC_MINT,
                   amount,
-                  decimals: meta?.decimals ?? 0,
+                  decimals: meta?.decimals ?? prices[mint]?.decimals ?? 0,
                   mint,
                   privacy: "shielded"
                 })

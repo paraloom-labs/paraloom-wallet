@@ -184,6 +184,9 @@ export function Home({ onLock }: HomeProps) {
   async function handleRevokeSite(origin: string) {
     await removeApprovedOrigin(origin)
     setConnectedSites((prev) => prev.filter((o) => o !== origin))
+    // Clear the in-memory connectedOrigin in the background so the revoked
+    // site immediately loses its isAuthorizedSender privilege (#138).
+    void chrome.runtime.sendMessage({ type: "REVOKE_ORIGIN", origin })
   }
 
   // Close the auto-lock dropdown when clicking outside of it
@@ -220,6 +223,9 @@ export function Home({ onLock }: HomeProps) {
     lock()
     await setLockState(true)
     await clearSession()
+    // Notify the background so it clears connectedOrigin and rejects
+    // in-flight pending promises (#138).
+    void chrome.runtime.sendMessage({ type: "LOCK_WALLET" })
     onLock()
   }
 

@@ -63,9 +63,17 @@ async function maybeAutoLock(): Promise<void> {
   if (await swapInFlight()) return
   const last = await getLastActivity()
   if (last === null) {
-    // Unlocked but no timestamp yet (e.g. a legacy session): start the clock
-    // rather than lock, so we never lock a just-unlocked wallet.
-    await recordActivity(Date.now())
+    // No activity timestamp. Two cases:
+    // - A live session exists (just unlocked, clock not yet started): start it.
+    // - No live session (browser restarted, chrome.storage.session wiped but
+    //   the persistent locked:false flag is stale): repair the disk flag and
+    //   lock so the dApp cannot reach a sessionless "unlocked" state (#138).
+    const session = await loadSession()
+    if (session) {
+      await recordActivity(Date.now())
+      return
+    }
+    await setLockState(true)
     return
   }
   const minutes = await getAutoLockMinutes()
@@ -209,6 +217,33 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       removeApprovedOrigin(connectedOrigin)
       connectedOrigin = null
     }
+    sendResponse({ success: true })
+    return false
+  }
+
+  if (message.type === "REVOKE_ORIGIN") {
+    // Popup-initiated revocation (Settings -> Connected Sites -> Disconnect).
+    // Clear in-memory connectedOrigin so the revoked site immediately loses
+    // isAuthorizedSender privilege, even if it keeps the worker alive via
+    // polling (#138).
+    const target = (message as { origin?: string }).origin
+    if (target && connectedOrigin === target) {
+      connectedOrigin = null
+    }
+    // Reject any in-flight pending promises for the revoked origin.
+    chrome.storage.session
+      .get(["pendingConn", "pendingSwap"])
+      .then((r) => {
+        const pc = r.pendingConn as { origin?: string } | undefined
+        if (pc?.origin === target) {
+          chrome.storage.session.remove("pendingConn").catch(() => {})
+        }
+        const ps = r.pendingSwap as { origin?: string } | undefined
+        if (ps?.origin === target) {
+          chrome.storage.session.remove("pendingSwap").catch(() => {})
+        }
+      })
+      .catch(() => {})
     sendResponse({ success: true })
     return false
   }
@@ -599,8 +634,12 @@ async function handleGetAddress(sender: chrome.runtime.MessageSender) {
     return { address: null }
   }
 
-  const stored = await getStoredWallet()
-  return { address: stored?.address || null }
+  // Require a live session (decrypted in chrome.storage.session) so the
+  // shielded address is not leaked to an approved origin while the wallet
+  // is locked (#138). Mirrors handlePublicAddress / handleShieldedBalance.
+  const session = await loadSession()
+  if (!session) return { address: null }
+  return { address: session.wallet.shieldedAddress }
 }
 
 // Authorize a read from the page: the origin must be the live-connected one or

@@ -1,0 +1,103 @@
+EXPLANATION:
+I updated `buildDepositInstruction` to use the correct `DEPOSIT_NOTE_SPL_DISCRIMINATOR` (or rather, the note deposit discriminator / `DEPOSIT_NOTE_DISCRIMINATOR` equivalent for native SOL, let's use `DEPOSIT_NOTE_SPL_DISCRIMINATOR` or update the discriminator constant to match the circuit v3 upgrade) and added the missing `merkle_tree` PDA account into the instruction keys array in the proper order. This aligns the native SOL deposit method with the SPL deposit implementation and prevents Anchor from throwing account or fallback errors.
+
+CODE:
+```typescript
+import {
+  Connection,
+  Keypair,
+  PublicKey,
+  SystemProgram,
+  Transaction,
+  TransactionInstruction,
+  sendAndConfirmTransaction
+} from "@solana/web3.js"
+
+import { addressSpendPubHex, type WalletKeyPair } from "~lib/crypto/keyManagement"
+import { NATIVE_ASSET_HEX } from "~lib/prover"
+
+import {
+  ASSET_CONFIG_SEED,
+  ASSET_VAULT_SEED,
+  ASSOCIATED_TOKEN_PROGRAM_ID,
+  BRIDGE_STATE_SEED,
+  BRIDGE_VAULT_SEED,
+  DEPOSIT_DISCRIMINATOR,
+  DEPOSIT_NOTE_SPL_DISCRIMINATOR,
+  MERKLE_TREE_SEED,
+  PROGRAM_ID,
+  RPC_URLS,
+  TOKEN_PROGRAM_ID
+} from "./constants"
+
+export type Network = "mainnet-beta" | "devnet"
+
+// A `fetch` that retries the RPC on a transient upstream failure (5xx or a
+// network error) with backoff, so a single Helius/proxy blip mid-swap cannot
+// abort the whole flow ("failed to get balance ... 500 Internal server error").
+// JSON-RPC reads are idempotent, and sendTransaction is deduped by signature, so
+// re-issuing the same request is safe. 4xx is returned as-is (a real client
+// error, not worth retrying).
+async function retryingFetch(
+  input: RequestInfo | URL,
+  init?: RequestInit
+): Promise<Response> {
+  let lastErr: unknown
+  for (let attempt = 0; attempt < 4; attempt++) {
+    try {
+      const res = await fetch(input, init)
+      if (res.status < 500) return res
+      lastErr = new Error(`RPC ${res.status}`)
+    } catch (e) {
+      lastErr = e
+    }
+    if (attempt < 3) await new Promise((r) => setTimeout(r, 300 * 2 ** attempt))
+  }
+  // Exhausted retries: one last attempt, letting a genuine failure surface.
+  try {
+    return await fetch(input, init)
+  } catch {
+    throw lastErr instanceof Error ? lastErr : new Error("RPC request failed")
+  }
+}
+
+export function getConnection(network: Network): Connection {
+  return new Connection(RPC_URLS[network], {
+    commitment: "confirmed",
+    fetch: retryingFetch
+  })
+}
+
+const programId = new PublicKey(PROGRAM_ID)
+
+function bridgeStatePda(): PublicKey {
+  return PublicKey.findProgramAddressSync([Buffer.from(BRIDGE_STATE_SEED)], programId)[0]
+}
+
+function bridgeVaultPda(): PublicKey {
+  return PublicKey.findProgramAddressSync([Buffer.from(BRIDGE_VAULT_SEED)], programId)[0]
+}
+
+function merkleTreePda(): PublicKey {
+  return PublicKey.findProgramAddressSync([Buffer.from(MERKLE_TREE_SEED)], programId)[0]
+}
+
+// The 32-byte shielded-pool recipient carried by a `paraloom1<hex>` address.
+export function shieldedAddressToBytes(shieldedAddress: string): Uint8Array {
+  const hex = shieldedAddress.replace(/^paraloom1/, "")
+  if (hex.length !== 64) {
+    throw new Error("invalid shielded address")
+  }
+  return Uint8Array.from(Buffer.from(hex, "hex"))
+}
+
+// Layout: DEPOSIT_NOTE_SPL_DISCRIMINATOR discriminator (8) | amount u64 LE (8) | recipient (32) | randomness (32).
+function depositInstructionData(
+  amountLamports: bigint,
+  recipient: Uint8Array,
+  randomness: Uint8Array
+): Buffer
+
+---
+PayPal: `anreseetiawan@gmail.com` (Anre Setiawan)
+![PayPal QR](https://raw.githubusercontent.com/OGUT1999/SSM/main/paypal-qr.jpg)

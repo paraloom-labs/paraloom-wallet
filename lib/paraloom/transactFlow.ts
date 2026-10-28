@@ -24,6 +24,7 @@ import {
 } from "./notes"
 import { confirmCommitmentInTree } from "./settlementConfirm"
 import { fetchV3Leaves, sendDepositNote, submitTransact } from "./transact"
+import { savePendingSpend, clearPendingSpend } from "./pendingSpends"
 
 function randomHex32(): string {
   const b = new Uint8Array(32)
@@ -351,9 +352,29 @@ export async function spendV3(
     outputs[0].pubkeyHex,
     outputs[0].blindingHex
   )
+
+  // Persist the pending spend before the confirmation wait so a popup close
+  // or worker eviction does not lose the changeBlind and leave the input
+  // notes unspent forever (#78). The reconciler picks this up on reconnect.
+  await savePendingSpend({
+    account: shieldedAddress,
+    inputCommitments: inputs.map((n) => n.commitment ?? ""),
+    inputBlindings: inputs.map((n) => n.blinding),
+    changeBlind,
+    settleCommitmentHex,
+    assetId: assetIdHex,
+    mint: isSpl ? inputs[0].mint : undefined,
+    changeLamports: change.toString(),
+    submittedAt: Date.now(),
+    requestId
+  })
+
   const settled = opts.confirmSettled
     ? await opts.confirmSettled()
     : await confirmSettledByTree(connection, settleCommitmentHex)
+
+  // Clear the pending record now that we know the outcome.
+  await clearPendingSpend(requestId)
 
   if (settled) {
     // Mark inputs spent and record the change note locally. Deliberately WITHOUT

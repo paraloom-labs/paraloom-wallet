@@ -250,9 +250,19 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   }
 
   if (message.type === "REJECT_CONNECTION") {
-    void chrome.storage.session.remove("pendingConn").catch(() => {})
     if (pendingConnection && pendingConnection.id === message.id) {
       pendingConnection.resolve(false)
+      void chrome.storage.session.remove("pendingConn").catch(() => {})
+    } else {
+      chrome.storage.session
+        .get("pendingConn")
+        .then((r) => {
+          const pc = r.pendingConn as { id: number; origin: string } | undefined
+          if (pc && pc.id === message.id) {
+            void chrome.storage.session.remove("pendingConn").catch(() => {})
+          }
+        })
+        .catch(() => {})
     }
     sendResponse({ success: true })
     return false
@@ -494,6 +504,12 @@ async function handleConnect(sender: chrome.runtime.MessageSender) {
 // Register a pending connection request and resolve once the user approves or
 // rejects it in the popup (or the timeout elapses → treated as a rejection).
 function requestApproval(origin: string, timeoutMs: number): Promise<boolean> {
+  // If an earlier unapproved connection request was pending, supersede it cleanly
+  // so its promise settles, clearing its withKeepAlive keep-alive interval.
+  if (pendingConnection) {
+    pendingConnection.resolve(false)
+  }
+
   return new Promise((resolve) => {
     const id = ++connectionIdCounter
     const clearPersisted = () =>

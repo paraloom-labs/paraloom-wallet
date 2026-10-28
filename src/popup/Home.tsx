@@ -310,11 +310,6 @@ export function Home({ onLock }: HomeProps) {
     // fresh address). Runs directly in the popup — no service-worker relay — so
     // it always fires when the wallet is opened, and the reads below then reflect
     // the recovered shielded balance.
-    try {
-      await recoverReshields(getConnection(network), wallet.shieldedAddress)
-    } catch {
-      // best-effort — the reads below still show whatever is already local
-    }
     // Resolve stranded swap rows so Activity stops showing settled swaps as
     // "Pending" forever. Private swaps are mainnet-only, so this always runs
     // against the mainnet archival RPC regardless of the selected network. It
@@ -330,6 +325,14 @@ export function Home({ onLock }: HomeProps) {
       }
     } catch {
       // best-effort
+    }
+    // Re-shield recovery: sweep any tokens / SOL sitting at stranded fresh addresses
+    // back into the shielded pool. Runs after reconcileSwapOutputs so newly
+    // resolved swaps can be recovered on the same open.
+    try {
+      await recoverReshields(getConnection("mainnet-beta"), wallet.shieldedAddress)
+    } catch {
+      // best-effort — the reads below still show whatever is already local
     }
     try {
       setShieldedLamports(await shieldedBalance(wallet.shieldedAddress))

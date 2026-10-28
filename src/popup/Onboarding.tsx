@@ -156,7 +156,17 @@ export function Onboarding({ onComplete }: OnboardingProps) {
       unlock(keypair, seed)
       setSeedPhraseStore(seed)
       addAccount(initialAccount)
+      await saveSession({
+        wallet: keypair,
+        currentAccountIndex: 0,
+        accounts: [initialAccount]
+      })
       await setLockState(false)
+      try {
+        chrome.runtime.sendMessage({ type: "ACTIVITY" })
+      } catch {
+        // best effort
+      }
 
       await new Promise(resolve => setTimeout(resolve, 100))
       onComplete()

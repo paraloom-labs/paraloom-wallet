@@ -569,6 +569,12 @@ export function Home({ onLock }: HomeProps) {
       await updateAccounts(updatedAccounts)
 
       switchAccount(newIndex)
+      await setActiveAccountAddress(keypair.shieldedAddress)
+      await saveSession({
+        wallet: keypair,
+        currentAccountIndex: newIndex,
+        accounts: updatedAccounts
+      })
 
       setShowAddAccount(false)
       setAddAccountMethod(null)
@@ -719,9 +725,15 @@ export function Home({ onLock }: HomeProps) {
                 <div
                   key={account.index}
                   className={`account-item ${account.index === currentAccountIndex ? 'active' : ''}`}
-                  onClick={() => {
+                  onClick={async () => {
                     if (account.index !== currentAccountIndex) {
                       switchAccount(account.index)
+                      await setActiveAccountAddress(account.keypair.shieldedAddress)
+                      await saveSession({
+                        wallet: account.keypair,
+                        currentAccountIndex: account.index,
+                        accounts
+                      })
                     }
                     setShowAccountSwitcher(false)
                   }}

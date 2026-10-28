@@ -87,13 +87,24 @@ export function Unlock({ onUnlock }: UnlockProps) {
       await setLockState(false)
       setAttempts(0)
 
-      // Persist the decrypted session in memory-only storage so reopening the
-      // popup doesn't force a re-unlock (the idle auto-lock timer still applies).
+      // Restore active account matching stored.address if switched previously
       const st = useWalletStore.getState()
+      const stored = await getStoredWallet()
+      let activeIndex = st.currentAccountIndex
+      let activeWallet = wallet
+      if (stored?.address && st.accounts.length > 0) {
+        const found = st.accounts.find((a) => a.keypair.shieldedAddress === stored.address)
+        if (found) {
+          activeIndex = found.index
+          activeWallet = found.keypair
+          useWalletStore.getState().switchAccount(activeIndex)
+        }
+      }
+
       await saveSession({
-        wallet,
+        wallet: activeWallet,
         accounts: st.accounts,
-        currentAccountIndex: st.currentAccountIndex,
+        currentAccountIndex: activeIndex,
         seedPhrase: seedPhrase ?? st.seedPhrase
       })
 

@@ -91,6 +91,13 @@ export async function migrateWalletToScrypt(
   await chrome.storage.local.set({ [STORAGE_KEY]: storage })
 }
 
+export async function setActiveAccountAddress(address: string): Promise<void> {
+  const stored = await getStoredWallet()
+  if (!stored) return
+  stored.address = address
+  await chrome.storage.local.set({ [STORAGE_KEYS.STORED_WALLET]: stored })
+}
+
 export async function getStoredWallet(): Promise<StoredWallet | null> {
   const result = await chrome.storage.local.get(STORAGE_KEY)
   const storage = result[STORAGE_KEY] as WalletStorage | undefined

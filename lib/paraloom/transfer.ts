@@ -22,6 +22,19 @@ interface MerklePathResponse {
   indices: boolean[]
 }
 
+/// Reject bigint values that would lose precision through the JSON number
+/// path (serde u64) used by the WASM prover. A silent truncation here
+/// corrupts the proof input and strands the output notes (#118).
+function safeNumber(big: bigint): number {
+  if (big > BigInt(Number.MAX_SAFE_INTEGER) || big < -BigInt(Number.MAX_SAFE_INTEGER)) {
+    throw new Error(
+      `amount ${big.toString()} exceeds Number.MAX_SAFE_INTEGER (${Number.MAX_SAFE_INTEGER}); ` +
+      `transfer would lose precision — split into smaller transfers`
+    )
+  }
+  return Number(big)
+}
+
 export interface TransferResult {
   requestId: string
   changeCommitment: string
@@ -85,7 +98,7 @@ export async function transfer(
     const pathRes = await fetchPath(commitment)
     root = pathRes.root
     proofInputs.push({
-      amount: Number(note.amount),
+        amount: safeNumber(BigInt(note.amount)),
       blinding_hex: note.blinding,
       privkey_hex: spendPrivkeyHex,
       path_hex: pathRes.path,
@@ -97,8 +110,8 @@ export async function transfer(
   const outBlind0 = randomHex32()
   const outBlind1 = randomHex32()
   const outputs = [
-    { amount: Number(amount), blinding_hex: outBlind0, pubkey_hex: recipientSpendPub },
-    { amount: Number(change), blinding_hex: outBlind1, pubkey_hex: ownSpendPub }
+    { amount: safeNumber(amount), blinding_hex: outBlind0, pubkey_hex: recipientSpendPub },
+    { amount: safeNumber(change), blinding_hex: outBlind1, pubkey_hex: ownSpendPub }
   ]
 
   const { nullifiers, output_commitments, proof } = await proveTransferV2(

@@ -2,9 +2,12 @@ import {
   addDiscoveredNote,
   addNote,
   getNotes,
+  isNativeSolNote,
   markNoteSpentByIdentity,
+  selectSolTransferNotes,
   shieldedBalance,
   shieldedTokenBalances,
+  unspentNativeSolNotes,
   type ShieldedNote
 } from "~lib/paraloom/notes"
 import { beforeEach, describe, expect, it } from "vitest"
@@ -198,5 +201,51 @@ describe("note storage", () => {
     await addNote(ACCOUNT, deposit({ signature: "s1" }))
     await addNote(ACCOUNT, deposit({ signature: "s2", spent: true }))
     expect(await shieldedBalance(ACCOUNT)).toBe(1000n)
+  })
+})
+
+describe("selectSolTransferNotes & unspentNativeSolNotes", () => {
+  const USDC = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"
+  const USDC_ASSET = "dd".repeat(32)
+
+  it("excludes unspent SPL token notes even when their raw amount is larger than SOL notes", () => {
+    const solNote = deposit({ signature: "sol-1", amount: "1000000000" }) // 1 SOL
+    const usdcNote = deposit({
+      signature: "usdc-1",
+      amount: "5000000000", // 5,000 USDC raw units > 1e9 lamports
+      mint: USDC,
+      assetId: USDC_ASSET
+    })
+
+    const selected = selectSolTransferNotes([solNote, usdcNote], 500_000_000n)
+    expect(selected).not.toBeNull()
+    expect(selected).toHaveLength(1)
+    expect(selected![0].signature).toBe("sol-1")
+    expect(isNativeSolNote(usdcNote)).toBe(false)
+  })
+
+  it("allows single-note Circuit v3 transfers without requiring a second unspent note", () => {
+    const singleSol = deposit({ signature: "sol-only", amount: "2000000000" })
+    expect(unspentNativeSolNotes([singleSol])).toHaveLength(1)
+    const selected = selectSolTransferNotes([singleSol], 1_500_000_000n)
+    expect(selected).toEqual([singleSol])
+  })
+
+  it("returns null when only SPL notes cover the requested amount", () => {
+    const smallSol = deposit({ signature: "sol-small", amount: "100000000" })
+    const largeUsdc = deposit({
+      signature: "usdc-big",
+      amount: "9000000000",
+      mint: USDC,
+      assetId: USDC_ASSET
+    })
+    expect(selectSolTransferNotes([smallSol, largeUsdc], 500_000_000n)).toBeNull()
+  })
+
+  it("sorts notes above Number.MAX_SAFE_INTEGER without IEEE-754 precision loss", () => {
+    const n1 = deposit({ signature: "s1", amount: "9007199254740993" }) // 2^53 + 1
+    const n2 = deposit({ signature: "s2", amount: "9007199254740992" }) // 2^53
+    const sorted = unspentNativeSolNotes([n2, n1])
+    expect(sorted.map((n) => n.signature)).toEqual(["s1", "s2"])
   })
 })

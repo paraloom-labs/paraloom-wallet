@@ -154,3 +154,42 @@ export async function shieldedTokenBalances(
   }
   return byMint
 }
+
+const NATIVE_SOL_ASSET_HEX = "00".repeat(32)
+
+// True iff the note is a native SOL note (no SPL mint and either no assetId or
+// the all-zero native assetId). Prevents SPL token notes from being mixed into
+// native SOL transfer/withdraw input selection (#779).
+export function isNativeSolNote(note: ShieldedNote): boolean {
+  return !note.mint && (!note.assetId || note.assetId === NATIVE_SOL_ASSET_HEX)
+}
+
+// Unspent native SOL notes with positive value, sorted largest first using
+// exact BigInt comparison (avoids IEEE-754 Number() truncation above 2^53 - 1).
+export function unspentNativeSolNotes(all: ShieldedNote[]): ShieldedNote[] {
+  return all
+    .filter((n) => !n.spent && isNativeSolNote(n) && BigInt(n.amount) > 0n)
+    .sort((a, b) => {
+      const d = BigInt(b.amount) - BigInt(a.amount)
+      return d > 0n ? 1 : d < 0n ? -1 : 0
+    })
+}
+
+// Select 1 or 2 unspent native SOL notes covering `amountLamports` for Circuit
+// v3 shielded transfers. Returns null if the available top 2 native SOL notes
+// cannot cover `amountLamports`.
+export function selectSolTransferNotes(
+  all: ShieldedNote[],
+  amountLamports: bigint
+): ShieldedNote[] | null {
+  if (amountLamports <= 0n) return null
+  const unspent = unspentNativeSolNotes(all)
+  const inputs: ShieldedNote[] = []
+  let covered = 0n
+  for (const n of unspent) {
+    if (covered >= amountLamports || inputs.length === 2) break
+    inputs.push(n)
+    covered += BigInt(n.amount)
+  }
+  return covered >= amountLamports ? inputs : null
+}

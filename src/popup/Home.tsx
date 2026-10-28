@@ -8,7 +8,7 @@ import { deriveKeypairFromSeed, decryptWallet, decryptSeedPhrase, deriveBoxKeypa
 import { getStoredWallet } from "~lib/storage/secure"
 import type { Account } from "~lib/store/walletStore"
 import { getConnection, deposit, getSolBalance, solanaAddress, solanaAddressToBytes } from "~lib/paraloom/bridge"
-import { addNote, getNotes, markNoteSpent, shieldedBalance, shieldedTokenBalances, type ShieldedNote } from "~lib/paraloom/notes"
+import { addNote, getNotes, isNativeSolNote, markNoteSpent, selectSolTransferNotes, shieldedBalance, shieldedTokenBalances, unspentNativeSolNotes, type ShieldedNote } from "~lib/paraloom/notes"
 
 // Known shielded SPL tokens for display; unknown mints fall back to a truncated
 // mint and raw base units.
@@ -53,7 +53,7 @@ function spendableSolNotes(all: ShieldedNote[]): ShieldedNote[] {
     .filter(
       (n) =>
         !n.spent &&
-        (!n.assetId || n.assetId === NATIVE_ASSET_HEX) &&
+        isNativeSolNote(n) &&
         BigInt(n.amount) >= WITHDRAW_DUST_LAMPORTS
     )
     .sort((a, b) => {
@@ -494,19 +494,11 @@ export function Home({ onLock }: HomeProps) {
     }
     const amount = BigInt(Math.round(sol * 1e9))
 
-    // Circuit v3 (#350): spend 1 or 2 notes; change comes back as a new note
-    // (audit #16), so partial amounts work from a single note.
-    const unspent = notes
-      .filter((n) => !n.spent)
-      .sort((a, b) => Number(BigInt(b.amount) - BigInt(a.amount)))
-    const inputs: ShieldedNote[] = []
-    let covered = 0n
-    for (const n of unspent) {
-      if (covered >= amount || inputs.length === 2) break
-      inputs.push(n)
-      covered += BigInt(n.amount)
-    }
-    if (covered < amount) {
+    // Circuit v3 (#350): spend 1 or 2 native SOL notes; change comes back as a
+    // new note (audit #16), so partial amounts work from a single note. Exclude
+    // shielded SPL notes (#779) so they are never mixed into a SOL transfer.
+    const inputs = selectSolTransferNotes(notes, amount)
+    if (!inputs) {
       showToast("Your notes don't cover that amount", "error")
       return
     }
@@ -1819,21 +1811,21 @@ export function Home({ onLock }: HomeProps) {
                   onChange={(e) => setTransferAmount(e.target.value)}
                 />
                 <div className="balance-info">
-                  Spends your 2 largest notes; the remainder returns as change. Shielded total:{" "}
+                  Spends 1 or 2 of your largest SOL notes; the remainder returns as change. Shielded total:{" "}
                   {(Number(shieldedLamports) / 1e9).toFixed(4)} SOL across{" "}
-                  {notes.filter((n) => !n.spent).length} note(s)
+                  {unspentNativeSolNotes(notes).length} note(s)
                 </div>
               </div>
 
               <button
                 className="button send-button"
-                disabled={transferring || !transferAddress.trim() || !transferAmount.trim() || notes.filter((n) => !n.spent).length < 2}
+                disabled={transferring || !transferAddress.trim() || !transferAmount.trim() || unspentNativeSolNotes(notes).length < 1}
                 onClick={handleTransfer}
               >
                 {transferring ? "Proving & sending…" : "Send shielded transfer"}
               </button>
-              {notes.filter((n) => !n.spent).length < 2 && (
-                <div className="balance-info">Needs at least 2 unspent notes (deposit again to split).</div>
+              {unspentNativeSolNotes(notes).length < 1 && (
+                <div className="balance-info">Needs at least 1 unspent SOL note to transfer.</div>
               )}
             </div>
           </div>

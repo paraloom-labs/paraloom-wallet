@@ -154,3 +154,19 @@ export async function shieldedTokenBalances(
   }
   return byMint
 }
+
+// Unspent native SOL notes sorted largest first. Excludes SPL token notes (#153).
+export function unspentNativeSolNotes(notes: ShieldedNote[]): ShieldedNote[] {
+  return notes
+    .filter(
+      (n) =>
+        !n.spent &&
+        !n.mint &&
+        (!n.assetId || n.assetId === "00".repeat(32)) &&
+        BigInt(n.amount) > 0n
+    )
+    .sort((a, b) => {
+      const d = BigInt(b.amount) - BigInt(a.amount)
+      return d > 0n ? 1 : d < 0n ? -1 : 0
+    })
+}

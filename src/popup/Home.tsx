@@ -8,7 +8,7 @@ import { deriveKeypairFromSeed, decryptWallet, decryptSeedPhrase, deriveBoxKeypa
 import { getStoredWallet } from "~lib/storage/secure"
 import type { Account } from "~lib/store/walletStore"
 import { getConnection, deposit, getSolBalance, solanaAddress, solanaAddressToBytes } from "~lib/paraloom/bridge"
-import { addNote, getNotes, markNoteSpent, shieldedBalance, shieldedTokenBalances, type ShieldedNote } from "~lib/paraloom/notes"
+import { addNote, getNotes, markNoteSpent, shieldedBalance, shieldedTokenBalances, unspentNativeSolNotes, type ShieldedNote } from "~lib/paraloom/notes"
 
 // Known shielded SPL tokens for display; unknown mints fall back to a truncated
 // mint and raw base units.
@@ -496,9 +496,7 @@ export function Home({ onLock }: HomeProps) {
 
     // Circuit v3 (#350): spend 1 or 2 notes; change comes back as a new note
     // (audit #16), so partial amounts work from a single note.
-    const unspent = notes
-      .filter((n) => !n.spent)
-      .sort((a, b) => Number(BigInt(b.amount) - BigInt(a.amount)))
+    const unspent = unspentNativeSolNotes(notes)
     const inputs: ShieldedNote[] = []
     let covered = 0n
     for (const n of unspent) {
@@ -1821,19 +1819,19 @@ export function Home({ onLock }: HomeProps) {
                 <div className="balance-info">
                   Spends your 2 largest notes; the remainder returns as change. Shielded total:{" "}
                   {(Number(shieldedLamports) / 1e9).toFixed(4)} SOL across{" "}
-                  {notes.filter((n) => !n.spent).length} note(s)
+                  {unspentNativeSolNotes(notes).length} note(s)
                 </div>
               </div>
 
               <button
                 className="button send-button"
-                disabled={transferring || !transferAddress.trim() || !transferAmount.trim() || notes.filter((n) => !n.spent).length < 2}
+                disabled={transferring || !transferAddress.trim() || !transferAmount.trim() || unspentNativeSolNotes(notes).length < 1}
                 onClick={handleTransfer}
               >
                 {transferring ? "Proving & sending…" : "Send shielded transfer"}
               </button>
-              {notes.filter((n) => !n.spent).length < 2 && (
-                <div className="balance-info">Needs at least 2 unspent notes (deposit again to split).</div>
+              {unspentNativeSolNotes(notes).length < 1 && (
+                <div className="balance-info">Needs at least 1 unspent note to transfer.</div>
               )}
             </div>
           </div>

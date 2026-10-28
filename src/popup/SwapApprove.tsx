@@ -106,7 +106,7 @@ export function SwapApprove({ id, origin, params, onResolved }: SwapApproveProps
         {params.reshield
           ? "The result is re-shielded back into your Paraloom balance."
           : "The result stays at that address (it is not re-shielded)."}{" "}
-        Only approve swaps you started.
+        Max slippage: {((params.slippageBps ?? 100) / 100).toFixed(2)}%. Only approve swaps you started.
       </p>
       <div className="connect-actions">
         <button className="button button-secondary" onClick={() => decide(false)}>

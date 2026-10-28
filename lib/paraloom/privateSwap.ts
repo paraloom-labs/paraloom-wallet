@@ -149,7 +149,8 @@ async function routeSwap(
   freshPubkey: string,
   outputMint: string,
   amount: bigint,
-  inputMint = "SOL"
+  inputMint = "SOL",
+  slippageBps?: number
 ): Promise<{ out_amount: number; swap_transaction: string }> {
   let lastErr: unknown
   for (let attempt = 1; attempt <= ROUTE_RETRIES; attempt++) {
@@ -163,7 +164,8 @@ async function routeSwap(
             input_mint: inputMint,
             output_mint: outputMint,
             amount: Number(amount),
-            user_public_key: freshPubkey
+            user_public_key: freshPubkey,
+            slippage_bps: slippageBps ?? 100
           })
         },
         ROUTE_TIMEOUT_MS
@@ -194,12 +196,15 @@ async function executeSwapLeg(
   connection: Connection,
   fresh: Keypair,
   outputMint: string,
-  swapLamports: bigint
+  swapLamports: bigint,
+  slippageBps?: number
 ): Promise<{ swapSignature: string; outAmount: number }> {
   const { out_amount, swap_transaction } = await routeSwap(
     fresh.publicKey.toBase58(),
     outputMint,
-    swapLamports
+    swapLamports,
+    "SOL",
+    slippageBps
   )
   const tx = VersionedTransaction.deserialize(
     Uint8Array.from(Buffer.from(swap_transaction, "base64"))
@@ -368,7 +373,9 @@ export async function privateSwap(
   const { out_amount, swap_transaction } = await routeSwap(
     fresh.publicKey.toBase58(),
     params.outputMint,
-    swapLamports
+    swapLamports,
+    "SOL",
+    params.slippageBps
   )
 
   // 6. Sign the swap with the fresh key locally and submit it.
@@ -581,7 +588,8 @@ export async function privateSwapFromToken(
     fresh.publicKey.toBase58(),
     params.outputMint,
     tokenLanded,
-    params.inputMint
+    params.inputMint,
+    params.slippageBps
   )
   const tx = VersionedTransaction.deserialize(
     Uint8Array.from(Buffer.from(swap_transaction, "base64"))

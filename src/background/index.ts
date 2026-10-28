@@ -213,6 +213,18 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     return false
   }
 
+  if (message.type === "REMOVE_WALLET") {
+    // Popup-initiated wallet removal: clear all in-memory state so a
+    // subsequently created wallet does not inherit the old wallet's
+    // connected origin, pending approvals, or swap jobs (#76).
+    connectedOrigin = null
+    chrome.storage.session
+      .remove(["pendingConn", "swapJob"])
+      .catch(() => {})
+    sendResponse({ success: true })
+    return false
+  }
+
   // ── Connection-approval messages (from the popup) ──
 
   if (message.type === "GET_PENDING_CONNECTION") {

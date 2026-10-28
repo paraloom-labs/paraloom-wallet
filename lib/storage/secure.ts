@@ -98,7 +98,23 @@ export async function getStoredWallet(): Promise<StoredWallet | null> {
 }
 
 export async function clearWallet(): Promise<void> {
-  await chrome.storage.local.remove(STORAGE_KEY)
+  // Remove all wallet-owned data so a new wallet on the same profile
+  // cannot inherit the deleted wallet's swap keys, approved origins,
+  // or shielded notes (#76).
+  await chrome.storage.local.remove([
+    STORAGE_KEY,
+    "paraloom_swap_outputs",
+    "paraloom_connections",
+    "paraloom_notes"
+  ])
+  // Clear ephemeral session state (memory-only, wiped on browser exit but
+  // live during the current session).
+  await chrome.storage.session.remove([
+    "paraloom_session",
+    "paraloom_last_activity",
+    "pendingConn",
+    "swapJob"
+  ])
 }
 
 export async function isWalletLocked(): Promise<boolean> {

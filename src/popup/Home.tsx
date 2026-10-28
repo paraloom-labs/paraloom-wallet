@@ -629,6 +629,10 @@ export function Home({ onLock }: HomeProps) {
     await clearWallet()
     await clearSession()
     clear()
+    // Clear in-memory state in the background service worker so a new
+    // wallet on the same profile does not inherit the old wallet's
+    // connected origin, pending approvals, or swap jobs (#76).
+    void chrome.runtime.sendMessage({ type: "REMOVE_WALLET" })
     onLock()
   }
 

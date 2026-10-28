@@ -22,6 +22,19 @@ import transactKeyUrl from "url:./transact_v3_proving.key"
 // Native-SOL asset id (#235): all-zero 32 bytes, hex. SPL assets use the mint.
 export const NATIVE_ASSET_HEX = "00".repeat(32)
 
+/// Reject bigint values that would lose precision through the JSON number
+/// path (serde u64) used by the WASM prover. Silent truncation corrupts
+/// proof inputs and strands output notes (#84, #118, #121).
+function safeNumber(big: bigint): number {
+  if (big > BigInt(Number.MAX_SAFE_INTEGER) || big < -BigInt(Number.MAX_SAFE_INTEGER)) {
+    throw new Error(
+      `amount ${big.toString()} exceeds Number.MAX_SAFE_INTEGER; ` +
+      `split into smaller operations to avoid IEEE-754 precision loss`
+    )
+  }
+  return Number(big)
+}
+
 // The shielded-asset id for an SPL `mint` (#779): Poseidon(2) over the mint's
 // two 16-byte halves, matching the on-chain `merkle_tree::mint_to_asset`. Use
 // this as the `assetId` for a shielded SPL note or transact. `mintHex` is the
@@ -238,7 +251,7 @@ export async function proveTransact(
   const pk = await ensureTransactReady()
   const inputsJson = JSON.stringify(
     inputs.map((i) => ({
-      amount: Number(i.amount),
+      amount: safeNumber(i.amount),
       privkey_hex: i.privkeyHex,
       blinding_hex: i.blindingHex,
       leaf_index: i.leafIndex,
@@ -247,7 +260,7 @@ export async function proveTransact(
   )
   const outputsJson = JSON.stringify(
     outputs.map((o) => ({
-      amount: Number(o.amount),
+      amount: safeNumber(o.amount),
       pubkey_hex: o.pubkeyHex,
       blinding_hex: o.blindingHex
     }))

@@ -2,6 +2,8 @@ import {
   addDiscoveredNote,
   addNote,
   getNotes,
+  markNoteSpent,
+  markNoteSpentByCommitment,
   markNoteSpentByIdentity,
   shieldedBalance,
   shieldedTokenBalances,
@@ -198,5 +200,32 @@ describe("note storage", () => {
     await addNote(ACCOUNT, deposit({ signature: "s1" }))
     await addNote(ACCOUNT, deposit({ signature: "s2", spent: true }))
     expect(await shieldedBalance(ACCOUNT)).toBe(1000n)
+  })
+})
+
+
+describe("empty identity guards in markNoteSpent and markNoteSpentByCommitment", () => {
+  it("does not mark received notes spent when markNoteSpent is called with an empty signature", async () => {
+    const r1 = received("c1".repeat(32))
+    const r2 = received("c2".repeat(32))
+    await addDiscoveredNote(ACCOUNT, r1)
+    await addDiscoveredNote(ACCOUNT, r2)
+
+    await markNoteSpent(ACCOUNT, "")
+    await markNoteSpent(ACCOUNT, "   ")
+
+    const notes = await getNotes(ACCOUNT)
+    expect(notes.every((n) => !n.spent)).toBe(true)
+  })
+
+  it("does not mark notes spent when markNoteSpentByCommitment is called with an empty commitment", async () => {
+    const d1 = deposit({ signature: "d1" })
+    await addNote(ACCOUNT, d1)
+
+    await markNoteSpentByCommitment(ACCOUNT, "")
+    await markNoteSpentByCommitment(ACCOUNT, "   ")
+
+    const notes = await getNotes(ACCOUNT)
+    expect(notes.find((n) => n.signature === "d1")?.spent).toBe(false)
   })
 })

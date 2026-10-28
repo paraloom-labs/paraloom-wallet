@@ -63,7 +63,12 @@ export async function addNote(account: string, note: ShieldedNote): Promise<void
 
 // Mark the note with this deposit signature as spent (after a withdrawal
 // settles), so it no longer counts toward the shielded balance.
+// Guard: empty signatures must never match, or received transfer notes (which carry
+// signature: "") would all be wiped as spent.
 export async function markNoteSpent(account: string, signature: string): Promise<void> {
+  if (!signature || !signature.trim()) {
+    return
+  }
   const all = await readAll()
   const notes = all[account] ?? []
   all[account] = notes.map((n) => (n.signature === signature ? { ...n, spent: true } : n))
@@ -106,7 +111,11 @@ export async function setNoteLeafIndex(
 
 // Mark a note spent by its commitment (used for transfer inputs/outputs, which
 // are identified by commitment rather than a deposit signature).
+// Guard: empty commitment must never match, or notes without commitment would all be marked spent.
 export async function markNoteSpentByCommitment(account: string, commitment: string): Promise<void> {
+  if (!commitment || !commitment.trim()) {
+    return
+  }
   const all = await readAll()
   const notes = all[account] ?? []
   all[account] = notes.map((n) => (n.commitment === commitment ? { ...n, spent: true } : n))

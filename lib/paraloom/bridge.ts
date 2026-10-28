@@ -8,6 +8,7 @@ import {
   sendAndConfirmTransaction
 } from "@solana/web3.js"
 
+import { parseShieldedAddress, SHIELDED_BODY_HEX } from "~lib/crypto/addressChecksum"
 import { addressSpendPubHex, type WalletKeyPair } from "~lib/crypto/keyManagement"
 import { NATIVE_ASSET_HEX } from "~lib/prover"
 
@@ -74,12 +75,17 @@ function bridgeVaultPda(): PublicKey {
 }
 
 // The 32-byte shielded-pool recipient carried by a `paraloom1<hex>` address.
+// Supports both legacy 64-hex bodies and v2 128-hex (+ 8 checksum) addresses.
 export function shieldedAddressToBytes(shieldedAddress: string): Uint8Array {
   const hex = shieldedAddress.replace(/^paraloom1/, "")
-  if (hex.length !== 64) {
-    throw new Error("invalid shielded address")
+  if (hex.length === 64) {
+    return Uint8Array.from(Buffer.from(hex, "hex"))
   }
-  return Uint8Array.from(Buffer.from(hex, "hex"))
+  const body = parseShieldedAddress(shieldedAddress)
+  if (body && body.length === SHIELDED_BODY_HEX) {
+    return Uint8Array.from(Buffer.from(body.slice(64, 128), "hex"))
+  }
+  throw new Error("invalid shielded address")
 }
 
 // Layout: DEPOSIT discriminator (8) | amount u64 LE (8) | recipient (32) | randomness (32).

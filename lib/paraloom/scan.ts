@@ -123,9 +123,18 @@ export async function scanForNotes(
     // phantom. An SPL note's leaf binds its assetId, so a native-only
     // recomputation would reject every received token note (#23).
     const isNative = note.assetIdHex === NATIVE_ASSET_HEX
-    const expected = isNative
-      ? await v3NoteCommitment(note.amount, spendPubHex, note.blindingHex)
-      : await v3NoteCommitmentAsset(note.amount, spendPubHex, note.blindingHex, note.assetIdHex)
+    let expected: string
+    try {
+      expected = isNative
+        ? await v3NoteCommitment(note.amount, spendPubHex, note.blindingHex)
+        : await v3NoteCommitmentAsset(note.amount, spendPubHex, note.blindingHex, note.assetIdHex)
+    } catch {
+      // Out-of-field BN254 scalar (blinding or assetId >= modulus) or
+      // malformed ciphertext: the WASM prover rejects it. Skip this note
+      // rather than halting the entire scan — a single poisoned entry must
+      // not permanently hide every subsequent note (#74).
+      continue
+    }
     if (expected !== d.output_commitment) {
       continue
     }

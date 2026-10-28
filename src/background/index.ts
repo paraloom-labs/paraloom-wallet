@@ -53,6 +53,7 @@ async function swapInFlight(): Promise<boolean> {
     | undefined
   return (
     job?.status === "pending" &&
+    job.approved === true &&
     typeof job.startedAt === "number" &&
     Date.now() - job.startedAt < SWAP_INFLIGHT_LOCK_GRACE_MS
   )
@@ -447,9 +448,12 @@ async function handleConnect(sender: chrome.runtime.MessageSender) {
     throw new Error("No wallet found")
   }
 
-  const succeed = () => {
+  const succeed = (ownerApproved = false) => {
     connectedOrigin = origin
-    void recordActivity(Date.now())
+    // An approved page can reconnect from script without any owner action.
+    // Only a fresh decision in the wallet popup resets the owner's idle clock.
+    // The unlock path already starts its clock when saveSession runs.
+    if (ownerApproved) void recordActivity(Date.now())
     return {
       success: true,
       data: {
@@ -488,7 +492,7 @@ async function handleConnect(sender: chrome.runtime.MessageSender) {
     throw new Error("Connection request rejected")
   }
   await addApprovedOrigin(origin)
-  return succeed()
+  return succeed(true)
 }
 
 // Register a pending connection request and resolve once the user approves or
@@ -743,6 +747,8 @@ interface SwapJob {
   /** When a "pending" job started, so the auto-lock can hold off while a swap is
    *  genuinely in flight without a hung job blocking the lock forever. */
   startedAt?: number
+  /** Only a spend explicitly approved in the wallet may defer idle locking. */
+  approved?: boolean
 }
 async function setSwapJob(job: SwapJob): Promise<void> {
   await chrome.storage.session.set({ swapJob: job }).catch(() => {})
@@ -757,10 +763,6 @@ async function runSwapJob(
   sender: chrome.runtime.MessageSender
 ): Promise<void> {
   try {
-    // Starting a swap is activity: reset the idle clock so the 15-min auto-lock
-    // measured from the LAST popup interaction can't fire in the middle of a
-    // swap driven entirely from the dapp (popup closed).
-    void recordActivity(Date.now())
     const origin = senderOrigin(sender)
     if (!origin) {
       await setSwapJob({ status: "error", error: "unknown origin" })
@@ -781,6 +783,11 @@ async function runSwapJob(
       await setSwapJob({ status: "error", error: "rejected" })
       return
     }
+    // A page request, including a malformed or unanswered one, is not owner
+    // activity. Grant the bounded in-flight exemption only after the popup
+    // approves the exact spend, before starting the potentially long operation.
+    await recordActivity(Date.now())
+    await setSwapJob({ status: "pending", startedAt: Date.now(), approved: true })
     const result = await handlePrivateSwap(params)
     await setSwapJob({ status: "done", result: result.data })
   } catch (e) {

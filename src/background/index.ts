@@ -261,23 +261,52 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   // ── Swap-approval messages (from the popup only) ──
 
   if (message.type === "GET_PENDING_SWAP") {
-    sendResponse(
-      pendingSwap
-        ? { id: pendingSwap.id, origin: pendingSwap.origin, params: pendingSwap.params }
-        : null
-    )
-    return false
+    chrome.storage.session
+      .get("pendingSwap")
+      .then((r) => {
+        const ps = (r.pendingSwap as { id: number; origin: string; params: SwapRequestParams } | undefined) ?? null
+        if (ps) {
+          sendResponse({ id: ps.id, origin: ps.origin, params: ps.params })
+        } else if (pendingSwap) {
+          sendResponse({ id: pendingSwap.id, origin: pendingSwap.origin, params: pendingSwap.params })
+        } else {
+          sendResponse(null)
+        }
+      })
+      .catch(() => {
+        sendResponse(
+          pendingSwap
+            ? { id: pendingSwap.id, origin: pendingSwap.origin, params: pendingSwap.params }
+            : null
+        )
+      })
+    return true
   }
 
   if (message.type === "APPROVE_SWAP") {
-    if (pendingSwap && pendingSwap.id === message.id) {
-      pendingSwap.resolve(true)
-    }
-    sendResponse({ success: true })
-    return false
+    chrome.storage.session
+      .get("pendingSwap")
+      .then(async (r) => {
+        const ps = r.pendingSwap as { id: number } | undefined
+        if (ps && ps.id === message.id) {
+          await chrome.storage.session.remove("pendingSwap").catch(() => {})
+        }
+        if (pendingSwap && pendingSwap.id === message.id) {
+          pendingSwap.resolve(true)
+        }
+        sendResponse({ success: true })
+      })
+      .catch(() => {
+        if (pendingSwap && pendingSwap.id === message.id) {
+          pendingSwap.resolve(true)
+        }
+        sendResponse({ success: true })
+      })
+    return true
   }
 
   if (message.type === "REJECT_SWAP") {
+    void chrome.storage.session.remove("pendingSwap").catch(() => {})
     if (pendingSwap && pendingSwap.id === message.id) {
       pendingSwap.resolve(false)
     }
@@ -376,16 +405,20 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   }
 
   if (message.type === "PRIVATE_SWAP") {
-    // Fire-and-poll: authorize, START the swap job, and respond IMMEDIATELY.
+    // Fire-and-poll: authorize, check for in-flight swaps, START the swap job, and respond IMMEDIATELY.
     // The page then polls GET_SWAP_STATUS, and that polling is what keeps the
     // MV3 worker alive through the approval + the ~2-3 min swap — a single held
     // response can't (the setInterval keep-alive is unreliable in a service
     // worker, so the worker was evicted mid-swap: "message channel closed").
     isAuthorizedSender(sender)
-      .then((ok) => {
+      .then(async (ok) => {
         if (!ok) return sendResponse({ success: false, error: "not authorized" })
-        void setSwapJob({ status: "pending", startedAt: Date.now() })
-        void runSwapJob(message.params, sender)
+        if (await swapInFlight()) {
+          return sendResponse({ success: false, error: "A private swap is already in progress" })
+        }
+        const jobId = ++swapIdCounter
+        void setSwapJob({ id: jobId, status: "pending", startedAt: Date.now() })
+        void runSwapJob(message.params, sender, jobId)
         sendResponse({ success: true, pending: true })
       })
       .catch((err) => sendResponse({ success: false, error: err.message }))
@@ -708,13 +741,16 @@ async function handlePrivateTransfer(_params: { recipient: string; amount: numbe
 function requestSwapApproval(
   origin: string,
   params: SwapRequestParams,
-  timeoutMs: number
+  timeoutMs: number,
+  id: number = ++swapIdCounter
 ): Promise<boolean> {
   return new Promise((resolve) => {
-    const id = ++swapIdCounter
+    const clearPersisted = () =>
+      void chrome.storage.session.remove("pendingSwap").catch(() => {})
     const timer = setTimeout(() => {
       if (pendingSwap?.id === id) {
         pendingSwap = null
+        clearPersisted()
         resolve(false)
       }
     }, timeoutMs)
@@ -725,9 +761,14 @@ function requestSwapApproval(
       resolve: (approved: boolean) => {
         clearTimeout(timer)
         pendingSwap = null
+        clearPersisted()
         resolve(approved)
       }
     }
+    // Persist so the pending approval survives an MV3 worker eviction during the
+    // wait: the popup reads it via GET_PENDING_SWAP and APPROVE_SWAP records
+    // the approval from it, even in a freshly respawned worker.
+    void chrome.storage.session.set({ pendingSwap: { id, origin, params } }).catch(() => {})
   })
 }
 
@@ -737,6 +778,7 @@ function requestSwapApproval(
 // Swap job status, persisted so the page can poll it (GET_SWAP_STATUS) even
 // across worker restarts. One swap at a time.
 interface SwapJob {
+  id?: number
   status: "pending" | "done" | "error"
   result?: unknown
   error?: string
@@ -745,16 +787,21 @@ interface SwapJob {
   startedAt?: number
 }
 async function setSwapJob(job: SwapJob): Promise<void> {
+  if (typeof job.id === "number") {
+    const existing = (await chrome.storage.session.get("swapJob")).swapJob as SwapJob | undefined
+    if (existing && typeof existing.id === "number" && existing.id > job.id && existing.status === "pending") {
+      return
+    }
+  }
   await chrome.storage.session.set({ swapJob: job }).catch(() => {})
 }
 
 // Run the swap as a background job, writing status to storage for the page to
-// poll. No held response and no reliance on a keep-alive timer: the page's
-// GET_SWAP_STATUS polling is what keeps the worker alive through the approval +
-// the ~2-3 min swap.
+// poll. Wrap approval in withKeepAlive to prevent worker eviction during wait.
 async function runSwapJob(
   params: SwapRequestParams,
-  sender: chrome.runtime.MessageSender
+  sender: chrome.runtime.MessageSender,
+  jobId?: number
 ): Promise<void> {
   try {
     // Starting a swap is activity: reset the idle clock so the 15-min auto-lock
@@ -763,7 +810,7 @@ async function runSwapJob(
     void recordActivity(Date.now())
     const origin = senderOrigin(sender)
     if (!origin) {
-      await setSwapJob({ status: "error", error: "unknown origin" })
+      await setSwapJob({ id: jobId, status: "error", error: "unknown origin" })
       return
     }
     if (
@@ -771,20 +818,21 @@ async function runSwapJob(
       typeof params.outputMint !== "string" ||
       typeof params.amountLamports !== "string"
     ) {
-      await setSwapJob({ status: "error", error: "invalid params" })
+      await setSwapJob({ id: jobId, status: "error", error: "invalid params" })
       return
     }
-    const decision = requestSwapApproval(origin, params, 180_000)
+    const decision = requestSwapApproval(origin, params, 180_000, jobId)
     await openWalletWindow()
-    const approved = await decision
+    const approved = await withKeepAlive(decision)
     if (!approved) {
-      await setSwapJob({ status: "error", error: "rejected" })
+      await setSwapJob({ id: jobId, status: "error", error: "rejected" })
       return
     }
     const result = await handlePrivateSwap(params)
-    await setSwapJob({ status: "done", result: result.data })
+    await setSwapJob({ id: jobId, status: "done", result: result.data })
   } catch (e) {
     await setSwapJob({
+      id: jobId,
       status: "error",
       error: e instanceof Error ? e.message : String(e)
     })

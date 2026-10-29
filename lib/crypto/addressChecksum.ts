@@ -23,9 +23,9 @@ export function withChecksum(bodyHex: string): string {
   return bodyHex + shieldedChecksum(bodyHex)
 }
 
-// Validate a full `paraloom1…` address and return its 128-hex body, or null if
-// the prefix, length, hex, or checksum is wrong. A checksum-less legacy address
-// (128-hex body, no checksum) is rejected by design: accepting it would let the
+// Validate a full `paraloom1…` address and return its normalized lowercase 128-hex body,
+// or null if the prefix, length, hex, or checksum is wrong (#140). A checksum-less legacy
+// address (128-hex body, no checksum) is rejected by design: accepting it would let the
 // exact typo this guards against back in.
 export function parseShieldedAddress(addr: string): string | null {
   if (!addr.startsWith("paraloom1")) return null
@@ -35,7 +35,7 @@ export function parseShieldedAddress(addr: string): string | null {
   const body = rest.slice(0, SHIELDED_BODY_HEX)
   const csum = rest.slice(SHIELDED_BODY_HEX).toLowerCase()
   if (shieldedChecksum(body) !== csum) return null
-  return body
+  return body.toLowerCase()
 }
 
 export function isValidShieldedAddress(addr: string): boolean {

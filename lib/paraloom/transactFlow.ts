@@ -299,6 +299,9 @@ export async function spendV3(
     recipientHex = "00".repeat(32)
     const toSpendPub = addressSpendPubHex(dest.recipientShielded)
     const toBoxPub = addressBoxPubHex(dest.recipientShielded)
+    if (toSpendPub.toLowerCase() === ownPubHex.toLowerCase()) {
+      throw new Error("Cannot transfer to your own shielded address")
+    }
     const payBlind = randomHex32()
     outputs = [
       { amount: payLamports, pubkeyHex: toSpendPub, blindingHex: payBlind },

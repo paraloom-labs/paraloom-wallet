@@ -78,34 +78,67 @@ export async function depositV3(
   // commitment once the leaf index is known.
   const commitment = await v3NoteCommitment(lamports, pubkeyHex, blindingHex)
 
-  const signature = await sendDepositNote(
-    connection,
-    payer,
-    lamports,
-    Uint8Array.from(Buffer.from(pubkeyHex, "hex")),
-    Uint8Array.from(Buffer.from(blindingHex, "hex")),
-    // Persist the note (with its blinding) the moment the deposit is submitted,
-    // BEFORE confirmation and the leaf-index lookup below. Previously the note
-    // was written only after that lookup — a getTransaction plus a possible
-    // full-history rebuild — so a worker eviction (a known MV3 failure mode) or
-    // a dropped RPC anywhere in that window left the deposit committed on-chain
-    // with its spend secret gone and unrecoverable (paraloom-core#791). Stored
-    // with the commitment but no leaf index yet; ensureLeafIndex can still locate
-    // the leaf by commitment, so the note is spendable even if the flow is
-    // interrupted right here.
-    async (sig) => {
-      await addNote(shieldedAddress, {
-        amount: lamports.toString(),
-        blinding: blindingHex,
-        assetId: NATIVE_ASSET_HEX,
-        signature: sig,
-        createdAt: Date.now(),
-        spent: false,
-        source: "deposit",
-        commitment
-      })
+  let savePromise: Promise<void> | undefined
+  let signature: string
+  try {
+    signature = await sendDepositNote(
+      connection,
+      payer,
+      lamports,
+      Uint8Array.from(Buffer.from(pubkeyHex, "hex")),
+      Uint8Array.from(Buffer.from(blindingHex, "hex")),
+      // Persist the note (with its blinding) the moment the deposit is submitted,
+      // BEFORE confirmation and the leaf-index lookup below. Previously the note
+      // was written only after that lookup — a getTransaction plus a possible
+      // full-history rebuild — so a worker eviction (a known MV3 failure mode) or
+      // a dropped RPC anywhere in that window left the deposit committed on-chain
+      // with its spend secret gone and unrecoverable (paraloom-core#791). Stored
+      // with the commitment but no leaf index yet; ensureLeafIndex can still locate
+      // the leaf by commitment, so the note is spendable even if the flow is
+      // interrupted right here.
+      (sig) => {
+        savePromise = addNote(shieldedAddress, {
+          amount: lamports.toString(),
+          blinding: blindingHex,
+          assetId: NATIVE_ASSET_HEX,
+          signature: sig,
+          createdAt: Date.now(),
+          spent: false,
+          source: "deposit",
+          commitment
+        })
+        return savePromise
+      }
+    )
+  } catch (err) {
+    if (savePromise) {
+      try {
+        await savePromise
+      } catch {
+        // ignore
+      }
+      if (
+        err instanceof Error &&
+        (err.message.startsWith("transaction failed on-chain") ||
+          err.message.includes("was not confirmed within timeout"))
+      ) {
+        try {
+          await markNoteSpentByIdentity(shieldedAddress, {
+            amount: lamports.toString(),
+            blinding: blindingHex,
+            assetId: NATIVE_ASSET_HEX,
+            signature: "",
+            createdAt: 0,
+            spent: true,
+            commitment
+          })
+        } catch {
+          // ignore
+        }
+      }
     }
-  )
+    throw err
+  }
 
   // Read our leaf index from the event this deposit emitted.
   const tx = await connection.getTransaction(signature, {

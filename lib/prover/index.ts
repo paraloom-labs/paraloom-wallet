@@ -126,7 +126,7 @@ export async function proveWithdrawalV2(input: WithdrawalProofInput): Promise<Wi
 
 // One spent input note + its Merkle path (mirrors core's `TransferInputV2`).
 export interface TransferProofInputNote {
-  amount: number // lamports (JSON number; serde u64)
+  amount: number | bigint // lamports (JSON number; serde u64)
   blinding_hex: string
   privkey_hex: string
   path_hex: string[]
@@ -136,7 +136,7 @@ export interface TransferProofInputNote {
 // One created output note (mirrors core's `TransferOutputV2`). `pubkey_hex` is
 // the recipient's spend public key, so only they can later spend the note.
 export interface TransferProofOutputNote {
-  amount: number
+  amount: number | bigint
   blinding_hex: string
   pubkey_hex: string
 }
@@ -155,13 +155,26 @@ export async function proveTransferV2(
   inputs: TransferProofInputNote[],
   outputs: TransferProofOutputNote[]
 ): Promise<TransferProof> {
+  const serializeNotes = (notes: (TransferProofInputNote | TransferProofOutputNote)[]) =>
+    JSON.stringify(
+      notes.map((n) => {
+        const amt = BigInt(n.amount)
+        if (amt > BigInt(Number.MAX_SAFE_INTEGER) || amt < 0n) {
+          throw new Error("Amount exceeds JavaScript safe integer limit; must use 64-bit bigint prover interface")
+        }
+        return {
+          ...n,
+          amount: Number(amt)
+        }
+      })
+    )
   const key = await ensureTransferReady()
   const json = prove_transfer_v2(
     key,
     root,
     assetIdHex,
-    JSON.stringify(inputs),
-    JSON.stringify(outputs)
+    serializeNotes(inputs),
+    serializeNotes(outputs)
   )
   return JSON.parse(json) as TransferProof
 }

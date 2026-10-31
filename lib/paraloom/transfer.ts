@@ -64,6 +64,10 @@ export async function transfer(
   }
   const change = inputTotal - amount
 
+  if (amount > BigInt(Number.MAX_SAFE_INTEGER) || change > BigInt(Number.MAX_SAFE_INTEGER)) {
+    throw new Error("Amount exceeds JavaScript safe integer limit; must use 64-bit bigint prover interface")
+  }
+
   // v2 (#293): an output binds the recipient's spend pubkey (so only they can
   // spend it) and is encrypted to their box pubkey (so only they can read it).
   const recipientSpendPub = addressSpendPubHex(recipientShieldedAddress)
@@ -76,8 +80,12 @@ export async function transfer(
   let root = ""
   const proofInputs = []
   for (const note of inputs) {
+    const noteAmount = BigInt(note.amount)
+    if (noteAmount > BigInt(Number.MAX_SAFE_INTEGER)) {
+      throw new Error("Amount exceeds JavaScript safe integer limit; must use 64-bit bigint prover interface")
+    }
     const commitment = await noteCommitmentV2(
-      BigInt(note.amount),
+      noteAmount,
       spendPrivkeyHex,
       note.blinding,
       note.assetId
@@ -85,7 +93,7 @@ export async function transfer(
     const pathRes = await fetchPath(commitment)
     root = pathRes.root
     proofInputs.push({
-      amount: Number(note.amount),
+      amount: noteAmount,
       blinding_hex: note.blinding,
       privkey_hex: spendPrivkeyHex,
       path_hex: pathRes.path,
@@ -97,8 +105,8 @@ export async function transfer(
   const outBlind0 = randomHex32()
   const outBlind1 = randomHex32()
   const outputs = [
-    { amount: Number(amount), blinding_hex: outBlind0, pubkey_hex: recipientSpendPub },
-    { amount: Number(change), blinding_hex: outBlind1, pubkey_hex: ownSpendPub }
+    { amount: amount, blinding_hex: outBlind0, pubkey_hex: recipientSpendPub },
+    { amount: change, blinding_hex: outBlind1, pubkey_hex: ownSpendPub }
   ]
 
   const { nullifiers, output_commitments, proof } = await proveTransferV2(

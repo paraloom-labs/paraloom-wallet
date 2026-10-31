@@ -1,7 +1,14 @@
 import { Connection, PublicKey } from "@solana/web3.js"
 
 import { getAutoLockMinutes, getStoredWallet, isWalletLocked, setLockState } from "~lib/storage/secure"
-import { addApprovedOrigin, isOriginApproved, removeApprovedOrigin } from "~lib/storage/connections"
+import {
+  addApprovedOrigin,
+  isOriginApproved,
+  isSenderAuthorizedForOrigin,
+  reconcileEffectiveLockState,
+  removeApprovedOrigin,
+  revokeOriginAuthorization
+} from "~lib/storage/connections"
 import { clearSession, getLastActivity, loadSession, recordActivity } from "~lib/storage/session"
 import { addNote, getNotes, markNoteSpentByCommitment, shieldedBalance, shieldedTokenBalances, type ShieldedNote } from "~lib/paraloom/notes"
 import { scanForNotes } from "~lib/paraloom/scan"
@@ -58,12 +65,26 @@ async function swapInFlight(): Promise<boolean> {
   )
 }
 
+function rejectAllPendingRequests(): void {
+  if (pendingConnection) {
+    pendingConnection.resolve(false)
+  }
+  if (pendingSwap) {
+    pendingSwap.resolve(false)
+  }
+  void chrome.storage.session.remove("pendingConn").catch(() => {})
+}
+
 async function maybeAutoLock(): Promise<void> {
-  if (await isWalletLocked()) return
+  if (await reconcileEffectiveLockState()) {
+    connectedOrigin = null
+    rejectAllPendingRequests()
+    return
+  }
   if (await swapInFlight()) return
   const last = await getLastActivity()
   if (last === null) {
-    // Unlocked but no timestamp yet (e.g. a legacy session): start the clock
+    // Unlocked with an active session but no timestamp yet: start the clock
     // rather than lock, so we never lock a just-unlocked wallet.
     await recordActivity(Date.now())
     return
@@ -71,6 +92,7 @@ async function maybeAutoLock(): Promise<void> {
   const minutes = await getAutoLockMinutes()
   if (Date.now() - last >= minutes * 60 * 1000) {
     connectedOrigin = null
+    rejectAllPendingRequests()
     await setLockState(true)
     await clearSession()
   }
@@ -144,7 +166,8 @@ const POPUP_ONLY_TYPES = new Set([
   // defeating the per-request consent screen.
   "GET_PENDING_SWAP",
   "APPROVE_SWAP",
-  "REJECT_SWAP"
+  "REJECT_SWAP",
+  "REVOKE_ORIGIN"
 ])
 
 function isFromPopup(sender: chrome.runtime.MessageSender): boolean {
@@ -176,7 +199,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   }
 
   if (message.type === "GET_WALLET_STATE") {
-    isWalletLocked().then((locked) => {
+    reconcileEffectiveLockState().then((locked) => {
       sendResponse({ locked })
     })
     return true
@@ -184,9 +207,29 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 
   if (message.type === "LOCK_WALLET") {
     connectedOrigin = null
+    rejectAllPendingRequests()
     Promise.all([setLockState(true), clearSession()]).then(() => {
       sendResponse({ success: true })
     })
+    return true
+  }
+
+  if (message.type === "REVOKE_ORIGIN") {
+    const origin = typeof message.origin === "string" ? message.origin : null
+    if (!origin) {
+      sendResponse({ success: false, error: "invalid origin" })
+      return false
+    }
+    revokeOriginAuthorization(origin, {
+      connectedOrigin,
+      pendingConnection,
+      pendingSwap
+    })
+      .then((next) => {
+        connectedOrigin = next.connectedOrigin
+        sendResponse({ success: true })
+      })
+      .catch((err) => sendResponse({ success: false, error: err.message }))
     return true
   }
 
@@ -200,17 +243,29 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   }
 
   if (message.type === "DISCONNECT_WALLET") {
-    // A page may only disconnect ITSELF. Without the sender check any injected
-    // *.paraloom.io page could revoke a different connected origin's approval
-    // and force a surprise re-approval prompt (same #711/#719 shape). Revoke
-    // only when the caller is the connected origin.
+    // A page may only disconnect ITSELF. Check both connectedOrigin and
+    // persistent isOriginApproved(origin) so an approved site can still revoke
+    // its own permission after an MV3 worker restart or after another site
+    // connected.
     const origin = senderOrigin(sender)
-    if (origin && connectedOrigin === origin) {
-      removeApprovedOrigin(connectedOrigin)
-      connectedOrigin = null
+    if (!origin) {
+      sendResponse({ success: true })
+      return false
     }
-    sendResponse({ success: true })
-    return false
+    isOriginApproved(origin)
+      .then(async (approved) => {
+        if (approved || connectedOrigin === origin) {
+          const next = await revokeOriginAuthorization(origin, {
+            connectedOrigin,
+            pendingConnection,
+            pendingSwap
+          })
+          connectedOrigin = next.connectedOrigin
+        }
+        sendResponse({ success: true })
+      })
+      .catch(() => sendResponse({ success: true }))
+    return true
   }
 
   // ── Connection-approval messages (from the popup) ──
@@ -447,20 +502,22 @@ async function handleConnect(sender: chrome.runtime.MessageSender) {
     throw new Error("No wallet found")
   }
 
-  const succeed = () => {
+  const succeed = async () => {
+    const session = await loadSession()
+    const activeAddress = session?.wallet?.shieldedAddress || stored.address
     connectedOrigin = origin
     void recordActivity(Date.now())
     return {
       success: true,
       data: {
-        address: stored.address,
-        publicKey: stored.address // shielded address as identifier
+        address: activeAddress,
+        publicKey: activeAddress // shielded address as identifier
       }
     }
   }
 
   const alreadyApproved = await isOriginApproved(origin)
-  const locked = await isWalletLocked()
+  const locked = await reconcileEffectiveLockState()
 
   // Trusted site that's already unlocked → reconnect silently (Phantom-style).
   if (alreadyApproved && !locked) {
@@ -581,7 +638,9 @@ function waitForUnlock(timeoutMs: number): Promise<boolean> {
   return new Promise((resolve) => {
     const start = Date.now()
     const check = async () => {
-      if (!(await isWalletLocked())) return resolve(false)
+      if (!(await isWalletLocked()) && Boolean(await loadSession())) {
+        return resolve(false)
+      }
       if (Date.now() - start >= timeoutMs) return resolve(true)
       setTimeout(check, 400)
     }
@@ -592,23 +651,21 @@ function waitForUnlock(timeoutMs: number): Promise<boolean> {
 async function handleGetAddress(sender: chrome.runtime.MessageSender) {
   // Gate on the sender, not just on "some origin is connected" (#719). The
   // page-facing address getters must match: `handlePublicAddress` and
-  // `handleShieldedBalance` both require `isAuthorizedSender`, and this one
-  // used only `connectedOrigin !== null`, so any injected origin could read
-  // the connected site's shielded address without being approved itself.
+  // `handleShieldedBalance` both require `isAuthorizedSender` AND an active
+  // unlocked session so a locked wallet never leaks the user's shielded address.
   if (!(await isAuthorizedSender(sender))) {
     return { address: null }
   }
-
-  const stored = await getStoredWallet()
-  return { address: stored?.address || null }
+  const session = await loadSession()
+  if (!session) {
+    return { address: null }
+  }
+  return { address: session.wallet.shieldedAddress || null }
 }
 
-// Authorize a read from the page: the origin must be the live-connected one or
-// a previously approved (trusted) site. Resolving against the approved list as
-// well keeps reads working if the MV3 service worker was recycled and lost the
-// in-memory connectedOrigin.
-// The requesting page's origin, resolved without the "tabs" permission. A popup
-// (extension context) has no tab; a content-script relay always does.
+// Authorize a read from the page strictly against durable approvals in
+// `chrome.storage.local` so a site revoked via Settings (`handleRevokeSite`)
+// is denied immediately even if `connectedOrigin` was previously set in memory.
 function senderOrigin(sender: chrome.runtime.MessageSender): string | null {
   return sender.origin ?? (sender.tab?.url ? new URL(sender.tab.url).origin : null)
 }
@@ -616,10 +673,7 @@ function senderOrigin(sender: chrome.runtime.MessageSender): string | null {
 async function isAuthorizedSender(
   sender: chrome.runtime.MessageSender
 ): Promise<boolean> {
-  const origin = senderOrigin(sender)
-  if (!origin) return false
-  if (connectedOrigin === origin) return true
-  return isOriginApproved(origin)
+  return isSenderAuthorizedForOrigin(senderOrigin(sender))
 }
 
 async function handlePublicAddress(sender: chrome.runtime.MessageSender) {

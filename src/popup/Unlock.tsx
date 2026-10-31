@@ -84,6 +84,13 @@ export function Unlock({ onUnlock }: UnlockProps) {
       }
 
       unlock(wallet, seedPhrase)
+      const stAfterUnlock = useWalletStore.getState()
+      const activeAcc = stAfterUnlock.accounts.find(
+        (a) => a.keypair.shieldedAddress === stored.address
+      )
+      if (activeAcc && activeAcc.index !== stAfterUnlock.currentAccountIndex) {
+        stAfterUnlock.switchAccount(activeAcc.index)
+      }
       await setLockState(false)
       setAttempts(0)
 
@@ -91,7 +98,7 @@ export function Unlock({ onUnlock }: UnlockProps) {
       // popup doesn't force a re-unlock (the idle auto-lock timer still applies).
       const st = useWalletStore.getState()
       await saveSession({
-        wallet,
+        wallet: st.wallet ?? wallet,
         accounts: st.accounts,
         currentAccountIndex: st.currentAccountIndex,
         seedPhrase: seedPhrase ?? st.seedPhrase

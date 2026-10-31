@@ -165,3 +165,13 @@ export async function setNetwork(network: "mainnet-beta" | "devnet"): Promise<vo
     await chrome.storage.local.set({ [STORAGE_KEY]: storage })
   }
 }
+
+export async function setActiveAccountAddress(address: string): Promise<void> {
+  const result = await chrome.storage.local.get(STORAGE_KEY)
+  const storage = result[STORAGE_KEY] as WalletStorage | undefined
+
+  if (storage?.wallet) {
+    storage.wallet.address = address
+    await chrome.storage.local.set({ [STORAGE_KEY]: storage })
+  }
+}

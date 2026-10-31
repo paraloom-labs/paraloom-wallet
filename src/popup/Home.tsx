@@ -20,7 +20,7 @@ import { transfer } from "~lib/paraloom/transfer"
 import { depositV3, spendV3 } from "~lib/paraloom/transactFlow"
 import { NATIVE_ASSET_HEX } from "~lib/prover"
 import { addressBoxPubHex } from "~lib/crypto/keyManagement"
-import { isValidShieldedAddress } from "~lib/crypto/addressChecksum"
+import { isValidShieldedAddress, parseShieldedAddress } from "~lib/crypto/addressChecksum"
 import { scanForNotes } from "~lib/paraloom/scan"
 import { dismissSwapOutput, listSwapOutputs, type SwapOutput } from "~lib/paraloom/swapOutputs"
 import { recoverReshields } from "~lib/paraloom/reshieldRecovery"
@@ -483,7 +483,9 @@ export function Home({ onLock }: HomeProps) {
       showToast("Enter a valid paraloom1… shielded address", "error")
       return
     }
-    if (to === wallet.shieldedAddress) {
+    const toBody = parseShieldedAddress(to)
+    const selfBody = parseShieldedAddress(wallet.shieldedAddress)
+    if (toBody && selfBody && toBody === selfBody) {
       showToast("Cannot transfer to your own address", "error")
       return
     }
@@ -778,20 +780,28 @@ export function Home({ onLock }: HomeProps) {
               for (const [mint, amount] of Object.entries(shieldedTokens)) {
                 if (amount <= 0n) continue
                 const meta = SHIELDED_TOKEN_META[mint]
+                const dec = meta?.decimals ?? prices[mint]?.decimals
                 holdings.push({
                   key: `sh-${mint}`,
                   name: meta?.symbol === "USDC" ? "USD Coin" : (meta?.symbol ?? "Token"),
                   symbol: meta?.symbol ?? `${mint.slice(0, 4)}…`,
                   usdcMark: mint === USDC_MINT,
                   amount,
-                  decimals: meta?.decimals ?? 0,
+                  decimals: dec ?? 0,
                   mint,
                   privacy: "shielded"
                 })
               }
               const usdOf = (h: Holding): number | null => {
-                const p = prices[h.mint]?.usdPrice
-                return p != null ? (Number(h.amount) / 10 ** h.decimals) * p : null
+                const tokenPrice = prices[h.mint]
+                const p = tokenPrice?.usdPrice
+                if (p == null) return null
+                if (h.mint === SOL_MINT) {
+                  return (Number(h.amount) / 1e9) * p
+                }
+                const dec = SHIELDED_TOKEN_META[h.mint]?.decimals ?? tokenPrice?.decimals
+                if (dec == null) return null
+                return (Number(h.amount) / 10 ** dec) * p
               }
               const total = holdings.reduce((s, h) => s + (usdOf(h) ?? 0), 0)
               const shieldedUsd = holdings
@@ -954,7 +964,14 @@ export function Home({ onLock }: HomeProps) {
                               : s.outputMint === USDC_MINT
                                 ? "USDC"
                                 : "token"
-                            const outDiv = isSolOut ? 1e9 : 1e6
+                            const outDec = isSolOut
+                              ? 9
+                              : s.outputMint === USDC_MINT
+                                ? 6
+                                : (SHIELDED_TOKEN_META[s.outputMint]?.decimals ??
+                                   prices[s.outputMint]?.decimals ??
+                                   6)
+                            const outDiv = 10 ** outDec
                             return (
                               <div
                                 key={s.freshAddress || `buy-${i}`}
@@ -1026,12 +1043,16 @@ export function Home({ onLock }: HomeProps) {
                             "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"
                           const depSym =
                             n.mint === USDC_MINT_DEP ? "USDC" : n.mint ? "token" : "SOL"
-                          const depAmount =
+                          const depDec =
                             n.mint === USDC_MINT_DEP
-                              ? (Number(n.amount) / 1e6).toFixed(4)
+                              ? 6
                               : n.mint
-                                ? n.amount
-                                : (Number(n.amount) / 1e9).toFixed(4)
+                                ? (SHIELDED_TOKEN_META[n.mint]?.decimals ?? prices[n.mint]?.decimals)
+                                : 9
+                          const depAmount =
+                            depDec != null
+                              ? (Number(n.amount) / 10 ** depDec).toFixed(4)
+                              : n.amount
                           return (
                             <div
                               key={n.signature || n.commitment || `dep-${i}`}

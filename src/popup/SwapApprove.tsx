@@ -1,4 +1,5 @@
 import { useState } from "react"
+import { isNativeSolOutput } from "~lib/paraloom/swapReconcileClassify"
 import logoImg from "data-base64:~/../assets/icon.png"
 
 interface SwapParams {
@@ -24,16 +25,16 @@ function sendMessage(message: Record<string, unknown>): Promise<unknown> {
   return new Promise((resolve) => chrome.runtime.sendMessage(message, resolve))
 }
 
-function tokenLabel(mint: string): string {
-  if (mint === "SOL") return "SOL"
+export function tokenLabel(mint: string): string {
+  if (isNativeSolOutput(mint)) return "SOL"
   if (mint === USDC_MINT) return "USDC"
   return `${mint.slice(0, 4)}…${mint.slice(-4)}`
 }
 
 // Decimals + symbol for the input side. Only native SOL and USDC are spendable
 // inputs today; an unknown mint falls back to showing raw base units.
-function inputInfo(inputMint?: string): { decimals: number; symbol: string } {
-  if (!inputMint || inputMint === "SOL") return { decimals: 9, symbol: "SOL" }
+export function inputInfo(inputMint?: string): { decimals: number; symbol: string } {
+  if (!inputMint || isNativeSolOutput(inputMint)) return { decimals: 9, symbol: "SOL" }
   if (inputMint === USDC_MINT) return { decimals: 6, symbol: "USDC" }
   return { decimals: 0, symbol: tokenLabel(inputMint) }
 }

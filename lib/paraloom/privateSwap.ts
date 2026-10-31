@@ -684,7 +684,7 @@ export async function resumeSwapAtFreshAddress(
   )
 
   let reshielded: ReshieldedNote | undefined
-  if (reshield && outputMint !== "SOL") {
+  if (reshield && !isNativeSolOutput(outputMint)) {
     reshielded = await reshieldToken(
       connection,
       fresh,

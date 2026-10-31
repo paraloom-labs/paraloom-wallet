@@ -2,13 +2,19 @@ import {
   addDiscoveredNote,
   addNote,
   getNotes,
+  markNoteSpent,
+  markNoteSpentByCommitment,
   markNoteSpentByIdentity,
   shieldedBalance,
   shieldedTokenBalances,
   type ShieldedNote
 } from "~lib/paraloom/notes"
-import { beforeEach, describe, expect, it } from "vitest"
+import { shieldedAddressToBytes } from "~lib/paraloom/bridge"
+import { withChecksum } from "~lib/crypto/addressChecksum"
+import { beforeEach, describe, expect, it, vi } from "vitest"
 import { installFakeChrome } from "./support/chromeStorage"
+
+vi.mock("~lib/prover", () => ({ NATIVE_ASSET_HEX: "00".repeat(32) }))
 
 const ACCOUNT = "paraloom1" + "11".repeat(64)
 const OTHER_ACCOUNT = "paraloom1" + "22".repeat(64)
@@ -198,5 +204,61 @@ describe("note storage", () => {
     await addNote(ACCOUNT, deposit({ signature: "s1" }))
     await addNote(ACCOUNT, deposit({ signature: "s2", spent: true }))
     expect(await shieldedBalance(ACCOUNT)).toBe(1000n)
+  })
+})
+
+describe("empty identity guards in markNoteSpent and markNoteSpentByCommitment (#173)", () => {
+  it("does not mark received notes spent when markNoteSpent is called with an empty signature", async () => {
+    const r1 = received("c1".repeat(32))
+    const r2 = received("c2".repeat(32))
+    await addDiscoveredNote(ACCOUNT, r1)
+    await addDiscoveredNote(ACCOUNT, r2)
+
+    await markNoteSpent(ACCOUNT, "")
+    await markNoteSpent(ACCOUNT, "   ")
+
+    const notes = await getNotes(ACCOUNT)
+    expect(notes.every((n) => !n.spent)).toBe(true)
+  })
+
+  it("does not mark notes spent when markNoteSpentByCommitment is called with an empty commitment", async () => {
+    const d1 = deposit({ signature: "d1" })
+    await addNote(ACCOUNT, d1)
+
+    await markNoteSpentByCommitment(ACCOUNT, "")
+    await markNoteSpentByCommitment(ACCOUNT, "   ")
+
+    const notes = await getNotes(ACCOUNT)
+    expect(notes.find((n) => n.signature === "d1")?.spent).toBe(false)
+  })
+})
+
+describe("shieldedAddressToBytes (#173)", () => {
+  it("accepts legacy 64-hex shielded address", () => {
+    const legacy = "paraloom1" + "33".repeat(32)
+    const bytes = shieldedAddressToBytes(legacy)
+    expect(bytes.length).toBe(32)
+    expect(Buffer.from(bytes).toString("hex")).toBe("33".repeat(32))
+  })
+
+  it("accepts v2 128-hex body + 8-hex checksum shielded address and extracts spend pubkey", () => {
+    const boxPubHex = "11".repeat(32)
+    const spendPubHex = "22".repeat(32)
+    const body = boxPubHex + spendPubHex
+    const v2Addr = "paraloom1" + withChecksum(body)
+
+    const bytes = shieldedAddressToBytes(v2Addr)
+    expect(bytes.length).toBe(32)
+    expect(Buffer.from(bytes).toString("hex")).toBe(spendPubHex)
+  })
+
+  it("rejects invalid lengths or corrupted checksums", () => {
+    expect(() => shieldedAddressToBytes("paraloom1" + "44".repeat(10))).toThrow(
+      "invalid shielded address"
+    )
+    const boxPubHex = "11".repeat(32)
+    const spendPubHex = "22".repeat(32)
+    const corrupted = "paraloom1" + boxPubHex + spendPubHex + "ffffffff"
+    expect(() => shieldedAddressToBytes(corrupted)).toThrow("invalid shielded address")
   })
 })

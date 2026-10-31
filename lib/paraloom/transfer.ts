@@ -4,6 +4,8 @@
 // recipient's shielded address (#196) so only they can discover and spend it.
 // The spend secrets never leave the wallet.
 
+import { Connection } from "@solana/web3.js"
+
 import { addressBoxPubHex, addressSpendPubHex } from "~lib/crypto/keyManagement"
 import { NATIVE_ASSET_HEX, noteCommitmentV2, proveTransferV2 } from "~lib/prover"
 
@@ -11,10 +13,11 @@ import { PATH_SERVER_URL, TRANSFER_INGRESS_URL } from "./constants"
 import { encryptNote } from "./noteCrypto"
 import {
   addDiscoveredNote,
-  markNoteSpent,
-  markNoteSpentByCommitment,
+  markNoteSpentByIdentity,
   type ShieldedNote
 } from "./notes"
+import { confirmCommitmentInTree } from "./settlementConfirm"
+import { fetchV3Leaves } from "./transact"
 
 interface MerklePathResponse {
   root: string
@@ -25,6 +28,24 @@ interface MerklePathResponse {
 export interface TransferResult {
   requestId: string
   changeCommitment: string
+  settled?: boolean
+}
+
+const SETTLE_CONFIRM_TIMEOUT_MS = 60_000
+const SETTLE_CONFIRM_POLL_MS = 1_500
+
+export function confirmSettledByTree(
+  connection: Connection,
+  commitmentHex: string,
+  timeoutMs = SETTLE_CONFIRM_TIMEOUT_MS,
+  pollMs = SETTLE_CONFIRM_POLL_MS
+): Promise<boolean> {
+  return confirmCommitmentInTree(
+    () => fetchV3Leaves(connection),
+    commitmentHex,
+    timeoutMs,
+    pollMs
+  )
 }
 
 function toHex(bytes: Uint8Array): string {
@@ -56,7 +77,9 @@ export async function transfer(
   recipientShieldedAddress: string,
   amount: bigint,
   inputs: [ShieldedNote, ShieldedNote],
-  spendPrivkeyHex: string
+  spendPrivkeyHex: string,
+  connection?: Connection,
+  confirmSettled?: () => Promise<boolean>
 ): Promise<TransferResult> {
   const inputTotal = inputs.reduce((sum, n) => sum + BigInt(n.amount), 0n)
   if (inputTotal < amount) {
@@ -71,9 +94,8 @@ export async function transfer(
   const ownSpendPub = addressSpendPubHex(ownShieldedAddress)
   const ownBoxPub = addressBoxPubHex(ownShieldedAddress)
 
-  // Pull each input's Merkle path. Both must prove against the same root; the
-  // tree is stable between these two quick reads on devnet, so use the latest.
-  let root = ""
+  // Pull each input's Merkle path. Both must prove against the same root.
+  const paths: MerklePathResponse[] = []
   const proofInputs = []
   for (const note of inputs) {
     const commitment = await noteCommitmentV2(
@@ -83,7 +105,7 @@ export async function transfer(
       note.assetId
     )
     const pathRes = await fetchPath(commitment)
-    root = pathRes.root
+    paths.push(pathRes)
     proofInputs.push({
       amount: Number(note.amount),
       blinding_hex: note.blinding,
@@ -92,6 +114,11 @@ export async function transfer(
       indices: pathRes.indices
     })
   }
+
+  if (paths.length >= 2 && paths[0].root !== paths[1].root) {
+    throw new Error("Merkle tree updated during witness assembly; retry to synchronize roots")
+  }
+  const root = paths[0]?.root ?? ""
 
   // Output 0 → recipient, output 1 → change back to self. Fresh blinding each.
   const outBlind0 = randomHex32()
@@ -139,28 +166,36 @@ export async function transfer(
   }
   const { request_id } = (await res.json()) as { request_id: string }
 
-  // Mark the spent inputs and store the change note locally (the recipient
-  // discovers their output by scanning). A deposit note is identified by its
-  // signature, a discovered transfer note by its commitment.
-  for (const note of inputs) {
-    if (note.signature) {
-      await markNoteSpent(account, note.signature)
+  // Wait until the spend actually settles before touching local bookkeeping.
+  // /transfer/submit only returns a queue ticket — the ingress accepts the request
+  // before the proof is verified and the quorum settles it, so an HTTP 200 is not
+  // a settlement. Marking inputs spent or adding change prematurely corrupts the
+  // wallet balance if the transaction drops or fails (paraloom-core#792).
+  const changeCommitment = output_commitments[1]
+  const settleCommitmentHex = output_commitments[0]
+  const settled = confirmSettled
+    ? await confirmSettled()
+    : connection
+      ? await confirmSettledByTree(connection, settleCommitmentHex)
+      : false
+
+  if (settled) {
+    for (const note of inputs) {
+      await markNoteSpentByIdentity(account, note)
     }
-    if (note.commitment) {
-      await markNoteSpentByCommitment(account, note.commitment)
+    if (change > 0n) {
+      await addDiscoveredNote(account, {
+        amount: change.toString(),
+        blinding: outBlind1,
+        assetId: NATIVE_ASSET_HEX,
+        signature: "",
+        createdAt: Date.now(),
+        spent: false,
+        commitment: changeCommitment,
+        source: "transfer"
+      })
     }
   }
-  const changeCommitment = output_commitments[1]
-  await addDiscoveredNote(account, {
-    amount: change.toString(),
-    blinding: outBlind1,
-    assetId: NATIVE_ASSET_HEX,
-    signature: "",
-    createdAt: Date.now(),
-    spent: false,
-    commitment: changeCommitment,
-    source: "transfer"
-  })
 
-  return { requestId: request_id, changeCommitment }
+  return { requestId: request_id, changeCommitment, settled }
 }

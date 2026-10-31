@@ -7,8 +7,11 @@ import {
   shieldedTokenBalances,
   type ShieldedNote
 } from "~lib/paraloom/notes"
-import { beforeEach, describe, expect, it } from "vitest"
+import { persistReshieldedNote } from "~lib/paraloom/reshieldRecovery"
+import { beforeEach, describe, expect, it, vi } from "vitest"
 import { installFakeChrome } from "./support/chromeStorage"
+
+vi.mock("~lib/prover", () => ({ NATIVE_ASSET_HEX: "00".repeat(32) }))
 
 const ACCOUNT = "paraloom1" + "11".repeat(64)
 const OTHER_ACCOUNT = "paraloom1" + "22".repeat(64)
@@ -198,5 +201,39 @@ describe("note storage", () => {
     await addNote(ACCOUNT, deposit({ signature: "s1" }))
     await addNote(ACCOUNT, deposit({ signature: "s2", spent: true }))
     expect(await shieldedBalance(ACCOUNT)).toBe(1000n)
+  })
+})
+
+describe("persistReshieldedNote (#159)", () => {
+  it("normalizes empty string mint to undefined for native SOL notes", async () => {
+    await persistReshieldedNote(ACCOUNT, {
+      assetId: "00".repeat(32),
+      mint: "",
+      amount: "5000000",
+      blindingHex: "bb".repeat(32),
+      depositSignature: "sig-native-reshield"
+    })
+
+    const notes = await getNotes(ACCOUNT)
+    const saved = notes.find((n) => n.signature === "sig-native-reshield")
+    expect(saved).toBeDefined()
+    expect(saved?.mint).toBeUndefined()
+    expect(saved?.amount).toBe("5000000")
+  })
+
+  it("preserves non-empty SPL mint for token notes", async () => {
+    const splMint = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"
+    await persistReshieldedNote(ACCOUNT, {
+      assetId: "aa".repeat(32),
+      mint: splMint,
+      amount: "1000000",
+      blindingHex: "cc".repeat(32),
+      depositSignature: "sig-spl-reshield"
+    })
+
+    const notes = await getNotes(ACCOUNT)
+    const saved = notes.find((n) => n.signature === "sig-spl-reshield")
+    expect(saved).toBeDefined()
+    expect(saved?.mint).toBe(splMint)
   })
 })

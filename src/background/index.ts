@@ -872,7 +872,12 @@ async function handlePrivateSwap(
     const tokenCandidates = allNotes.filter(
       (n) => !n.spent && n.assetId === inputAssetId
     )
-    const tokenInputs = selectNotes(tokenCandidates, amount)
+    const validTokenCandidates = await dropPhantomNotes(
+      connection,
+      shieldedAddress,
+      tokenCandidates
+    )
+    const tokenInputs = selectNotes(validTokenCandidates, amount)
     const nativeCandidates = allNotes.filter(
       (n) => !n.spent && n.assetId === NATIVE_ASSET_HEX
     )

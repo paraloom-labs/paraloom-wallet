@@ -611,13 +611,23 @@ export async function privateSwapFromToken(
       const solBal = BigInt(await connection.getBalance(fresh.publicKey))
       const reshieldLamports = solBal - RESHIELD_FEE_RESERVE
       if (reshieldLamports > 0n) {
-        await depositV3(
+        const depResult = await depositV3(
           connection,
           { secretKey: fresh.secretKey },
           shieldedAddress,
           spendPrivkeyHex,
           reshieldLamports
         )
+        reshielded = {
+          assetId: NATIVE_ASSET_HEX,
+          mint: "",
+          amount: reshieldLamports.toString(),
+          blindingHex: "",
+          depositSignature: depResult.signature
+        }
+        if (onReshielded) {
+          await onReshielded(reshielded)
+        }
       }
     } catch {
       // leave the swapped SOL as a private buy at the fresh address

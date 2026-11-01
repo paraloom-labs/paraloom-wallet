@@ -35,7 +35,7 @@ export function parseShieldedAddress(addr: string): string | null {
   const body = rest.slice(0, SHIELDED_BODY_HEX)
   const csum = rest.slice(SHIELDED_BODY_HEX).toLowerCase()
   if (shieldedChecksum(body) !== csum) return null
-  return body
+  return body.toLowerCase()
 }
 
 export function isValidShieldedAddress(addr: string): boolean {

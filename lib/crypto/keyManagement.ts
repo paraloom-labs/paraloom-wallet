@@ -77,12 +77,16 @@ export async function deriveShieldedAddress(
 
 /** The box (encryption) public key half of a v2 shielded address, hex. */
 export function addressBoxPubHex(shieldedAddress: string): string {
-  return shieldedAddress.replace(/^paraloom1/, "").slice(0, 64)
+  const body = parseShieldedAddress(shieldedAddress)
+  if (body == null) throw new Error("Invalid shielded address")
+  return body.slice(0, 64)
 }
 
 /** The spend (commitment-binding) public key half of a v2 shielded address, hex. */
 export function addressSpendPubHex(shieldedAddress: string): string {
-  return shieldedAddress.replace(/^paraloom1/, "").slice(64, 128)
+  const body = parseShieldedAddress(shieldedAddress)
+  if (body == null) throw new Error("Invalid shielded address")
+  return body.slice(64, 128)
 }
 
 export interface EncryptedWallet {

@@ -431,12 +431,12 @@ export function Home({ onLock }: HomeProps) {
     setWithdrawing(true)
     try {
       const conn = getConnection(network)
-      const before = await getSolBalance(conn, targetBytes)
       // Circuit v3 (#350): a withdraw is a transact with ext_amount < 0; the
       // proof binds the destination and the quorum settles it. spendV3 marks the
       // inputs spent and books any change note ONLY once settlement is confirmed
-      // — the recipient balance rising above `before` — so a failed settlement
-      // never hides still-spendable funds (paraloom-core#792).
+      // via the output commitment landing in the on-chain Merkle tree — so an
+      // unrelated balance inflow/outflow or failed settlement never corrupts
+      // local note state (paraloom-core#792).
       const { requestId, settled } = await spendV3(
         conn,
         wallet.shieldedAddress,
@@ -444,16 +444,7 @@ export function Home({ onLock }: HomeProps) {
         addressBoxPubHex(wallet.shieldedAddress),
         inputs,
         lamports,
-        { kind: "withdraw", recipientSolanaHex: Buffer.from(targetBytes).toString("hex") },
-        {
-          confirmSettled: async () => {
-            for (let i = 0; i < 25; i++) {
-              await new Promise((r) => setTimeout(r, 2000))
-              if ((await getSolBalance(conn, targetBytes)) > before) return true
-            }
-            return false
-          }
-        }
+        { kind: "withdraw", recipientSolanaHex: Buffer.from(targetBytes).toString("hex") }
       )
       if (settled) {
         showToast(`Withdrew ${amt.toFixed(4)} SOL to Solana`, "success")

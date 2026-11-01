@@ -4,24 +4,17 @@
 // return change to the wallet as a new note — the audit #16 fix.
 
 import { Connection, Keypair, PublicKey } from "@solana/web3.js"
-
 import { addressBoxPubHex, addressSpendPubHex } from "~lib/crypto/keyManagement"
 import {
+  NATIVE_ASSET_HEX,
   proveTransact,
   v3MerklePath,
   v3NoteCommitment,
   v3NoteCommitmentAsset,
   v3NotePubkey
 } from "~lib/prover"
-
-import { NATIVE_ASSET_HEX } from "~lib/prover"
 import { encryptNote } from "./noteCrypto"
-import {
-  addNote,
-  markNoteSpentByIdentity,
-  setNoteLeafIndex,
-  type ShieldedNote
-} from "./notes"
+import { addNote, markNoteSpentByIdentity, setNoteLeafIndex, type ShieldedNote } from "./notes"
 import { confirmCommitmentInTree } from "./settlementConfirm"
 import { fetchV3Leaves, sendDepositNote, submitTransact } from "./transact"
 
@@ -53,12 +46,7 @@ function confirmSettledByTree(
   timeoutMs = SETTLE_CONFIRM_TIMEOUT_MS,
   pollMs = SETTLE_CONFIRM_POLL_MS
 ): Promise<boolean> {
-  return confirmCommitmentInTree(
-    () => fetchV3Leaves(connection),
-    commitmentHex,
-    timeoutMs,
-    pollMs
-  )
+  return confirmCommitmentInTree(() => fetchV3Leaves(connection), commitmentHex, timeoutMs, pollMs)
 }
 
 /// Deposit lamports as a v3 note: the program computes the commitment and
@@ -180,6 +168,9 @@ export interface SpendOptions {
   /// recipient-balance poll it already runs; when omitted (a shielded transfer),
   /// spendV3 falls back to watching the output commitment land in the tree.
   confirmSettled?: () => Promise<boolean>
+  /// Optional asset guard: enforces that all spent notes match this assetId,
+  /// preventing cross-asset confusion (e.g. native SOL flows spending SPL notes).
+  expectedAssetIdHex?: string
 }
 
 /// Spend 1–2 notes through the unified transact:
@@ -215,8 +206,12 @@ export async function spendV3(
   if (inputs.some((n) => (n.assetId || NATIVE_ASSET_HEX) !== assetIdHex)) {
     throw new Error("all spent notes must share one asset")
   }
+  if (opts.expectedAssetIdHex && assetIdHex !== opts.expectedAssetIdHex) {
+    throw new Error(`expected asset ${opts.expectedAssetIdHex}, got ${assetIdHex}`)
+  }
   const isSpl = assetIdHex !== NATIVE_ASSET_HEX
-  const mintHex = isSpl && inputs[0].mint ? new PublicKey(inputs[0].mint).toBuffer().toString("hex") : undefined
+  const mintHex =
+    isSpl && inputs[0].mint ? new PublicKey(inputs[0].mint).toBuffer().toString("hex") : undefined
   if (isSpl && !mintHex) {
     throw new Error("a shielded SPL note must carry its mint to be spent")
   }

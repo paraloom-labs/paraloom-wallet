@@ -47,19 +47,25 @@ const DEFAULT_AUTO_LOCK_MINUTES = 60
 // buried under worthless fillers, but still counted in the shielded total.
 const WITHDRAW_DUST_LAMPORTS = 1_000_000n // 0.001 SOL
 
-// Unspent native (non-token) notes worth withdrawing, largest first.
-function spendableSolNotes(all: ShieldedNote[]): ShieldedNote[] {
+function unspentNativeSolNotes(all: ShieldedNote[]): ShieldedNote[] {
   return all
     .filter(
       (n) =>
         !n.spent &&
         (!n.assetId || n.assetId === NATIVE_ASSET_HEX) &&
-        BigInt(n.amount) >= WITHDRAW_DUST_LAMPORTS
+        BigInt(n.amount) > 0n
     )
     .sort((a, b) => {
       const d = BigInt(b.amount) - BigInt(a.amount)
       return d > 0n ? 1 : d < 0n ? -1 : 0
     })
+}
+
+// Unspent native (non-token) notes worth withdrawing as a primary note, largest first.
+function spendableSolNotes(all: ShieldedNote[]): ShieldedNote[] {
+  return unspentNativeSolNotes(all).filter(
+    (n) => BigInt(n.amount) >= WITHDRAW_DUST_LAMPORTS
+  )
 }
 
 // Pick up to 2 spendable notes covering `lamports` (a transact spends 1–2 and
@@ -68,7 +74,10 @@ function selectSolWithdrawNotes(
   all: ShieldedNote[],
   lamports: bigint
 ): ShieldedNote[] | null {
-  const sorted = spendableSolNotes(all)
+  const sorted = unspentNativeSolNotes(all)
+  if (sorted.length === 0 || BigInt(sorted[0].amount) < WITHDRAW_DUST_LAMPORTS) {
+    return null
+  }
   const chosen: ShieldedNote[] = []
   let sum = 0n
   for (const n of sorted) {
@@ -496,9 +505,7 @@ export function Home({ onLock }: HomeProps) {
 
     // Circuit v3 (#350): spend 1 or 2 notes; change comes back as a new note
     // (audit #16), so partial amounts work from a single note.
-    const unspent = notes
-      .filter((n) => !n.spent)
-      .sort((a, b) => Number(BigInt(b.amount) - BigInt(a.amount)))
+    const unspent = unspentNativeSolNotes(notes)
     const inputs: ShieldedNote[] = []
     let covered = 0n
     for (const n of unspent) {

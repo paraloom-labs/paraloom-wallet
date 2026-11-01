@@ -368,8 +368,13 @@ export async function spendV3(
     for (const note of inputs) {
       await markNoteSpentByIdentity(shieldedAddress, note)
     }
-    if (change > 0n) {
-      await addNote(shieldedAddress, {
+    const isSelfTransfer = toSpendPub.toLowerCase() === ownPubHex.toLowerCase()
+    if (change > 0n || isSelfTransfer) {
+      // Self-transfers discard outputs[0] (payLamports, payBlind) when the node's
+      // ephemeral scan cache is lost, so persist payBlind locally too when the
+      // recipient is the sender's own spend key. Outputs[1] (change) persists as
+      // before when change > 0n.
+      const baseNote = {
         amount: change.toString(),
         blinding: changeBlind,
         assetId: assetIdHex,
@@ -377,9 +382,22 @@ export async function spendV3(
         signature: "",
         createdAt: Date.now(),
         spent: false,
-        source: "transfer",
-        commitment: await noteCommitment(change, ownPubHex, changeBlind)
-      })
+        source: "transfer"
+      }
+      if (isSelfTransfer) {
+        await addNote(shieldedAddress, {
+          ...baseNote,
+          amount: payLamports.toString(),
+          blinding: payBlind,
+          commitment: await noteCommitment(payLamports, ownPubHex, payBlind)
+        })
+      }
+      if (change > 0n) {
+        await addNote(shieldedAddress, {
+          ...baseNote,
+          commitment: await noteCommitment(change, ownPubHex, changeBlind)
+        })
+      }
     }
   }
 

@@ -11,6 +11,7 @@ export const SOL_MINT = "So11111111111111111111111111111111111111112"
 export interface TokenPrice {
   usdPrice: number
   priceChange24h: number // percent, e.g. -0.19
+  decimals?: number
 }
 
 export async function fetchPrices(
@@ -28,14 +29,15 @@ export async function fetchPrices(
     if (!res.ok) return {}
     const data = (await res.json()) as Record<
       string,
-      { usdPrice?: number; priceChange24h?: number } | null
+      { usdPrice?: number; priceChange24h?: number; decimals?: number } | null
     >
     const out: Record<string, TokenPrice> = {}
     for (const [mint, v] of Object.entries(data)) {
       if (v && typeof v.usdPrice === "number") {
         out[mint] = {
           usdPrice: v.usdPrice,
-          priceChange24h: typeof v.priceChange24h === "number" ? v.priceChange24h : 0
+          priceChange24h: typeof v.priceChange24h === "number" ? v.priceChange24h : 0,
+          decimals: typeof v.decimals === "number" ? v.decimals : undefined
         }
       }
     }

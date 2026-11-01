@@ -9,6 +9,7 @@ import { getStoredWallet } from "~lib/storage/secure"
 import type { Account } from "~lib/store/walletStore"
 import { getConnection, deposit, getSolBalance, solanaAddress, solanaAddressToBytes } from "~lib/paraloom/bridge"
 import { addNote, getNotes, markNoteSpent, shieldedBalance, shieldedTokenBalances, type ShieldedNote } from "~lib/paraloom/notes"
+import { parseShieldedAddress } from "~lib/crypto/addressChecksum"
 
 // Known shielded SPL tokens for display; unknown mints fall back to a truncated
 // mint and raw base units.
@@ -483,7 +484,7 @@ export function Home({ onLock }: HomeProps) {
       showToast("Enter a valid paraloom1… shielded address", "error")
       return
     }
-    if (to === wallet.shieldedAddress) {
+    if (parseShieldedAddress(to) === parseShieldedAddress(wallet.shieldedAddress)) {
       showToast("Cannot transfer to your own address", "error")
       return
     }
@@ -784,14 +785,15 @@ export function Home({ onLock }: HomeProps) {
                   symbol: meta?.symbol ?? `${mint.slice(0, 4)}…`,
                   usdcMark: mint === USDC_MINT,
                   amount,
-                  decimals: meta?.decimals ?? 0,
+                  decimals: meta?.decimals ?? prices[mint]?.decimals ?? 0,
                   mint,
                   privacy: "shielded"
                 })
               }
               const usdOf = (h: Holding): number | null => {
                 const p = prices[h.mint]?.usdPrice
-                return p != null ? (Number(h.amount) / 10 ** h.decimals) * p : null
+                if (p == null || h.decimals == null) return null
+                return (Number(h.amount) / 10 ** h.decimals) * p
               }
               const total = holdings.reduce((s, h) => s + (usdOf(h) ?? 0), 0)
               const shieldedUsd = holdings
@@ -954,7 +956,7 @@ export function Home({ onLock }: HomeProps) {
                               : s.outputMint === USDC_MINT
                                 ? "USDC"
                                 : "token"
-                            const outDiv = isSolOut ? 1e9 : 1e6
+                            const outDiv = isSolOut ? 1e9 : prices[s.outputMint]?.decimals ? 10 ** prices[s.outputMint]!.decimals : 1e6
                             return (
                               <div
                                 key={s.freshAddress || `buy-${i}`}
@@ -1030,7 +1032,7 @@ export function Home({ onLock }: HomeProps) {
                             n.mint === USDC_MINT_DEP
                               ? (Number(n.amount) / 1e6).toFixed(4)
                               : n.mint
-                                ? n.amount
+                                ? (Number(n.amount) / 10 ** (prices[n.mint]?.decimals ?? 6)).toFixed(4)
                                 : (Number(n.amount) / 1e9).toFixed(4)
                           return (
                             <div

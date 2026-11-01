@@ -108,7 +108,10 @@ export async function sendDepositNote(
       // swallow — confirmation proceeds regardless
     }
   }
-  await confirmBySignatureStatus(connection, signature)
+  const confirmed = await confirmBySignatureStatus(connection, signature)
+  if (!confirmed) {
+    throw new Error(`deposit transaction ${signature} was not confirmed within timeout`)
+  }
   return signature
 }
 

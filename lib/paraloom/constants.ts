@@ -12,9 +12,7 @@ export const DEPOSIT_DISCRIMINATOR = new Uint8Array([242, 35, 198, 137, 82, 225,
 export const DEPOSIT_NOTE_DISCRIMINATOR = new Uint8Array([75, 212, 96, 185, 178, 167, 29, 57])
 // #779: sha256("global:deposit_note_spl")[..8] — the SPL analogue that moves a
 // token into its per-mint asset vault and appends the note (asset = the mint).
-export const DEPOSIT_NOTE_SPL_DISCRIMINATOR = new Uint8Array([
-  244, 219, 167, 106, 7, 120, 254, 253
-])
+export const DEPOSIT_NOTE_SPL_DISCRIMINATOR = new Uint8Array([244, 219, 167, 106, 7, 120, 254, 253])
 // sha256("event:DepositNoteEvent")[..8] / sha256("event:TransactEvent")[..8] —
 // the program events the wallet scans to rebuild the v3 tree client-side.
 export const DEPOSIT_NOTE_EVENT_DISCRIMINATOR = new Uint8Array([85, 20, 187, 76, 92, 196, 249, 195])
@@ -25,6 +23,9 @@ export const DEPOSIT_NOTE_SPL_EVENT_DISCRIMINATOR = new Uint8Array([
   229, 33, 39, 208, 18, 5, 237, 1
 ])
 export const TRANSACT_EVENT_DISCRIMINATOR = new Uint8Array([89, 245, 87, 250, 222, 30, 135, 142])
+
+// All-zero asset identifier representing native SOL in circuit v3 / #779.
+export const NATIVE_ASSET_HEX = "00".repeat(32)
 
 // PDA seeds.
 export const BRIDGE_STATE_SEED = "bridge_state"

@@ -4,24 +4,17 @@
 // return change to the wallet as a new note — the audit #16 fix.
 
 import { Connection, Keypair, PublicKey } from "@solana/web3.js"
-
 import { addressBoxPubHex, addressSpendPubHex } from "~lib/crypto/keyManagement"
 import {
+  NATIVE_ASSET_HEX,
   proveTransact,
   v3MerklePath,
   v3NoteCommitment,
   v3NoteCommitmentAsset,
   v3NotePubkey
 } from "~lib/prover"
-
-import { NATIVE_ASSET_HEX } from "~lib/prover"
 import { encryptNote } from "./noteCrypto"
-import {
-  addNote,
-  markNoteSpentByIdentity,
-  setNoteLeafIndex,
-  type ShieldedNote
-} from "./notes"
+import { addNote, markNoteSpentByIdentity, setNoteLeafIndex, type ShieldedNote } from "./notes"
 import { confirmCommitmentInTree } from "./settlementConfirm"
 import { fetchV3Leaves, sendDepositNote, submitTransact } from "./transact"
 
@@ -43,22 +36,15 @@ const SETTLE_CONFIRM_POLL_MS = 6_000
 // in the on-chain tree. Settlement is atomic — the transact instruction records
 // the input nullifiers and appends both output commitments together — so the
 // output commitment appearing is proof the nullifiers were consumed and the
-// inputs are truly spent. Used as the settlement signal for a shielded transfer,
-// which has no external recipient balance to watch (a withdraw's caller passes a
-// cheaper `confirmSettled` that polls the funded address instead). The polling
-// logic lives in settlementConfirm.ts so it can be unit-tested without the prover.
+// inputs are truly spent. The polling logic lives in settlementConfirm.ts so it
+// can be unit-tested without the prover.
 function confirmSettledByTree(
   connection: Connection,
   commitmentHex: string,
   timeoutMs = SETTLE_CONFIRM_TIMEOUT_MS,
   pollMs = SETTLE_CONFIRM_POLL_MS
 ): Promise<boolean> {
-  return confirmCommitmentInTree(
-    () => fetchV3Leaves(connection),
-    commitmentHex,
-    timeoutMs,
-    pollMs
-  )
+  return confirmCommitmentInTree(() => fetchV3Leaves(connection), commitmentHex, timeoutMs, pollMs)
 }
 
 /// Deposit lamports as a v3 note: the program computes the commitment and
@@ -175,10 +161,10 @@ export interface SpendOptions {
   /// Bearer token for the transact ingress, when the endpoint gates submission.
   ingressToken?: string
   /// Settlement signal supplied by the caller: resolves true once the spend is
-  /// confirmed on-chain (e.g. the withdrawn funds landed at the recipient), or
-  /// false on timeout. A withdraw caller passes this to reuse the cheap
-  /// recipient-balance poll it already runs; when omitted (a shielded transfer),
-  /// spendV3 falls back to watching the output commitment land in the tree.
+  /// confirmed on-chain, or false on timeout. Used by callers that manage
+  /// dedicated ephemeral recipient accounts (e.g. private swaps); when omitted,
+  /// spendV3 verifies settlement cryptographically by watching the output
+  /// commitment land in the on-chain tree via confirmSettledByTree.
   confirmSettled?: () => Promise<boolean>
 }
 
@@ -216,7 +202,8 @@ export async function spendV3(
     throw new Error("all spent notes must share one asset")
   }
   const isSpl = assetIdHex !== NATIVE_ASSET_HEX
-  const mintHex = isSpl && inputs[0].mint ? new PublicKey(inputs[0].mint).toBuffer().toString("hex") : undefined
+  const mintHex =
+    isSpl && inputs[0].mint ? new PublicKey(inputs[0].mint).toBuffer().toString("hex") : undefined
   if (isSpl && !mintHex) {
     throw new Error("a shielded SPL note must carry its mint to be spent")
   }
@@ -345,15 +332,23 @@ export async function spendV3(
   // funds as spent and showed a change note whose commitment never landed
   // on-chain — corrupting the balance in both directions with no self-healing
   // path (paraloom-core#792). The signal is the first output commitment landing
-  // in the tree; a withdraw caller supplies a cheaper recipient-funded check.
+  // in the tree (confirmSettledByTree). If a caller provides a custom confirmSettled
+  // callback, wrap it in try/catch so transient errors cannot abort bookkeeping.
   const settleCommitmentHex = await noteCommitment(
     outputs[0].amount,
     outputs[0].pubkeyHex,
     outputs[0].blindingHex
   )
-  const settled = opts.confirmSettled
-    ? await opts.confirmSettled()
-    : await confirmSettledByTree(connection, settleCommitmentHex)
+  let settled = false
+  if (opts.confirmSettled) {
+    try {
+      settled = await opts.confirmSettled()
+    } catch {
+      settled = false
+    }
+  } else {
+    settled = await confirmSettledByTree(connection, settleCommitmentHex)
+  }
 
   if (settled) {
     // Mark inputs spent and record the change note locally. Deliberately WITHOUT

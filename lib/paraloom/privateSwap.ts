@@ -665,6 +665,9 @@ export async function resumeSwapAtFreshAddress(
   freshSecretKeyHex: string,
   outputMint: string,
   reshield: boolean,
+  // Needed only for the native leg: the re-shield is a `depositV3`, whose note
+  // commitment binds the account's spend key.
+  spendPrivkeyHex: string,
   onReshielded?: (note: ReshieldedNote) => Promise<void>
 ): Promise<ResumeSwapResult> {
   const fresh = Keypair.fromSecretKey(
@@ -684,7 +687,30 @@ export async function resumeSwapAtFreshAddress(
   )
 
   let reshielded: ReshieldedNote | undefined
-  if (reshield && outputMint !== "SOL") {
+  // `isNativeSolOutput`, not `!== "SOL"`: the swaps app sends the wrapped mint
+  // for a SOL output and Jupiter unwraps it, so a literal comparison sends a
+  // native output down the token branch. `reshieldToken` then reads a WSOL ATA
+  // that the unwrapped lamports never funded, gets 0 back, and returns early —
+  // the resumed round trip is dropped without an error.
+  if (reshield && isNativeSolOutput(outputMint)) {
+    // Native: sweep the SOL the swap just produced back into the pool, the same
+    // way the forward path does. `depositV3` persists the note itself.
+    try {
+      const solBal = BigInt(await connection.getBalance(fresh.publicKey))
+      const reshieldLamports = solBal - RESHIELD_FEE_RESERVE
+      if (reshieldLamports > 0n) {
+        await depositV3(
+          connection,
+          { secretKey: fresh.secretKey },
+          shieldedAddress,
+          spendPrivkeyHex,
+          reshieldLamports
+        )
+      }
+    } catch {
+      // Leaves the SOL as a private buy at the fresh address, same as forward.
+    }
+  } else if (reshield) {
     reshielded = await reshieldToken(
       connection,
       fresh,

@@ -20,6 +20,7 @@ import {
 } from "~lib/paraloom/privateSwap"
 import { persistReshieldedNote, recoverReshields } from "~lib/paraloom/reshieldRecovery"
 import { reconcileSwapOutputs } from "~lib/paraloom/swapReconcile"
+import { isNativeSolOutput } from "~lib/paraloom/swapReconcileClassify"
 import { assetIdForMint, NATIVE_ASSET_HEX } from "~lib/prover"
 
 // Private swaps are mainnet-only (Jupiter liquidity) and rebuilding the v3 tree
@@ -418,7 +419,8 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         const connection = new Connection(PRIVATE_SWAP_RPC_URL, "confirmed")
         const recovered = await reconcileSwapOutputs(
           connection,
-          session.wallet.shieldedAddress
+          session.wallet.shieldedAddress,
+          Buffer.from(session.wallet.spendPrivkey).toString("hex")
         )
         const reshielded = await recoverReshields(
           connection,
@@ -859,12 +861,13 @@ async function handlePrivateSwap(
   // gas withdraw was even submitted. It already runs on connect (resumeSwaps)
   // and is guarded against double-runs; the new swap uses its own fresh address,
   // so a concurrent background reconcile cannot conflict with it.
-  void reconcileSwapOutputs(connection, shieldedAddress).catch(() => 0)
+  void reconcileSwapOutputs(connection, shieldedAddress, spendPrivkeyHex).catch(() => 0)
   void recoverReshields(connection, shieldedAddress).catch(() => 0)
 
   // Token-input swap (e.g. USDC -> SOL): spend a shielded SPL note and self-fund
   // gas from the user's own shielded SOL (Plan A′, full privacy).
-  if (params.inputMint && params.inputMint !== "SOL") {
+  // `isNativeSolOutput`, not `!== "SOL"`: the swaps app sends the wrapped mint.
+  if (params.inputMint && !isNativeSolOutput(params.inputMint)) {
     const inputAssetId = await assetIdForMint(
       new PublicKey(params.inputMint).toBuffer().toString("hex")
     )

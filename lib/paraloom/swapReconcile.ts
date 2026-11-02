@@ -39,7 +39,10 @@ let reconcileInFlight = false
 /// left as-is. Returns the number of rows it moved out of the pending state.
 export async function reconcileSwapOutputs(
   connection: Connection,
-  shieldedAddress: string
+  shieldedAddress: string,
+  // The owning account's spend key. Only used when a resumed row has to re-shield
+  // a native output, whose deposit note binds it.
+  spendPrivkeyHex: string
 ): Promise<number> {
   if (reconcileInFlight) return 0
   reconcileInFlight = true
@@ -103,6 +106,9 @@ export async function reconcileSwapOutputs(
             o.freshSecretKeyHex,
             o.outputMint,
             o.reshield ?? false,
+            // The account's spend key: the native re-shield is a depositV3 whose
+            // note commitment binds it.
+            spendPrivkeyHex,
             (note) => persistReshieldedNote(shieldedAddress, note)
           )
           await saveSwapOutput({

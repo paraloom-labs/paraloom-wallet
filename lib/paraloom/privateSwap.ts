@@ -495,6 +495,31 @@ export async function privateSwapFromToken(
   if (params.amountTokenUnits <= 0n) throw new Error("amount must be > 0")
 
   const inputMintPk = new PublicKey(params.inputMint)
+  if (tokenInputs.length < 1 || tokenInputs.length > 2) {
+    throw new Error("token swap requires 1 or 2 shielded token notes")
+  }
+  // Bind every selected token note's `assetId` and `mint` to `params.inputMint`
+  // BEFORE persisting a fresh swap output, spending `GAS_LAMPORTS` of shielded
+  // SOL, or funding an ATA. Otherwise a note with a mismatched mint fails only
+  // at Step 3 after the gas withdrawal and ATA rent are already spent on-chain.
+  const expectedMintBase58 = inputMintPk.toBase58()
+  const expectedMintHex = Buffer.from(inputMintPk.toBytes()).toString("hex")
+  const expectedAssetId = (await assetIdForMint(expectedMintHex)).toLowerCase()
+  for (const n of tokenInputs) {
+    if ((n.assetId || "").toLowerCase() !== expectedAssetId) {
+      throw new Error("token input note assetId does not match inputMint")
+    }
+    let noteMintBase58: string
+    try {
+      noteMintBase58 = typeof n.mint === "string" ? new PublicKey(n.mint).toBase58() : ""
+    } catch {
+      noteMintBase58 = ""
+    }
+    if (noteMintBase58 !== expectedMintBase58) {
+      throw new Error("token input note mint does not match inputMint")
+    }
+  }
+
   const fresh = Keypair.generate()
   const freshHex = Buffer.from(fresh.publicKey.toBytes()).toString("hex")
   const ata = associatedTokenAddress(fresh.publicKey, inputMintPk)

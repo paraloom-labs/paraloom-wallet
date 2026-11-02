@@ -9,6 +9,13 @@ import { getStoredWallet } from "~lib/storage/secure"
 import type { Account } from "~lib/store/walletStore"
 import { getConnection, deposit, getSolBalance, solanaAddress, solanaAddressToBytes } from "~lib/paraloom/bridge"
 import { addNote, getNotes, markNoteSpent, shieldedBalance, shieldedTokenBalances, type ShieldedNote } from "~lib/paraloom/notes"
+import {
+  maxSolWithdrawLamports,
+  selectSolWithdrawNotes,
+  selectTransferInputs,
+  spendableSolNotes,
+  unspentNativeNotes
+} from "~lib/paraloom/noteSelection"
 
 // Known shielded SPL tokens for display; unknown mints fall back to a truncated
 // mint and raw base units.
@@ -41,44 +48,6 @@ const AUTO_LOCK_OPTIONS: { value: number; label: string }[] = [
   { value: 240, label: "4 hours" }
 ]
 const DEFAULT_AUTO_LOCK_MINUTES = 60
-
-// Below this a native note costs more to withdraw (25 bps fee + tx fee) than it
-// is worth: it is dust. Hidden from the withdraw selection so the picker isn't
-// buried under worthless fillers, but still counted in the shielded total.
-const WITHDRAW_DUST_LAMPORTS = 1_000_000n // 0.001 SOL
-
-// Unspent native (non-token) notes worth withdrawing, largest first.
-function spendableSolNotes(all: ShieldedNote[]): ShieldedNote[] {
-  return all
-    .filter(
-      (n) =>
-        !n.spent &&
-        (!n.assetId || n.assetId === NATIVE_ASSET_HEX) &&
-        BigInt(n.amount) >= WITHDRAW_DUST_LAMPORTS
-    )
-    .sort((a, b) => {
-      const d = BigInt(b.amount) - BigInt(a.amount)
-      return d > 0n ? 1 : d < 0n ? -1 : 0
-    })
-}
-
-// Pick up to 2 spendable notes covering `lamports` (a transact spends 1–2 and
-// returns change). Null if 2 notes can't cover it.
-function selectSolWithdrawNotes(
-  all: ShieldedNote[],
-  lamports: bigint
-): ShieldedNote[] | null {
-  const sorted = spendableSolNotes(all)
-  const chosen: ShieldedNote[] = []
-  let sum = 0n
-  for (const n of sorted) {
-    chosen.push(n)
-    sum += BigInt(n.amount)
-    if (sum >= lamports) return chosen
-    if (chosen.length === 2) break
-  }
-  return null
-}
 
 interface Token {
   symbol: string
@@ -419,9 +388,7 @@ export function Home({ onLock }: HomeProps) {
     // whole note. A single withdraw settles at most 2 notes.
     const inputs = selectSolWithdrawNotes(notes, lamports)
     if (!inputs) {
-      const max = spendableSolNotes(notes)
-        .slice(0, 2)
-        .reduce((s, n) => s + BigInt(n.amount), 0n)
+      const max = maxSolWithdrawLamports(notes)
       showToast(
         `Max ${(Number(max) / 1e9).toFixed(4)} SOL per withdraw (2 notes); withdraw in parts`,
         "error"
@@ -452,7 +419,8 @@ export function Home({ onLock }: HomeProps) {
               if ((await getSolBalance(conn, targetBytes)) > before) return true
             }
             return false
-          }
+          },
+          expectedAssetIdHex: NATIVE_ASSET_HEX
         }
       )
       if (settled) {
@@ -495,18 +463,11 @@ export function Home({ onLock }: HomeProps) {
     const amount = BigInt(Math.round(sol * 1e9))
 
     // Circuit v3 (#350): spend 1 or 2 notes; change comes back as a new note
-    // (audit #16), so partial amounts work from a single note.
-    const unspent = notes
-      .filter((n) => !n.spent)
-      .sort((a, b) => Number(BigInt(b.amount) - BigInt(a.amount)))
-    const inputs: ShieldedNote[] = []
-    let covered = 0n
-    for (const n of unspent) {
-      if (covered >= amount || inputs.length === 2) break
-      inputs.push(n)
-      covered += BigInt(n.amount)
-    }
-    if (covered < amount) {
+    // (audit #16), so partial amounts work from a single note. Native only —
+    // notes also holds shielded SPL notes, whose raw amount is in token base
+    // units and which spendV3 would otherwise infer as the asset to send (#195).
+    const inputs = selectTransferInputs(notes, amount)
+    if (!inputs) {
       showToast("Your notes don't cover that amount", "error")
       return
     }
@@ -525,7 +486,8 @@ export function Home({ onLock }: HomeProps) {
         addressBoxPubHex(wallet.shieldedAddress),
         inputs,
         amount,
-        { kind: "transfer", recipientShielded: to }
+        { kind: "transfer", recipientShielded: to },
+        { expectedAssetIdHex: NATIVE_ASSET_HEX }
       )
       if (settled) {
         showToast(`Transfer settled (${requestId.slice(0, 14)}…)`, "success")
@@ -1721,10 +1683,10 @@ export function Home({ onLock }: HomeProps) {
               {(() => {
                 const spend = spendableSolNotes(notes)
                 const spendSum = spend.reduce((s, n) => s + BigInt(n.amount), 0n)
-                const maxOne = spend.slice(0, 2).reduce((s, n) => s + BigInt(n.amount), 0n)
-                const allSol = notes.filter(
-                  (n) => !n.spent && (!n.assetId || n.assetId === NATIVE_ASSET_HEX)
-                )
+                // A dust note is only unusable on its own; as the second input of
+                // a 2-note spend it costs nothing extra, so it still counts here.
+                const maxOne = maxSolWithdrawLamports(notes)
+                const allSol = unspentNativeNotes(notes)
                 const dustCount = allSol.length - spend.length
                 const dustSum =
                   allSol.reduce((s, n) => s + BigInt(n.amount), 0n) - spendSum
@@ -1750,11 +1712,11 @@ export function Home({ onLock }: HomeProps) {
                       onChange={(e) => setWithdrawAmount(e.target.value)}
                     />
                     <div className="balance-info">
-                      {spend.length === 0
+                      {maxOne === 0n
                         ? "No spendable notes — deposit first"
                         : `Up to ${(Number(maxOne) / 1e9).toFixed(4)} SOL per withdraw (2 notes at a time)`}
                       {dustCount > 0 &&
-                        ` · ${(Number(dustSum) / 1e9).toFixed(4)} SOL in ${dustCount} dust note(s) hidden`}
+                        ` · ${(Number(dustSum) / 1e9).toFixed(4)} SOL in ${dustCount} dust note(s), usable as the second input`}
                     </div>
                   </div>
                 )
@@ -1767,7 +1729,7 @@ export function Home({ onLock }: HomeProps) {
                   !withdrawAddress.trim() ||
                   !withdrawAmount ||
                   Number(withdrawAmount) <= 0 ||
-                  spendableSolNotes(notes).length === 0
+                  maxSolWithdrawLamports(notes) === 0n
                 }
                 onClick={handleWithdraw}
               >

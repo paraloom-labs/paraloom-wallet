@@ -24,7 +24,7 @@ import {
   VersionedTransaction
 } from "@solana/web3.js"
 
-import { assetIdForMint } from "~lib/prover"
+import { assetIdForMint, NATIVE_ASSET_HEX } from "~lib/prover"
 
 import { associatedTokenAddress, createTokenAccount, depositSpl } from "./bridge"
 import { SWAP_ROUTER_URL } from "./constants"
@@ -337,6 +337,9 @@ export async function privateSwap(
     { kind: "withdraw", recipientSolanaHex: freshHex },
     {
       ingressToken,
+      // Both swap legs below withdraw SOL, so a shielded SPL note slipping into
+      // the input list must fail here rather than send a token instead (#195).
+      expectedAssetIdHex: NATIVE_ASSET_HEX,
       confirmSettled: async () => {
         try {
           funded = await waitForFunding(connection, fresh.publicKey)
@@ -524,6 +527,8 @@ export async function privateSwapFromToken(
     { kind: "withdraw", recipientSolanaHex: freshHex },
     {
       ingressToken,
+      // Gas is always native SOL, whatever the swapped token is (#195).
+      expectedAssetIdHex: NATIVE_ASSET_HEX,
       confirmSettled: async () => {
         try {
           await waitForFunding(connection, fresh.publicKey)

@@ -23,6 +23,7 @@ import {
   type ShieldedNote
 } from "./notes"
 import { confirmCommitmentInTree } from "./settlementConfirm"
+import { resolveSpendAsset } from "./noteSelection"
 import { fetchV3Leaves, sendDepositNote, submitTransact } from "./transact"
 
 function randomHex32(): string {
@@ -180,6 +181,11 @@ export interface SpendOptions {
   /// recipient-balance poll it already runs; when omitted (a shielded transfer),
   /// spendV3 falls back to watching the output commitment land in the tree.
   confirmSettled?: () => Promise<boolean>
+  /// The asset the caller means to spend (#195). The asset is otherwise inferred
+  /// from `inputs[0]`, so a caller that thinks it is moving SOL can silently be
+  /// made to send a token by a larger-value SPL note landing first in the list.
+  /// Native callers pass NATIVE_ASSET_HEX; checked before anything is proved.
+  expectedAssetIdHex?: string
 }
 
 /// Spend 1–2 notes through the unified transact:
@@ -211,10 +217,8 @@ export async function spendV3(
   // Asset (#779): every input in one transact shares a single asset. Native SOL
   // is the all-zero id; a shielded SPL note carries its mint-derived assetId and
   // the mint itself (needed to tell the node to settle via transact_spl).
-  const assetIdHex = inputs[0].assetId || NATIVE_ASSET_HEX
-  if (inputs.some((n) => (n.assetId || NATIVE_ASSET_HEX) !== assetIdHex)) {
-    throw new Error("all spent notes must share one asset")
-  }
+  // resolveSpendAsset also enforces the caller's `expectedAssetIdHex` (#195).
+  const assetIdHex = resolveSpendAsset(inputs, opts.expectedAssetIdHex)
   const isSpl = assetIdHex !== NATIVE_ASSET_HEX
   const mintHex = isSpl && inputs[0].mint ? new PublicKey(inputs[0].mint).toBuffer().toString("hex") : undefined
   if (isSpl && !mintHex) {

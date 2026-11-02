@@ -3,6 +3,7 @@ import {
   addNote,
   getNotes,
   markNoteSpentByIdentity,
+  repairNoteMint,
   shieldedBalance,
   shieldedTokenBalances,
   type ShieldedNote
@@ -198,5 +199,46 @@ describe("note storage", () => {
     await addNote(ACCOUNT, deposit({ signature: "s1" }))
     await addNote(ACCOUNT, deposit({ signature: "s2", spent: true }))
     expect(await shieldedBalance(ACCOUNT)).toBe(1000n)
+  })
+})
+
+describe("repairNoteMint", () => {
+  it("repairs the mint in-place while preserving all other note fields", async () => {
+    const commitment = "c0".repeat(32)
+    const original: ShieldedNote = {
+      amount: "500",
+      blinding: "bb".repeat(32),
+      assetId: "aa".repeat(32),
+      mint: "11111111111111111111111111111111",
+      signature: "",
+      createdAt: 12345,
+      spent: true,
+      commitment,
+      source: "transfer",
+      leafIndex: 42
+    }
+    await addDiscoveredNote(ACCOUNT, original)
+
+    const correctMint = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"
+    await repairNoteMint(ACCOUNT, commitment, correctMint)
+
+    const [repaired] = await getNotes(ACCOUNT)
+    expect(repaired).toEqual({
+      ...original,
+      mint: correctMint
+    })
+  })
+
+  it("does not modify notes with different commitments", async () => {
+    const c1 = "c1".repeat(32)
+    const c2 = "c2".repeat(32)
+    await addDiscoveredNote(ACCOUNT, received(c1, { mint: "mint1" }))
+    await addDiscoveredNote(ACCOUNT, received(c2, { mint: "mint2" }))
+
+    await repairNoteMint(ACCOUNT, c1, "repairedMint")
+
+    const notes = await getNotes(ACCOUNT)
+    expect(notes.find((n) => n.commitment === c1)?.mint).toBe("repairedMint")
+    expect(notes.find((n) => n.commitment === c2)?.mint).toBe("mint2")
   })
 })

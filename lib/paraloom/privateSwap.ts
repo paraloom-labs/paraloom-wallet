@@ -23,16 +23,14 @@ import {
   PublicKey,
   VersionedTransaction
 } from "@solana/web3.js"
-
-import { assetIdForMint } from "~lib/prover"
-
+import { assetIdForMint, NATIVE_ASSET_HEX } from "~lib/prover"
 import { associatedTokenAddress, createTokenAccount, depositSpl } from "./bridge"
 import { SWAP_ROUTER_URL } from "./constants"
 import type { ShieldedNote } from "./notes"
 import { saveSwapOutput } from "./swapOutputs"
+import { isNativeSolOutput, WSOL_MINT } from "./swapReconcileClassify"
 import { depositV3, spendV3 } from "./transactFlow"
 
-import { WSOL_MINT, isNativeSolOutput } from "./swapReconcileClassify"
 export { WSOL_MINT, isNativeSolOutput }
 
 /** Lamports left at the fresh address to cover the swap's own costs: the output
@@ -169,9 +167,7 @@ async function routeSwap(
         ROUTE_TIMEOUT_MS
       )
       if (!res.ok) {
-        lastErr = new Error(
-          `swap routing failed (${res.status}): ${await res.text()}`
-        )
+        lastErr = new Error(`swap routing failed (${res.status}): ${await res.text()}`)
       } else {
         return (await res.json()) as {
           out_amount: number
@@ -232,9 +228,7 @@ async function reshieldToken(
     const bal = await connection.getTokenAccountBalance(ata)
     const tokenAmount = BigInt(bal.value.amount)
     if (tokenAmount <= 0n) return undefined
-    const assetId = await assetIdForMint(
-      Buffer.from(mint.toBytes()).toString("hex")
-    )
+    const assetId = await assetIdForMint(Buffer.from(mint.toBytes()).toString("hex"))
     const mintBase58 = mint.toBase58()
     const dep = await depositSpl(
       connection,
@@ -436,10 +430,7 @@ export const GAS_LAMPORTS = 9_000_000n
 const RESHIELD_FEE_RESERVE = 1_000_000n
 
 // Poll an SPL token account until the withdrawn balance actually lands.
-async function waitForTokenFunding(
-  connection: Connection,
-  ata: PublicKey
-): Promise<bigint> {
+async function waitForTokenFunding(connection: Connection, ata: PublicKey): Promise<bigint> {
   const deadline = Date.now() + SETTLE_TIMEOUT_MS
   while (Date.now() < deadline) {
     await new Promise((r) => setTimeout(r, SETTLE_POLL_MS))
@@ -494,7 +485,49 @@ export async function privateSwapFromToken(
 ): Promise<PrivateSwapResult> {
   if (params.amountTokenUnits <= 0n) throw new Error("amount must be > 0")
 
-  const inputMintPk = new PublicKey(params.inputMint)
+  if (tokenInputs.length < 1 || tokenInputs.length > 2) {
+    throw new Error("transact spends 1 or 2 notes")
+  }
+  const sumToken = tokenInputs.reduce((acc, n) => acc + BigInt(n.amount), 0n)
+  if (sumToken < params.amountTokenUnits) {
+    throw new Error("amount exceeds the selected notes")
+  }
+  let inputMintPk: PublicKey
+  try {
+    inputMintPk = new PublicKey(params.inputMint)
+  } catch {
+    throw new Error("invalid input mint")
+  }
+  const canonicalInputMint = inputMintPk.toBase58()
+  const expectedAssetId = await assetIdForMint(Buffer.from(inputMintPk.toBytes()).toString("hex"))
+  for (const n of tokenInputs) {
+    if (!n.mint || n.assetId !== expectedAssetId) {
+      throw new Error("token inputs must match the swap input mint and assetId")
+    }
+    let noteMintPk: PublicKey
+    try {
+      noteMintPk = new PublicKey(n.mint)
+    } catch {
+      throw new Error("token inputs must match the swap input mint and assetId")
+    }
+    if (noteMintPk.toBase58() !== canonicalInputMint) {
+      throw new Error("token inputs must match the swap input mint and assetId")
+    }
+  }
+
+  if (gasInputs.length < 1 || gasInputs.length > 2) {
+    throw new Error("transact spends 1 or 2 notes")
+  }
+  const sumGas = gasInputs.reduce((acc, n) => acc + BigInt(n.amount), 0n)
+  if (sumGas < GAS_LAMPORTS) {
+    throw new Error("gas amount exceeds the selected notes")
+  }
+  for (const n of gasInputs) {
+    if (n.mint != null || (n.assetId && n.assetId !== NATIVE_ASSET_HEX)) {
+      throw new Error("gas inputs must be native SOL notes without a mint")
+    }
+  }
+
   const fresh = Keypair.generate()
   const freshHex = Buffer.from(fresh.publicKey.toBytes()).toString("hex")
   const ata = associatedTokenAddress(fresh.publicKey, inputMintPk)
@@ -667,9 +700,7 @@ export async function resumeSwapAtFreshAddress(
   reshield: boolean,
   onReshielded?: (note: ReshieldedNote) => Promise<void>
 ): Promise<ResumeSwapResult> {
-  const fresh = Keypair.fromSecretKey(
-    Uint8Array.from(Buffer.from(freshSecretKeyHex, "hex"))
-  )
+  const fresh = Keypair.fromSecretKey(Uint8Array.from(Buffer.from(freshSecretKeyHex, "hex")))
   const funded = BigInt(await connection.getBalance(fresh.publicKey))
   const swapLamports = funded - SWAP_OVERHEAD_LAMPORTS
   if (swapLamports <= 0n) {
@@ -685,13 +716,7 @@ export async function resumeSwapAtFreshAddress(
 
   let reshielded: ReshieldedNote | undefined
   if (reshield && outputMint !== "SOL") {
-    reshielded = await reshieldToken(
-      connection,
-      fresh,
-      shieldedAddress,
-      outputMint,
-      onReshielded
-    )
+    reshielded = await reshieldToken(connection, fresh, shieldedAddress, outputMint, onReshielded)
   }
 
   return { swapSignature, outAmount, reshielded }

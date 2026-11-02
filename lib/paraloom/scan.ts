@@ -13,7 +13,7 @@ import {
 } from "~lib/prover"
 import { TRANSACT_INGRESS_URL } from "./constants"
 import { tryDecryptNote } from "./noteCrypto"
-import { addDiscoveredNote, getNotes } from "./notes"
+import { addDiscoveredNote, getNotes, repairNoteMint } from "./notes"
 
 interface DeliveredNote {
   output_commitment: string
@@ -30,6 +30,7 @@ interface DeliveredNote {
 }
 
 const REJECT = Symbol("reject")
+const HEX_32_RE = /^[0-9a-fA-F]{64}$/
 
 /**
  * Resolve the mint to store as base58, or REJECT.
@@ -53,14 +54,19 @@ async function verifiedMint(
   if (isNative) {
     return mintHex == null ? undefined : REJECT
   }
-  if (mintHex == null) {
+  if (typeof mintHex !== "string" || !HEX_32_RE.test(mintHex)) {
     return REJECT
   }
   try {
-    if ((await assetIdForMint(mintHex)) !== assetIdHex) {
+    const canonicalMintHex = mintHex.toLowerCase()
+    const mintBytes = Buffer.from(canonicalMintHex, "hex")
+    if (mintBytes.length !== 32) {
       return REJECT
     }
-    return new PublicKey(Buffer.from(mintHex, "hex")).toBase58()
+    if ((await assetIdForMint(canonicalMintHex)) !== assetIdHex) {
+      return REJECT
+    }
+    return new PublicKey(mintBytes).toBase58()
   } catch {
     // Both calls have to be inside this, not just the decode. `assetIdForMint`
     // reaches wasm `hex32`, which returns Err — a thrown JsValue — on anything
@@ -75,6 +81,19 @@ async function verifiedMint(
     // a valid point still hashes to an assetId, so the check above can pass on a
     // mint the spend path cannot use.
     return REJECT
+  }
+}
+
+async function isValidNoteMint(mint: string | undefined, assetIdHex: string): Promise<boolean> {
+  if (!mint) return false
+  try {
+    const pk = new PublicKey(mint)
+    const bytes = pk.toBytes()
+    if (bytes.length !== 32) return false
+    const mintHex = Buffer.from(bytes).toString("hex")
+    return (await assetIdForMint(mintHex)) === assetIdHex
+  } catch {
+    return false
   }
 }
 
@@ -102,9 +121,23 @@ export async function scanForNotes(
   }
   const delivered = (await res.json()) as DeliveredNote[]
 
-  const known = new Set(
-    (await getNotes(account)).map((n) => n.commitment).filter(Boolean) as string[]
-  )
+  const existingNotes = await getNotes(account)
+  const needsMintRepair = new Set<string>()
+  const known = new Set<string>()
+
+  for (const n of existingNotes) {
+    if (!n.commitment) continue
+    const isSpl = Boolean(n.assetId && n.assetId !== NATIVE_ASSET_HEX)
+    if (isSpl) {
+      const valid = await isValidNoteMint(n.mint, n.assetId)
+      if (!valid) {
+        needsMintRepair.add(n.commitment)
+        continue
+      }
+    }
+    known.add(n.commitment)
+  }
+
   const spendPubHex = await v3NotePubkey(spendPrivkeyHex)
 
   let found = 0
@@ -135,6 +168,14 @@ export async function scanForNotes(
     // applies to every field the node hands us, not just the commitment.
     const mint = await verifiedMint(d.mint, note.assetIdHex, isNative)
     if (mint === REJECT) {
+      continue
+    }
+    if (needsMintRepair.has(d.output_commitment)) {
+      if (mint) {
+        await repairNoteMint(account, d.output_commitment, mint)
+      }
+      needsMintRepair.delete(d.output_commitment)
+      known.add(d.output_commitment)
       continue
     }
     await addDiscoveredNote(account, {

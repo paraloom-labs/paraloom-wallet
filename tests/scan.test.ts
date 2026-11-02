@@ -20,6 +20,7 @@
 import { PublicKey } from "@solana/web3.js"
 import { encryptNote } from "~lib/paraloom/noteCrypto"
 import {
+  addDiscoveredNote,
   getNotes,
   markNoteSpentByIdentity,
   shieldedBalance,
@@ -54,9 +55,10 @@ const {
     assetIdHex: string
   ) => `${fakeCommitment(amount, pubkeyHex, blindingHex)}@${assetIdHex.slice(0, 8)}`
   // `mint_to_asset` is one-way; this stand-in is too, and it keeps the 32-byte
-  // hex shape the note plaintext requires.
+  // hex shape the note plaintext requires. Mirrors wasm `hex32` (`s.trim()` and
+  // case-insensitive hex decode) so any WASM-vs-JS parser split surfaces here.
   const fakeAssetIdForMint = (mintHex: string) =>
-    (mintHex.match(/../g) ?? [])
+    (mintHex.trim().toLowerCase().match(/../g) ?? [])
       .map((b) => (parseInt(b, 16) ^ 0x5a).toString(16).padStart(2, "0"))
       .join("")
 
@@ -380,6 +382,99 @@ describe("received SPL notes (#23)", () => {
 
     expect(await shieldedBalance(ACCOUNT)).toBe(100n)
     expect(await shieldedTokenBalances(ACCOUNT)).toEqual({ [MINT]: 500n })
+  })
+
+  it.each([
+    ["leading space", " " + MINT_HEX],
+    ["two leading spaces", "  " + MINT_HEX],
+    ["leading tab", "\t" + MINT_HEX],
+    ["leading newline", "\n" + MINT_HEX],
+    ["leading CRLF", "\r\n" + MINT_HEX],
+    ["trailing space", MINT_HEX + " "],
+    ["0x-prefixed hex", "0x" + MINT_HEX],
+    ["non-string number", 12345 as unknown as string],
+    ["non-string object", { mint: MINT_HEX } as unknown as string]
+  ])(
+    "rejects a non-canonical or non-string mint (%s) without poisoning storage",
+    async (_label, badMint) => {
+      // wasm `hex32` calls `s.trim()` before decoding, while JS `Buffer.from(..., "hex")`
+      // either halts at byte 0 (`1111...1111` after `new PublicKey`) or shifts every
+      // nibble by 4 bits (`buffer` polyfill on odd leading whitespace). Rejecting
+      // anything outside `/^[0-9a-fA-F]{64}$/` up front keeps both sides on one byte slice.
+      respondWith([splNote(500n, badMint)])
+
+      await expect(scan()).resolves.toBe(0)
+      expect(await getNotes(ACCOUNT)).toEqual([])
+      const balances = await shieldedTokenBalances(ACCOUNT)
+      expect(balances).toEqual({})
+      expect(balances).not.toHaveProperty("11111111111111111111111111111111")
+    }
+  )
+
+  it("accepts uppercase 64-char hex without whitespace and stores canonical base58", async () => {
+    respondWith([splNote(500n, MINT_HEX.toUpperCase())])
+
+    expect(await scan()).toBe(1)
+    const [note] = await getNotes(ACCOUNT)
+    expect(note.mint).toBe(MINT)
+    expect(await shieldedTokenBalances(ACCOUNT)).toEqual({ [MINT]: 500n })
+  })
+
+  it.each([
+    ["zero-padded System Program mint", "11111111111111111111111111111111"],
+    ["nibble-shifted browser polyfill mint", "qYeA6v1G7vBH6Ev5ss9ZgkVuus5KaZsWq5cMBgn94Bw"]
+  ])(
+    "repairs a previously poisoned SPL note's mint (%s) on an honest rescan",
+    async (_label, poisonedMint) => {
+      const honestSpl = splNote(500n, MINT_HEX)
+      await addDiscoveredNote(ACCOUNT, {
+        amount: "500",
+        blinding: BLINDING,
+        assetId: MINT_ASSET,
+        mint: poisonedMint,
+        signature: "",
+        createdAt: 1,
+        spent: false,
+        commitment: honestSpl.output_commitment,
+        source: "transfer"
+      })
+      expect(await shieldedTokenBalances(ACCOUNT)).toEqual({
+        [poisonedMint]: 500n
+      })
+
+      respondWith([honestSpl])
+      expect(await scan()).toBe(0)
+
+      const notes = await getNotes(ACCOUNT)
+      expect(notes).toHaveLength(1)
+      expect(notes[0].mint).toBe(MINT)
+      expect(notes[0].createdAt).toBe(1)
+      expect(await shieldedTokenBalances(ACCOUNT)).toEqual({ [MINT]: 500n })
+    }
+  )
+
+  it("repairs a poisoned SPL note's mint without resurrecting a spent note", async () => {
+    const honestSpl = splNote(500n, MINT_HEX)
+    await addDiscoveredNote(ACCOUNT, {
+      amount: "500",
+      blinding: BLINDING,
+      assetId: MINT_ASSET,
+      mint: "11111111111111111111111111111111",
+      signature: "",
+      createdAt: 1,
+      spent: true,
+      commitment: honestSpl.output_commitment,
+      source: "transfer"
+    })
+
+    respondWith([honestSpl])
+    expect(await scan()).toBe(0)
+
+    const notes = await getNotes(ACCOUNT)
+    expect(notes).toHaveLength(1)
+    expect(notes[0].mint).toBe(MINT)
+    expect(notes[0].spent).toBe(true)
+    expect(await shieldedTokenBalances(ACCOUNT)).toEqual({})
   })
 })
 

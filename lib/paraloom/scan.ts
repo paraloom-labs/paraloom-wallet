@@ -13,7 +13,7 @@ import {
 } from "~lib/prover"
 import { TRANSACT_INGRESS_URL } from "./constants"
 import { tryDecryptNote } from "./noteCrypto"
-import { addDiscoveredNote, getNotes } from "./notes"
+import { addDiscoveredNote, getNotes, repairNoteMint, type ShieldedNote } from "./notes"
 
 interface DeliveredNote {
   output_commitment: string
@@ -26,10 +26,11 @@ interface DeliveredNote {
   // `null` as well as absent: a Rust `Option<String>` serializes None as null
   // unless the field is also skipped, so both spellings mean "no mint" and a
   // native note must not be rejected for arriving with one of them.
-  mint?: string | null
+  mint?: unknown
 }
 
 const REJECT = Symbol("reject")
+const HEX_32_RE = /^[0-9a-fA-F]{64}$/
 
 /**
  * Resolve the mint to store as base58, or REJECT.
@@ -46,21 +47,30 @@ const REJECT = Symbol("reject")
  * the wire form would give a note that can be discovered but not spent.
  */
 async function verifiedMint(
-  mintHex: string | undefined | null,
+  mintHex: unknown,
   assetIdHex: string,
   isNative: boolean
 ): Promise<string | undefined | typeof REJECT> {
   if (isNative) {
     return mintHex == null ? undefined : REJECT
   }
-  if (mintHex == null) {
+  // Enforce canonical 64-char hex before reaching wasm `hex32` (which calls
+  // `s.trim()`) or `Buffer.from(..., "hex")` (which halts on non-hex in Node or
+  // nibble-shifts on odd leading whitespace in the browser polyfill), so both
+  // `assetIdForMint` and `new PublicKey` operate on the exact same 32 bytes.
+  if (typeof mintHex !== "string" || !HEX_32_RE.test(mintHex)) {
     return REJECT
   }
+  const canonicalMintHex = mintHex.toLowerCase()
   try {
-    if ((await assetIdForMint(mintHex)) !== assetIdHex) {
+    const mintBytes = Uint8Array.from(Buffer.from(canonicalMintHex, "hex"))
+    if (mintBytes.length !== 32 || Buffer.from(mintBytes).toString("hex") !== canonicalMintHex) {
       return REJECT
     }
-    return new PublicKey(Buffer.from(mintHex, "hex")).toBase58()
+    if ((await assetIdForMint(canonicalMintHex)).toLowerCase() !== assetIdHex.toLowerCase()) {
+      return REJECT
+    }
+    return new PublicKey(mintBytes).toBase58()
   } catch {
     // Both calls have to be inside this, not just the decode. `assetIdForMint`
     // reaches wasm `hex32`, which returns Err — a thrown JsValue — on anything
@@ -75,6 +85,34 @@ async function verifiedMint(
     // a valid point still hashes to an assetId, so the check above can pass on a
     // mint the spend path cannot use.
     return REJECT
+  }
+}
+
+async function hasValidStoredMint(
+  note: ShieldedNote,
+  mintAssetCache: Map<string, string>
+): Promise<boolean> {
+  const assetId = note.assetId?.toLowerCase()
+  if (!assetId || assetId === NATIVE_ASSET_HEX) {
+    return note.mint == null
+  }
+  if (typeof note.mint !== "string" || note.mint.length === 0) {
+    return false
+  }
+  try {
+    const pk = new PublicKey(note.mint)
+    if (pk.toBase58() !== note.mint) {
+      return false
+    }
+    let derivedAsset = mintAssetCache.get(note.mint)
+    if (derivedAsset === undefined) {
+      const canonicalHex = Buffer.from(pk.toBytes()).toString("hex")
+      derivedAsset = (await assetIdForMint(canonicalHex)).toLowerCase()
+      mintAssetCache.set(note.mint, derivedAsset)
+    }
+    return derivedAsset === assetId
+  } catch {
+    return false
   }
 }
 
@@ -102,9 +140,20 @@ export async function scanForNotes(
   }
   const delivered = (await res.json()) as DeliveredNote[]
 
-  const known = new Set(
-    (await getNotes(account)).map((n) => n.commitment).filter(Boolean) as string[]
-  )
+  const known = new Set<string>()
+  const needsMintRepair = new Set<string>()
+  const mintAssetCache = new Map<string, string>()
+  for (const existing of await getNotes(account)) {
+    if (!existing.commitment) continue
+    if (await hasValidStoredMint(existing, mintAssetCache)) {
+      if (!needsMintRepair.has(existing.commitment)) {
+        known.add(existing.commitment)
+      }
+    } else {
+      known.delete(existing.commitment)
+      needsMintRepair.add(existing.commitment)
+    }
+  }
   const spendPubHex = await v3NotePubkey(spendPrivkeyHex)
 
   let found = 0
@@ -135,6 +184,12 @@ export async function scanForNotes(
     // applies to every field the node hands us, not just the commitment.
     const mint = await verifiedMint(d.mint, note.assetIdHex, isNative)
     if (mint === REJECT) {
+      continue
+    }
+    if (needsMintRepair.has(d.output_commitment)) {
+      await repairNoteMint(account, d.output_commitment, mint)
+      needsMintRepair.delete(d.output_commitment)
+      known.add(d.output_commitment)
       continue
     }
     await addDiscoveredNote(account, {

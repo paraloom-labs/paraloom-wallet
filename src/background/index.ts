@@ -865,12 +865,17 @@ async function handlePrivateSwap(
   // Token-input swap (e.g. USDC -> SOL): spend a shielded SPL note and self-fund
   // gas from the user's own shielded SOL (Plan A′, full privacy).
   if (params.inputMint && params.inputMint !== "SOL") {
-    const inputAssetId = await assetIdForMint(
-      new PublicKey(params.inputMint).toBuffer().toString("hex")
-    )
+    const inputMintPk = new PublicKey(params.inputMint)
+    const canonicalInputMint = inputMintPk.toBase58()
+    const inputAssetId = (
+      await assetIdForMint(Buffer.from(inputMintPk.toBytes()).toString("hex"))
+    ).toLowerCase()
     const allNotes = await getNotes(shieldedAddress)
     const tokenCandidates = allNotes.filter(
-      (n) => !n.spent && n.assetId === inputAssetId
+      (n) =>
+        !n.spent &&
+        (n.assetId || "").toLowerCase() === inputAssetId &&
+        n.mint === canonicalInputMint
     )
     const tokenInputs = selectNotes(tokenCandidates, amount)
     const nativeCandidates = allNotes.filter(

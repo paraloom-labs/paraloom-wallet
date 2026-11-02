@@ -82,6 +82,26 @@ export async function addDiscoveredNote(account: string, note: ShieldedNote): Pr
   await writeAll(all)
 }
 
+// Update a note's mint in-place (used to repair poisoned mints on honest rescan).
+// Preserves spent, createdAt, amount, and leafIndex.
+export async function repairNoteMint(
+  account: string,
+  commitment: string,
+  mint: string
+): Promise<void> {
+  const all = await readAll()
+  const notes = all[account] ?? []
+  let changed = false
+  all[account] = notes.map((n) => {
+    if (n.commitment === commitment && n.mint !== mint) {
+      changed = true
+      return { ...n, mint }
+    }
+    return n
+  })
+  if (changed) await writeAll(all)
+}
+
 // Fill in a deposit note's on-chain leaf index once it is known. The note is
 // persisted at submit time (before the index can be resolved) so its blinding is
 // never orphaned (#791); this finalizes it by commitment. A no-op if the note is
@@ -106,7 +126,10 @@ export async function setNoteLeafIndex(
 
 // Mark a note spent by its commitment (used for transfer inputs/outputs, which
 // are identified by commitment rather than a deposit signature).
-export async function markNoteSpentByCommitment(account: string, commitment: string): Promise<void> {
+export async function markNoteSpentByCommitment(
+  account: string,
+  commitment: string
+): Promise<void> {
   const all = await readAll()
   const notes = all[account] ?? []
   all[account] = notes.map((n) => (n.commitment === commitment ? { ...n, spent: true } : n))
@@ -136,16 +159,12 @@ export async function markNoteSpentByIdentity(account: string, note: ShieldedNot
 // it carries no `mint`. Use shieldedTokenBalances() for the SPL side.
 export async function shieldedBalance(account: string): Promise<bigint> {
   const notes = await getNotes(account)
-  return notes
-    .filter((n) => !n.spent && !n.mint)
-    .reduce((sum, n) => sum + BigInt(n.amount), 0n)
+  return notes.filter((n) => !n.spent && !n.mint).reduce((sum, n) => sum + BigInt(n.amount), 0n)
 }
 
 // Unspent shielded SPL balances keyed by base58 mint (#779). Each amount is in
 // that mint's own base units, kept separate from the native lamports sum.
-export async function shieldedTokenBalances(
-  account: string
-): Promise<Record<string, bigint>> {
+export async function shieldedTokenBalances(account: string): Promise<Record<string, bigint>> {
   const notes = await getNotes(account)
   const byMint: Record<string, bigint> = {}
   for (const n of notes) {

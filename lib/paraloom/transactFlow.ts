@@ -4,24 +4,18 @@
 // return change to the wallet as a new note — the audit #16 fix.
 
 import { Connection, Keypair, PublicKey } from "@solana/web3.js"
-
 import { addressBoxPubHex, addressSpendPubHex } from "~lib/crypto/keyManagement"
 import {
+  assetIdForMint,
+  NATIVE_ASSET_HEX,
   proveTransact,
   v3MerklePath,
   v3NoteCommitment,
   v3NoteCommitmentAsset,
   v3NotePubkey
 } from "~lib/prover"
-
-import { NATIVE_ASSET_HEX } from "~lib/prover"
 import { encryptNote } from "./noteCrypto"
-import {
-  addNote,
-  markNoteSpentByIdentity,
-  setNoteLeafIndex,
-  type ShieldedNote
-} from "./notes"
+import { addNote, markNoteSpentByIdentity, setNoteLeafIndex, type ShieldedNote } from "./notes"
 import { confirmCommitmentInTree } from "./settlementConfirm"
 import { fetchV3Leaves, sendDepositNote, submitTransact } from "./transact"
 
@@ -53,12 +47,7 @@ function confirmSettledByTree(
   timeoutMs = SETTLE_CONFIRM_TIMEOUT_MS,
   pollMs = SETTLE_CONFIRM_POLL_MS
 ): Promise<boolean> {
-  return confirmCommitmentInTree(
-    () => fetchV3Leaves(connection),
-    commitmentHex,
-    timeoutMs,
-    pollMs
-  )
+  return confirmCommitmentInTree(() => fetchV3Leaves(connection), commitmentHex, timeoutMs, pollMs)
 }
 
 /// Deposit lamports as a v3 note: the program computes the commitment and
@@ -216,9 +205,41 @@ export async function spendV3(
     throw new Error("all spent notes must share one asset")
   }
   const isSpl = assetIdHex !== NATIVE_ASSET_HEX
-  const mintHex = isSpl && inputs[0].mint ? new PublicKey(inputs[0].mint).toBuffer().toString("hex") : undefined
-  if (isSpl && !mintHex) {
-    throw new Error("a shielded SPL note must carry its mint to be spent")
+  let mintHex: string | undefined
+  if (!isSpl) {
+    if (inputs.some((n) => n.mint != null)) {
+      throw new Error("native SOL notes cannot carry a mint")
+    }
+  } else {
+    if (inputs.some((n) => !n.mint)) {
+      throw new Error("a shielded SPL note must carry its mint to be spent")
+    }
+    const firstMint = inputs[0].mint!
+    let firstPk: PublicKey
+    try {
+      firstPk = new PublicKey(firstMint)
+    } catch {
+      throw new Error("invalid SPL mint on note")
+    }
+    const canonicalMint = firstPk.toBase58()
+    for (const note of inputs) {
+      if (!note.mint) {
+        throw new Error("a shielded SPL note must carry its mint to be spent")
+      }
+      let notePk: PublicKey
+      try {
+        notePk = new PublicKey(note.mint)
+      } catch {
+        throw new Error("invalid SPL mint on note")
+      }
+      if (notePk.toBase58() !== canonicalMint) {
+        throw new Error("all spent SPL notes must share one mint")
+      }
+    }
+    mintHex = Buffer.from(firstPk.toBytes()).toString("hex")
+    if ((await assetIdForMint(mintHex)) !== assetIdHex) {
+      throw new Error("spent SPL note mint does not match assetId")
+    }
   }
   const noteCommitment = (amount: bigint, pubkeyHex: string, blindingHex: string) =>
     isSpl

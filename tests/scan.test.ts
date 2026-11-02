@@ -20,6 +20,7 @@
 import { PublicKey } from "@solana/web3.js"
 import { encryptNote } from "~lib/paraloom/noteCrypto"
 import {
+  addDiscoveredNote,
   getNotes,
   markNoteSpentByIdentity,
   shieldedBalance,
@@ -56,7 +57,7 @@ const {
   // `mint_to_asset` is one-way; this stand-in is too, and it keeps the 32-byte
   // hex shape the note plaintext requires.
   const fakeAssetIdForMint = (mintHex: string) =>
-    (mintHex.match(/../g) ?? [])
+    (mintHex.trim().toLowerCase().match(/../g) ?? [])
       .map((b) => (parseInt(b, 16) ^ 0x5a).toString(16).padStart(2, "0"))
       .join("")
 
@@ -380,6 +381,58 @@ describe("received SPL notes (#23)", () => {
 
     expect(await shieldedBalance(ACCOUNT)).toBe(100n)
     expect(await shieldedTokenBalances(ACCOUNT)).toEqual({ [MINT]: 500n })
+  })
+
+  it.each([
+    ["single leading space", " " + MINT_HEX],
+    ["two leading spaces", "  " + MINT_HEX],
+    ["leading tab", "\t" + MINT_HEX],
+    ["leading newline", "\n" + MINT_HEX],
+    ["leading crlf", "\r\n" + MINT_HEX],
+    ["trailing space", MINT_HEX + " "],
+    ["surrounding whitespace", "  " + MINT_HEX + "  "]
+  ])("rejects an SPL note carrying untrimmed whitespace in mint (%s)", async (_label, mint) => {
+    respondWith([splNote(500n, mint)])
+    expect(await scan()).toBe(0)
+    expect(await shieldedTokenBalances(ACCOUNT)).toEqual({})
+    expect(await getNotes(ACCOUNT)).toEqual([])
+  })
+
+  it("self-heals a poisoned or mismatched note mint on an honest rescan", async () => {
+    const rawNote = splNote(500n, MINT_HEX)
+    const poisonedMint = "11111111111111111111111111111111"
+    await addDiscoveredNote(ACCOUNT, {
+      amount: "500",
+      blinding: BLINDING,
+      assetId: MINT_ASSET,
+      mint: poisonedMint,
+      signature: "",
+      createdAt: 1000,
+      spent: false,
+      commitment: rawNote.output_commitment,
+      source: "transfer",
+      leafIndex: 42
+    })
+
+    // Before rescan, balance is misattributed under the poisoned mint
+    expect(await shieldedTokenBalances(ACCOUNT)).toEqual({ [poisonedMint]: 500n })
+
+    // Honest rescan delivers the genuine mint for the same commitment
+    respondWith([rawNote])
+    const found = await scan()
+    expect(found).toBe(0) // No new notes discovered; existing note is healed
+
+    // Stored note is repaired in-place, preserving spent, createdAt, and leafIndex
+    const [note] = await getNotes(ACCOUNT)
+    expect(note.mint).toBe(MINT)
+    expect(note.leafIndex).toBe(42)
+    expect(note.createdAt).toBe(1000)
+    expect(note.spent).toBe(false)
+    expect(await shieldedTokenBalances(ACCOUNT)).toEqual({ [MINT]: 500n })
+
+    // Subsequent honest rescan recognizes note in known set
+    respondWith([rawNote])
+    expect(await scan()).toBe(0)
   })
 })
 

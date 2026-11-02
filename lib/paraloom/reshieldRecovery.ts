@@ -13,7 +13,7 @@ import {
 } from "~lib/paraloom/bridge"
 import { addNote } from "~lib/paraloom/notes"
 import type { ReshieldedNote } from "~lib/paraloom/privateSwap"
-import { listSwapOutputs, saveSwapOutput } from "~lib/paraloom/swapOutputs"
+import { listSwapOutputsFor, saveSwapOutput } from "~lib/paraloom/swapOutputs"
 import { assetIdForMint } from "~lib/prover"
 
 // Persist a re-shielded SPL note against the wallet's shielded account. Called
@@ -47,7 +47,10 @@ export async function recoverReshields(
   shieldedAddress: string
 ): Promise<number> {
   let recovered = 0
-  const outputs = await listSwapOutputs()
+  // Only this account's rows — the recovered note is persisted under
+  // `shieldedAddress`, so a foreign row would be filed into a wallet that does
+  // not hold the spend key its commitment binds.
+  const outputs = await listSwapOutputsFor(shieldedAddress)
   for (const o of outputs) {
     if (!o.reshield || !o.swapSignature || o.outputMint === "SOL") continue
     if (o.reshieldRecovered) continue

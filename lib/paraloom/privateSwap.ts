@@ -318,6 +318,10 @@ export async function privateSwap(
     outputMint: params.outputMint,
     outAmount: 0,
     swapSignature: "",
+    // Owner + cluster, so a later recovery run credits this account rather than
+    // whichever account happens to be active when it runs.
+    shieldedAddress,
+    network: "mainnet-beta",
     reshield: params.reshield ?? false,
     createdAt: Date.now()
   })
@@ -391,6 +395,11 @@ export async function privateSwap(
     outputMint: params.outputMint,
     outAmount: out_amount,
     swapSignature,
+    // Re-stated rather than relied on: the upsert keeps the row's existing
+    // owner, but sending it means the row is correct even if this write is the
+    // first one to land.
+    shieldedAddress,
+    network: "mainnet-beta",
     createdAt: Date.now()
   })
 
@@ -507,6 +516,10 @@ export async function privateSwapFromToken(
     outputMint: params.outputMint,
     outAmount: 0,
     swapSignature: "",
+    // Owner + cluster, so a later recovery run credits this account rather than
+    // whichever account happens to be active when it runs.
+    shieldedAddress,
+    network: "mainnet-beta",
     reshield: params.reshield ?? false,
     createdAt: Date.now()
   })
@@ -597,6 +610,11 @@ export async function privateSwapFromToken(
     outputMint: params.outputMint,
     outAmount: out_amount,
     swapSignature,
+    // Re-stated rather than relied on: the upsert keeps the row's existing
+    // owner, but sending it means the row is correct even if this write is the
+    // first one to land.
+    shieldedAddress,
+    network: "mainnet-beta",
     createdAt: Date.now()
   })
   await waitForSwapConfirmation(connection, swapSignature)

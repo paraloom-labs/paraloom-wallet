@@ -29,9 +29,27 @@ export interface ShieldedNote {
   leafIndex?: number
 }
 
+import { getNetwork } from "~lib/storage/secure"
+
 const NOTES_KEY = "paraloom_notes"
 
 type NotesByAccount = Record<string, ShieldedNote[]>
+
+async function scopedKey(account: string): Promise<string> {
+  const network = await getNetwork()
+  return `${network}:${account}`
+}
+
+async function readScoped(account: string): Promise<ShieldedNote[]> {
+  const all = await readAll()
+  return all[await scopedKey(account)] ?? []
+}
+
+async function writeScoped(account: string, notes: ShieldedNote[]): Promise<void> {
+  const all = await readAll()
+  all[await scopedKey(account)] = notes
+  await writeAll(all)
+}
 
 async function readAll(): Promise<NotesByAccount> {
   const stored = await chrome.storage.local.get(NOTES_KEY)
@@ -43,13 +61,11 @@ async function writeAll(all: NotesByAccount): Promise<void> {
 }
 
 export async function getNotes(account: string): Promise<ShieldedNote[]> {
-  const all = await readAll()
-  return all[account] ?? []
+  return readScoped(account)
 }
 
 export async function addNote(account: string, note: ShieldedNote): Promise<void> {
-  const all = await readAll()
-  const existing = all[account] ?? []
+  const existing = await readScoped(account)
   // Idempotent by (non-empty) deposit signature: the same shielded note can be
   // persisted more than once — the early on-submit persist AND the end-of-flow
   // persist AND the recovery scan all target the same deposit — so dedupe here
@@ -57,29 +73,24 @@ export async function addNote(account: string, note: ShieldedNote): Promise<void
   if (note.signature && existing.some((n) => n.signature === note.signature)) {
     return
   }
-  all[account] = [...existing, note]
-  await writeAll(all)
+  await writeScoped(account, [...existing, note])
 }
 
 // Mark the note with this deposit signature as spent (after a withdrawal
 // settles), so it no longer counts toward the shielded balance.
 export async function markNoteSpent(account: string, signature: string): Promise<void> {
-  const all = await readAll()
-  const notes = all[account] ?? []
-  all[account] = notes.map((n) => (n.signature === signature ? { ...n, spent: true } : n))
-  await writeAll(all)
+  const notes = await readScoped(account)
+  await writeScoped(account, notes.map((n) => (n.signature === signature ? { ...n, spent: true } : n)))
 }
 
 // Add a note discovered by scanning transfer ciphertexts (#196), de-duplicated
 // by commitment so re-scanning is idempotent.
 export async function addDiscoveredNote(account: string, note: ShieldedNote): Promise<void> {
-  const all = await readAll()
-  const notes = all[account] ?? []
+  const notes = await readScoped(account)
   if (notes.some((n) => n.commitment && n.commitment === note.commitment)) {
     return
   }
-  all[account] = [...notes, note]
-  await writeAll(all)
+  await writeScoped(account, [...notes, note])
 }
 
 // Fill in a deposit note's on-chain leaf index once it is known. The note is
@@ -91,26 +102,23 @@ export async function setNoteLeafIndex(
   commitment: string,
   leafIndex: number
 ): Promise<void> {
-  const all = await readAll()
-  const notes = all[account] ?? []
+  const notes = await readScoped(account)
   let changed = false
-  all[account] = notes.map((n) => {
+  const next = notes.map((n) => {
     if (n.commitment === commitment && n.leafIndex !== leafIndex) {
       changed = true
       return { ...n, leafIndex }
     }
     return n
   })
-  if (changed) await writeAll(all)
+  if (changed) await writeScoped(account, next)
 }
 
 // Mark a note spent by its commitment (used for transfer inputs/outputs, which
 // are identified by commitment rather than a deposit signature).
 export async function markNoteSpentByCommitment(account: string, commitment: string): Promise<void> {
-  const all = await readAll()
-  const notes = all[account] ?? []
-  all[account] = notes.map((n) => (n.commitment === commitment ? { ...n, spent: true } : n))
-  await writeAll(all)
+  const notes = await readScoped(account)
+  await writeScoped(account, notes.map((n) => (n.commitment === commitment ? { ...n, spent: true } : n)))
 }
 
 // Mark exactly the given note spent, by whichever identity is unique to it

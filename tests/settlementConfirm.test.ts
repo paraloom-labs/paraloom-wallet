@@ -1,7 +1,9 @@
 import { describe, expect, it } from "vitest"
-
 import {
+  CONFIRM_POLL_MS,
+  CONFIRM_TIMEOUT_MS,
   confirmCommitmentInTree,
+  confirmSettledWith,
   type LeafRef
 } from "../lib/paraloom/settlementConfirm"
 
@@ -88,5 +90,60 @@ describe("confirmCommitmentInTree", () => {
     )
     expect(settled).toBe(true)
     expect(calls).toBe(2)
+  })
+})
+
+// A caller-supplied settlement predicate (the shape a withdraw caller can still
+// pass) runs AFTER the spend was queued at the ingress, so the clock here is the
+// caller's: the predicate owns its timeout and signals it by returning false.
+// What this helper owns is that a THROW never escapes.
+describe("confirmSettledWith", () => {
+  it("returns the predicate's true immediately", async () => {
+    let calls = 0
+    const settled = await confirmSettledWith(async () => {
+      calls += 1
+      return true
+    })
+    expect(settled).toBe(true)
+    expect(calls).toBe(1)
+  })
+
+  it("re-polls a throwing predicate instead of aborting", async () => {
+    // The core guard: one RPC hiccup must not abort the bookkeeping that marks
+    // the inputs spent and books the change (#196).
+    let calls = 0
+    const clock = fakeClock(1000)
+    const settled = await confirmSettledWith(async () => {
+      calls += 1
+      if (calls <= 2) throw new Error("RPC 502")
+      return true
+    }, clock)
+    expect(settled).toBe(true)
+    expect(calls).toBe(3)
+  })
+
+  it("gives up once the ceiling passes while it keeps throwing", async () => {
+    let calls = 0
+    const clock = fakeClock(CONFIRM_POLL_MS)
+    const settled = await confirmSettledWith(async () => {
+      calls += 1
+      throw new Error("RPC 502")
+    }, clock)
+    expect(settled).toBe(false)
+    // One poll per interval until the deadline, then the timeout is a refusal —
+    // never a false "settled".
+    expect(calls).toBe(Math.ceil(CONFIRM_TIMEOUT_MS / CONFIRM_POLL_MS) + 1)
+  })
+
+  it("treats a false as final, not as a transient error", async () => {
+    // A predicate that has already run out of its own patience must not be
+    // re-polled — that would multiply the caller's timeout by ours.
+    let calls = 0
+    const settled = await confirmSettledWith(async () => {
+      calls += 1
+      return false
+    })
+    expect(settled).toBe(false)
+    expect(calls).toBe(1)
   })
 })

@@ -430,30 +430,23 @@ export function Home({ onLock }: HomeProps) {
     }
     setWithdrawing(true)
     try {
-      const conn = getConnection(network)
-      const before = await getSolBalance(conn, targetBytes)
       // Circuit v3 (#350): a withdraw is a transact with ext_amount < 0; the
-      // proof binds the destination and the quorum settles it. spendV3 marks the
-      // inputs spent and books any change note ONLY once settlement is confirmed
-      // — the recipient balance rising above `before` — so a failed settlement
-      // never hides still-spendable funds (paraloom-core#792).
+      // proof binds the destination and the quorum settles it. No settlement
+      // override: a raw recipient-balance delta is neither sufficient nor
+      // necessary — ANY unrelated inflow (a transfer, a rent refund, 1-lamport
+      // dust) during the window falsely confirms a spend the quorum dropped, and
+      // a concurrent outflow keeps the balance flat after a real settlement.
+      // spendV3's default watches the output commitment land in the tree instead,
+      // which is the atomic settlement signal, and marks the inputs spent and
+      // books the change ONLY then (paraloom-core#792).
       const { requestId, settled } = await spendV3(
-        conn,
+        getConnection(network),
         wallet.shieldedAddress,
         Buffer.from(wallet.spendPrivkey).toString("hex"),
         addressBoxPubHex(wallet.shieldedAddress),
         inputs,
         lamports,
-        { kind: "withdraw", recipientSolanaHex: Buffer.from(targetBytes).toString("hex") },
-        {
-          confirmSettled: async () => {
-            for (let i = 0; i < 25; i++) {
-              await new Promise((r) => setTimeout(r, 2000))
-              if ((await getSolBalance(conn, targetBytes)) > before) return true
-            }
-            return false
-          }
-        }
+        { kind: "withdraw", recipientSolanaHex: Buffer.from(targetBytes).toString("hex") }
       )
       if (settled) {
         showToast(`Withdrew ${amt.toFixed(4)} SOL to Solana`, "success")
@@ -462,7 +455,15 @@ export function Home({ onLock }: HomeProps) {
         setWithdrawAmount("")
         await loadBalances()
       } else {
-        showToast(`Submitted (${requestId.slice(0, 14)}…); settlement pending`, "info")
+        // Never drop the outcome silently. The commitment did not appear in the
+        // tree, so the inputs and change were deliberately left intact — but the
+        // quorum may still settle it late, so this is "not confirmed", not "did
+        // not happen". Reload so the notes the user can still see are current.
+        showToast(
+          `Withdraw not confirmed (${requestId.slice(0, 14)}…); notes stay spendable, check again shortly`,
+          "error"
+        )
+        await loadBalances()
       }
     } catch (e) {
       showToast(`Withdraw failed: ${e instanceof Error ? e.message : "error"}`, "error")

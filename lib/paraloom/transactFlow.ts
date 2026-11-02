@@ -22,7 +22,7 @@ import {
   setNoteLeafIndex,
   type ShieldedNote
 } from "./notes"
-import { confirmCommitmentInTree } from "./settlementConfirm"
+import { confirmCommitmentInTree, confirmSettledWith } from "./settlementConfirm"
 import { fetchV3Leaves, sendDepositNote, submitTransact } from "./transact"
 
 function randomHex32(): string {
@@ -43,10 +43,13 @@ const SETTLE_CONFIRM_POLL_MS = 6_000
 // in the on-chain tree. Settlement is atomic — the transact instruction records
 // the input nullifiers and appends both output commitments together — so the
 // output commitment appearing is proof the nullifiers were consumed and the
-// inputs are truly spent. Used as the settlement signal for a shielded transfer,
-// which has no external recipient balance to watch (a withdraw's caller passes a
-// cheaper `confirmSettled` that polls the funded address instead). The polling
-// logic lives in settlementConfirm.ts so it can be unit-tested without the prover.
+// inputs are truly spent. This is the default signal for EVERY spend, withdraw
+// included: a withdraw's caller cannot do better by watching the recipient
+// balance, which moves for unrelated reasons too (an incoming transfer, a rent
+// refund, 1-lamport dust all read as "settled" while the quorum may have dropped
+// the request; a concurrent outflow reads as "not settled" long after it did).
+// The polling logic lives in settlementConfirm.ts so it can be unit-tested
+// without the prover.
 function confirmSettledByTree(
   connection: Connection,
   commitmentHex: string,
@@ -174,11 +177,12 @@ export interface SpendResult {
 export interface SpendOptions {
   /// Bearer token for the transact ingress, when the endpoint gates submission.
   ingressToken?: string
-  /// Settlement signal supplied by the caller: resolves true once the spend is
-  /// confirmed on-chain (e.g. the withdrawn funds landed at the recipient), or
-  /// false on timeout. A withdraw caller passes this to reuse the cheap
-  /// recipient-balance poll it already runs; when omitted (a shielded transfer),
-  /// spendV3 falls back to watching the output commitment land in the tree.
+  /// Optional settlement signal supplied by the caller, polled by spendV3 until
+  /// it resolves true or the ceiling passes. When omitted — the normal case,
+  /// withdraw included — spendV3 watches the output commitment land in the tree.
+  /// A caller only passes one when it has a signal the tree cannot give, and it
+  /// is polled through `confirmSettledWith`, so a transient RPC throw inside it
+  /// is retried instead of aborting the post-submission bookkeeping.
   confirmSettled?: () => Promise<boolean>
 }
 
@@ -345,14 +349,14 @@ export async function spendV3(
   // funds as spent and showed a change note whose commitment never landed
   // on-chain — corrupting the balance in both directions with no self-healing
   // path (paraloom-core#792). The signal is the first output commitment landing
-  // in the tree; a withdraw caller supplies a cheaper recipient-funded check.
+  // in the tree, which is authoritative for a withdraw as much as a transfer.
   const settleCommitmentHex = await noteCommitment(
     outputs[0].amount,
     outputs[0].pubkeyHex,
     outputs[0].blindingHex
   )
   const settled = opts.confirmSettled
-    ? await opts.confirmSettled()
+    ? await confirmSettledWith(opts.confirmSettled)
     : await confirmSettledByTree(connection, settleCommitmentHex)
 
   if (settled) {

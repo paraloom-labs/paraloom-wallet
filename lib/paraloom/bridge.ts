@@ -18,6 +18,7 @@ import {
   BRIDGE_STATE_SEED,
   BRIDGE_VAULT_SEED,
   DEPOSIT_DISCRIMINATOR,
+  DEPOSIT_NOTE_DISCRIMINATOR,
   DEPOSIT_NOTE_SPL_DISCRIMINATOR,
   MERKLE_TREE_SEED,
   PROGRAM_ID,
@@ -82,20 +83,29 @@ export function shieldedAddressToBytes(shieldedAddress: string): Uint8Array {
   return Uint8Array.from(Buffer.from(hex, "hex"))
 }
 
-// Layout: DEPOSIT discriminator (8) | amount u64 LE (8) | recipient (32) | randomness (32).
+// Layout: DEPOSIT_NOTE discriminator (8) | amount u64 LE (8) | pubkey (32) |
+// blinding (32) — matching the on-chain v3 `deposit_note(amount, pubkey, blinding)`
+// (circuit v3 upgrade, #350). The legacy DEPOSIT_DISCRIMINATOR was removed when
+// the on-chain `deposit` instruction was replaced by `deposit_note`; submitting
+// the old discriminator makes Anchor revert with InstructionFallbackNotFound.
 function depositInstructionData(
   amountLamports: bigint,
   recipient: Uint8Array,
   randomness: Uint8Array
 ): Buffer {
   const data = new Uint8Array(8 + 8 + 32 + 32)
-  data.set(DEPOSIT_DISCRIMINATOR, 0)
+  data.set(DEPOSIT_NOTE_DISCRIMINATOR, 0)
   new DataView(data.buffer).setBigUint64(8, amountLamports, true)
   data.set(recipient, 16)
   data.set(randomness, 48)
   return Buffer.from(data)
 }
 
+// Build a v3 `deposit_note` instruction. Account order mirrors the on-chain
+// DepositNote struct exactly: bridge_state, bridge_vault, merkle_tree, depositor,
+// system_program. The merkle_tree PDA was previously omitted here (the native-SOL
+// path was left unmigrated when depositSpl #779 was fixed), causing
+// AccountNotEnoughKeys reverts on every SOL deposit.
 export function buildDepositInstruction(
   depositor: PublicKey,
   amountLamports: bigint,
@@ -107,6 +117,7 @@ export function buildDepositInstruction(
     keys: [
       { pubkey: bridgeStatePda(), isSigner: false, isWritable: true },
       { pubkey: bridgeVaultPda(), isSigner: false, isWritable: true },
+      { pubkey: merkleTreePda(), isSigner: false, isWritable: true },
       { pubkey: depositor, isSigner: true, isWritable: true },
       { pubkey: SystemProgram.programId, isSigner: false, isWritable: false }
     ],

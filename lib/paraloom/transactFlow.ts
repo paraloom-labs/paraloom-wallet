@@ -14,7 +14,7 @@ import {
   v3NotePubkey
 } from "~lib/prover"
 
-import { NATIVE_ASSET_HEX } from "~lib/prover"
+import { assetIdForMint, NATIVE_ASSET_HEX } from "~lib/prover"
 import { encryptNote } from "./noteCrypto"
 import {
   addNote,
@@ -211,14 +211,43 @@ export async function spendV3(
   // Asset (#779): every input in one transact shares a single asset. Native SOL
   // is the all-zero id; a shielded SPL note carries its mint-derived assetId and
   // the mint itself (needed to tell the node to settle via transact_spl).
-  const assetIdHex = inputs[0].assetId || NATIVE_ASSET_HEX
-  if (inputs.some((n) => (n.assetId || NATIVE_ASSET_HEX) !== assetIdHex)) {
+  const assetIdHex = (inputs[0].assetId || NATIVE_ASSET_HEX).toLowerCase()
+  if (inputs.some((n) => (n.assetId || NATIVE_ASSET_HEX).toLowerCase() !== assetIdHex)) {
     throw new Error("all spent notes must share one asset")
   }
   const isSpl = assetIdHex !== NATIVE_ASSET_HEX
-  const mintHex = isSpl && inputs[0].mint ? new PublicKey(inputs[0].mint).toBuffer().toString("hex") : undefined
-  if (isSpl && !mintHex) {
-    throw new Error("a shielded SPL note must carry its mint to be spent")
+  let mintHex: string | undefined
+  let canonicalMintBase58: string | undefined
+  if (!isSpl) {
+    if (inputs.some((n) => n.mint != null)) {
+      throw new Error("a native SOL note must not carry an SPL mint")
+    }
+  } else {
+    if (inputs.some((n) => typeof n.mint !== "string" || n.mint.length === 0)) {
+      throw new Error("a shielded SPL note must carry its mint to be spent")
+    }
+    let firstMintPk: PublicKey
+    try {
+      firstMintPk = new PublicKey(inputs[0].mint!)
+    } catch {
+      throw new Error("invalid SPL mint on shielded note")
+    }
+    canonicalMintBase58 = firstMintPk.toBase58()
+    for (const n of inputs) {
+      let pk: PublicKey
+      try {
+        pk = new PublicKey(n.mint!)
+      } catch {
+        throw new Error("invalid SPL mint on shielded note")
+      }
+      if (pk.toBase58() !== canonicalMintBase58) {
+        throw new Error("all spent SPL notes must share one mint")
+      }
+    }
+    mintHex = Buffer.from(firstMintPk.toBytes()).toString("hex")
+    if ((await assetIdForMint(mintHex)).toLowerCase() !== assetIdHex) {
+      throw new Error("shielded SPL note mint does not match its assetId")
+    }
   }
   const noteCommitment = (amount: bigint, pubkeyHex: string, blindingHex: string) =>
     isSpl
@@ -373,7 +402,7 @@ export async function spendV3(
         amount: change.toString(),
         blinding: changeBlind,
         assetId: assetIdHex,
-        mint: isSpl ? inputs[0].mint : undefined,
+        mint: isSpl ? canonicalMintBase58 : undefined,
         signature: "",
         createdAt: Date.now(),
         spent: false,

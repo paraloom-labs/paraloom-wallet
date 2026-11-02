@@ -82,6 +82,32 @@ export async function addDiscoveredNote(account: string, note: ShieldedNote): Pr
   await writeAll(all)
 }
 
+// Repair a discovered SPL note's base58 mint by commitment when an earlier scan
+// stored a missing or unverified mint. Preserves `spent`, `createdAt`, `leafIndex`,
+// and every other field so a spent note is never resurrected.
+export async function repairNoteMint(
+  account: string,
+  commitment: string,
+  mint: string | undefined
+): Promise<boolean> {
+  if (!commitment) return false
+  const all = await readAll()
+  const notes = all[account] ?? []
+  let changed = false
+  const next = notes.map((n) => {
+    if (n.commitment === commitment && n.mint !== mint) {
+      changed = true
+      return { ...n, mint }
+    }
+    return n
+  })
+  if (changed) {
+    all[account] = next
+    await writeAll(all)
+  }
+  return changed
+}
+
 // Fill in a deposit note's on-chain leaf index once it is known. The note is
 // persisted at submit time (before the index can be resolved) so its blinding is
 // never orphaned (#791); this finalizes it by commitment. A no-op if the note is

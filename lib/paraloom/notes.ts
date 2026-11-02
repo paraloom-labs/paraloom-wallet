@@ -1,3 +1,6 @@
+// Nullifier-shaped legacy pool. Kept for the comment above.
+import { getNetwork, type Network } from "~lib/storage/network"
+
 // Local record of the shielded notes this wallet has deposited. Until the
 // extension can scan the pool for its own notes (a viewing-key feature), the
 // shielded balance is tracked here: the sum of unspent deposits. Each note
@@ -32,14 +35,55 @@ export interface ShieldedNote {
 const NOTES_KEY = "paraloom_notes"
 
 type NotesByAccount = Record<string, ShieldedNote[]>
+// Per-cluster note lists. The program id and the account seed are the same on
+// mainnet-beta and devnet, so the shielded address alone does not identify a
+// note: the same address has an unrelated note set on each cluster, and the
+// Merkle path of a note from one never resolves in the other's tree.
+//
+// Keyed by cluster first, then by shielded address. A bucket written by a
+// pre-clustering build has no cluster level at all; `readAll` adopts it into
+// the selected cluster.
+type StoredNotes = Partial<Record<Network, NotesByAccount>>
 
-async function readAll(): Promise<NotesByAccount> {
+async function readRaw(): Promise<StoredNotes> {
   const stored = await chrome.storage.local.get(NOTES_KEY)
-  return (stored[NOTES_KEY] as NotesByAccount) ?? {}
+  return (stored[NOTES_KEY] as StoredNotes) ?? {}
 }
 
-async function writeAll(all: NotesByAccount): Promise<void> {
-  await chrome.storage.local.set({ [NOTES_KEY]: all })
+// Distinguish the legacy flat shape (`{ [address]: ShieldedNote[] }`) from the
+// current clustered one (`{ "mainnet-beta": {...} }`) without guessing from the
+// network names: the values of the old shape are arrays, the new shape's are
+// objects.
+function isFlat(value: unknown): value is NotesByAccount {
+  const first = Object.values((value ?? {}) as Record<string, unknown>)[0]
+  return Array.isArray(first)
+}
+
+// The pre-clustering bucket is adopted into the selected cluster by `readAll`
+// and replaced in the same write, so it is never seen twice and cannot be
+// migrated later under a different cluster.
+async function readAll(): Promise<NotesByAccount> {
+  const raw = await readRaw()
+  if (isFlat(raw)) {
+    // Legacy data from before notes were clustered. It can only belong to the
+    // cluster that was selected when it was written, and that is the one still
+    // selected now, so adopt it there rather than dropping it.
+    const network = await getNetwork()
+    await writeStored({ [network]: raw })
+    return raw
+  }
+  return raw[await getNetwork()] ?? {}
+}
+
+async function writeStored(next: StoredNotes): Promise<void> {
+  await chrome.storage.local.set({ [NOTES_KEY]: next })
+}
+
+async function writeAll(notes: NotesByAccount): Promise<void> {
+  const raw = await readRaw()
+  const network = await getNetwork()
+  const next: StoredNotes = { ...(isFlat(raw) ? {} : raw), [network]: notes }
+  await writeStored(next)
 }
 
 export async function getNotes(account: string): Promise<ShieldedNote[]> {

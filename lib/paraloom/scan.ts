@@ -53,14 +53,27 @@ async function verifiedMint(
   if (isNative) {
     return mintHex == null ? undefined : REJECT
   }
-  if (mintHex == null) {
+  if (typeof mintHex !== "string" || !/^[0-9a-fA-F]{64}$/.test(mintHex)) {
+    // Canonical 32-byte hex only. The wasm `hex32` behind `assetIdForMint`
+    // trims arbitrary leading/trailing whitespace before `hex::decode`, while
+    // `Buffer.from(mintHex, "hex")` below decodes the raw string: a delivered
+    // mint like `" ${mintHex}"` passed the assetId check but decoded to a
+    // different (or empty, zero-padded) pubkey, silently storing the note under
+    // a mint that is not the one the commitment binds. Gating on the canonical
+    // shape up front makes the authenticated string and the decoded bytes the
+    // same bytes.
     return REJECT
   }
   try {
-    if ((await assetIdForMint(mintHex)) !== assetIdHex) {
+    const canonicalMintHex = mintHex.toLowerCase()
+    if ((await assetIdForMint(canonicalMintHex)) !== assetIdHex) {
       return REJECT
     }
-    return new PublicKey(Buffer.from(mintHex, "hex")).toBase58()
+    const mintBytes = Buffer.from(canonicalMintHex, "hex")
+    if (mintBytes.byteLength !== 32) {
+      return REJECT
+    }
+    return new PublicKey(mintBytes).toBase58()
   } catch {
     // Both calls have to be inside this, not just the decode. `assetIdForMint`
     // reaches wasm `hex32`, which returns Err — a thrown JsValue — on anything

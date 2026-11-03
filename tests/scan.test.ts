@@ -54,9 +54,12 @@ const {
     assetIdHex: string
   ) => `${fakeCommitment(amount, pubkeyHex, blindingHex)}@${assetIdHex.slice(0, 8)}`
   // `mint_to_asset` is one-way; this stand-in is too, and it keeps the 32-byte
-  // hex shape the note plaintext requires.
+  // hex shape the note plaintext requires. Like wasm `hex32` it trims before
+  // decoding, so a delivered mint with leading whitespace still hashes to the
+  // real mint's assetId — the differential that let it through the binding
+  // check while the raw string decoded to something else.
   const fakeAssetIdForMint = (mintHex: string) =>
-    (mintHex.match(/../g) ?? [])
+    (mintHex.trim().match(/../g) ?? [])
       .map((b) => (parseInt(b, 16) ^ 0x5a).toString(16).padStart(2, "0"))
       .join("")
 
@@ -380,6 +383,81 @@ describe("received SPL notes (#23)", () => {
 
     expect(await shieldedBalance(ACCOUNT)).toBe(100n)
     expect(await shieldedTokenBalances(ACCOUNT)).toEqual({ [MINT]: 500n })
+  })
+})
+
+describe("canonical mint binding (wasm-vs-JS hex differential)", () => {
+  // Wasm `hex32` trims before `hex::decode`, so `" ${mintHex}"` still hashes to
+  // the real mint's assetId — while the raw string decoded to a nibble-shifted
+  // pubkey (browser buffer polyfill) or an empty buffer that `PublicKey`
+  // zero-pads to the System Program id (Node). The note was then stored under a
+  // mint that is not the one its commitment binds. Requiring canonical 32-byte
+  // hex makes the authenticated string and the stored bytes the same bytes.
+  it.each([
+    ["one leading space", ` ${MINT_HEX}`],
+    ["two leading spaces", `  ${MINT_HEX}`],
+    ["a tab", `\t${MINT_HEX}`],
+    ["a newline", `\n${MINT_HEX}`],
+    ["a crlf", `\r\n${MINT_HEX}`],
+    ["a trailing space", `${MINT_HEX} `],
+    ["no hex at all", "not-hex"],
+    ["too short", "aabb"],
+    ["empty string", ""]
+  ])("rejects an SPL note whose mint is not canonical 32-byte hex (%s)", async (_name, mint) => {
+    respondWith([splNote(500n, mint)])
+    expect(await scan()).toBe(0)
+
+    expect(await getNotes(ACCOUNT)).toEqual([])
+    expect(await shieldedTokenBalances(ACCOUNT)).toEqual({})
+  })
+
+  it("stores nothing under the System Program id for a whitespace-padded mint", async () => {
+    // The concrete poisoning from the report: a 0-byte decode left-pads to
+    // 11111111111111111111111111111111, which would file a real USDC note under
+    // the System Program and then fail settlement on every spend.
+    respondWith([splNote(500n, `  ${MINT_HEX}`)])
+    await scan()
+
+    const notes = await getNotes(ACCOUNT)
+    expect(notes).toHaveLength(0)
+  })
+
+  it("accepts the mint in either letter case", async () => {
+    // The gate is on the canonical shape, not the case: `hex::decode` accepts
+    // both, and lowercasing before decode keeps the authenticated and decoded
+    // spellings identical.
+    respondWith([splNote(500n, MINT_HEX.toUpperCase())])
+    expect(await scan()).toBe(1)
+
+    const [note] = await getNotes(ACCOUNT)
+    expect(note.mint).toBe(MINT)
+  })
+
+  it("still discovers an honestly-delivered note after a poisoned delivery", async () => {
+    // The lock-out in the report came from the poisoned note being stored: its
+    // commitment entered the known-set, so honest rescans were skipped. A
+    // rejection never stores the commitment, so a later honest delivery of the
+    // same note still lands.
+    respondWith([splNote(500n, ` ${MINT_HEX}`)])
+    expect(await scan()).toBe(0)
+
+    respondWith([splNote(500n)])
+    expect(await scan()).toBe(1)
+    expect(await shieldedTokenBalances(ACCOUNT)).toEqual({ [MINT]: 500n })
+  })
+
+  it("does not let a malformed mint drop the rest of the feed", async () => {
+    // The rejection path is a silent `continue`; the note after the bad one
+    // still has to be discovered, native ones included.
+    respondWith([
+      { ...splNote(500n), mint: ` ${MINT_HEX}` },
+      splNote(700n),
+      honest(100n)
+    ])
+    expect(await scan()).toBe(2)
+
+    expect(await shieldedBalance(ACCOUNT)).toBe(100n)
+    expect(await shieldedTokenBalances(ACCOUNT)).toEqual({ [MINT]: 700n })
   })
 })
 

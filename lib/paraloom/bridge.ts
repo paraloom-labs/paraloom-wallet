@@ -418,7 +418,7 @@ export function solanaAddress(publicKey: Uint8Array): string {
 const B58_ALPHABET =
   "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz"
 
-function base58Decode(s: string): Uint8Array {
+export function base58Decode(s: string): Uint8Array {
   const bytes: number[] = [0]
   for (const ch of s) {
     const v = B58_ALPHABET.indexOf(ch)

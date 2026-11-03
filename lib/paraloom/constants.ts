@@ -15,6 +15,10 @@ export const DEPOSIT_NOTE_DISCRIMINATOR = new Uint8Array([75, 212, 96, 185, 178,
 export const DEPOSIT_NOTE_SPL_DISCRIMINATOR = new Uint8Array([
   244, 219, 167, 106, 7, 120, 254, 253
 ])
+// sha256("global:transact")[..8] — appends the two output commitments to the
+// tree. Its instruction data carries those commitments, so a truncated
+// TransactEvent can be recovered without the log.
+export const TRANSACT_DISCRIMINATOR = new Uint8Array([217, 149, 130, 143, 221, 52, 252, 119])
 // sha256("event:DepositNoteEvent")[..8] / sha256("event:TransactEvent")[..8] —
 // the program events the wallet scans to rebuild the v3 tree client-side.
 export const DEPOSIT_NOTE_EVENT_DISCRIMINATOR = new Uint8Array([85, 20, 187, 76, 92, 196, 249, 195])

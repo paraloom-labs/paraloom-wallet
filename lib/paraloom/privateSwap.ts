@@ -318,6 +318,8 @@ export async function privateSwap(
     outputMint: params.outputMint,
     outAmount: 0,
     swapSignature: "",
+    shieldedAddress,
+    network: "mainnet-beta",
     reshield: params.reshield ?? false,
     createdAt: Date.now()
   })
@@ -391,6 +393,8 @@ export async function privateSwap(
     outputMint: params.outputMint,
     outAmount: out_amount,
     swapSignature,
+    shieldedAddress,
+    network: "mainnet-beta",
     createdAt: Date.now()
   })
 
@@ -507,6 +511,8 @@ export async function privateSwapFromToken(
     outputMint: params.outputMint,
     outAmount: 0,
     swapSignature: "",
+    shieldedAddress,
+    network: "mainnet-beta",
     reshield: params.reshield ?? false,
     createdAt: Date.now()
   })
@@ -597,6 +603,8 @@ export async function privateSwapFromToken(
     outputMint: params.outputMint,
     outAmount: out_amount,
     swapSignature,
+    shieldedAddress,
+    network: "mainnet-beta",
     createdAt: Date.now()
   })
   await waitForSwapConfirmation(connection, swapSignature)

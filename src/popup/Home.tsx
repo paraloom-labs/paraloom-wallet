@@ -22,7 +22,7 @@ import { NATIVE_ASSET_HEX } from "~lib/prover"
 import { addressBoxPubHex } from "~lib/crypto/keyManagement"
 import { isValidShieldedAddress } from "~lib/crypto/addressChecksum"
 import { scanForNotes } from "~lib/paraloom/scan"
-import { dismissSwapOutput, listSwapOutputs, type SwapOutput } from "~lib/paraloom/swapOutputs"
+import { dismissSwapOutput, listSwapOutputsFor, type SwapOutput } from "~lib/paraloom/swapOutputs"
 import { recoverReshields } from "~lib/paraloom/reshieldRecovery"
 import { reconcileSwapOutputs } from "~lib/paraloom/swapReconcile"
 import { fetchPrices, SOL_MINT, type TokenPrice } from "~lib/paraloom/prices"
@@ -171,8 +171,11 @@ export function Home({ onLock }: HomeProps) {
   // Load the private-swap outputs (tokens bought at fresh unlinkable addresses);
   // refresh when the Activity tab is opened.
   useEffect(() => {
-    listSwapOutputs().then(setSwapOutputs).catch(() => {})
-  }, [bottomTab])
+    if (!wallet) return
+    listSwapOutputsFor(wallet.shieldedAddress)
+      .then(setSwapOutputs)
+      .catch(() => {})
+  }, [bottomTab, wallet?.shieldedAddress])
 
   // Refresh the connected-sites list whenever the Settings tab is opened.
   useEffect(() => {
@@ -325,8 +328,8 @@ export function Home({ onLock }: HomeProps) {
         getConnection("mainnet-beta"),
         wallet.shieldedAddress
       )
-      if (resolved > 0) {
-        listSwapOutputs().then(setSwapOutputs).catch(() => {})
+      if (resolved > 0 && wallet) {
+        listSwapOutputsFor(wallet.shieldedAddress).then(setSwapOutputs).catch(() => {})
       }
     } catch {
       // best-effort

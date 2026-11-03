@@ -21,6 +21,10 @@ export interface SwapOutput {
   /** Set once the re-shield note has been persisted (either normally or via the
    *  recovery scan), so recovery does not re-scan a settled reshield each connect. */
   reshieldRecovered?: boolean
+  /** The shielded account that ran the swap and owns the recovered outputs. */
+  shieldedAddress?: string
+  /** The cluster the swap settles on (defaults to mainnet-beta). */
+  network?: "mainnet-beta" | "devnet"
   createdAt: number
 }
 
@@ -34,8 +38,18 @@ export async function saveSwapOutput(output: SwapOutput): Promise<void> {
   const stored = await chrome.storage.local.get(KEY)
   const current = (stored[KEY] as SwapOutput[]) ?? []
   const i = current.findIndex((o) => o.freshAddress === output.freshAddress)
-  if (i >= 0) current[i] = { ...current[i], ...output }
-  else current.push(output)
+  if (i >= 0) {
+    const merged = { ...current[i], ...output }
+    if (!output.shieldedAddress && current[i].shieldedAddress) {
+      merged.shieldedAddress = current[i].shieldedAddress
+    }
+    if (!output.network && current[i].network) {
+      merged.network = current[i].network
+    }
+    current[i] = merged
+  } else {
+    current.push(output)
+  }
   await chrome.storage.local.set({ [KEY]: current })
 }
 
@@ -53,4 +67,16 @@ export async function dismissSwapOutput(freshAddress: string): Promise<void> {
   const current = (stored[KEY] as SwapOutput[]) ?? []
   const next = current.filter((o) => o.freshAddress !== freshAddress)
   await chrome.storage.local.set({ [KEY]: next })
+}
+
+// Return only rows belonging to the given shielded account. Adopts unowned
+// legacy rows (written before shieldedAddress was tracked) so the active
+// account can recover what it started.
+export async function listSwapOutputsFor(
+  shieldedAddress: string
+): Promise<SwapOutput[]> {
+  const all = await listSwapOutputs()
+  return all.filter(
+    (o) => !o.shieldedAddress || o.shieldedAddress === shieldedAddress
+  )
 }

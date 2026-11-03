@@ -27,7 +27,7 @@ import {
   RESUME_GRACE_MS,
   RESUME_MIN_LAMPORTS
 } from "./swapReconcileClassify"
-import { listSwapOutputs, saveSwapOutput } from "./swapOutputs"
+import { listSwapOutputsFor, saveSwapOutput } from "./swapOutputs"
 
 export { classifyStrand, RESUME_GRACE_MS, RESUME_MIN_LAMPORTS }
 export type { StrandAction } from "./swapReconcileClassify"
@@ -45,7 +45,7 @@ export async function reconcileSwapOutputs(
   reconcileInFlight = true
   let resolved = 0
   try {
-    const outputs = await listSwapOutputs()
+    const outputs = await listSwapOutputsFor(shieldedAddress)
     const now = Date.now()
     for (const o of outputs) {
       if (o.swapSignature) continue

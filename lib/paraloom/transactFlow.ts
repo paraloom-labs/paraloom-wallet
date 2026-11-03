@@ -32,6 +32,43 @@ function randomHex32(): string {
   return Buffer.from(b).toString("hex")
 }
 
+const MAX_SAFE_LEAF_INDEX = BigInt(Number.MAX_SAFE_INTEGER)
+const ZERO_TREE_NODE = "00".repeat(32)
+
+/**
+ * Read the leaf index the program reported in its deposit event.
+ *
+ * The log field is an unbounded decimal integer. Parsing it with `Number()`
+ * silently rounds anything above 2^53-1, so the persisted index can point at a
+ * different leaf and the note becomes permanently unspendable. Reject such a
+ * log explicitly instead of corrupting the note.
+ */
+export function parseDepositLeafIndex(logMessages: readonly string[]): number {
+  let leafIndex = -1
+  for (const line of logMessages) {
+    const m = line.match(/^Program log: Deposit note appended at leaf (\d+)$/)
+    if (!m) continue
+    const rawIndex = BigInt(m[1])
+    if (rawIndex > MAX_SAFE_LEAF_INDEX) {
+      throw new Error(`Deposit leaf index ${m[1]} exceeds safe integer precision`)
+    }
+    leafIndex = Number(rawIndex)
+  }
+  return leafIndex
+}
+
+/**
+ * A deterministic all-zero Merkle path for the zero-value filler input.
+ *
+ * Membership is skipped in-circuit for zero notes, so the filler only needs
+ * the right shape. Reusing the real input's path would leak the real leaf's
+ * tree position and make the dummy's `leafIndex: 0` disagree with the path
+ * direction bits.
+ */
+export function dummyMerklePath(): string[] {
+  return Array.from({ length: 32 }, () => ZERO_TREE_NODE)
+}
+
 // How long spendV3 waits for a spend to actually settle on-chain before it gives
 // up and leaves the inputs unspent. Settlement is a 2-of-2 quorum co-sign plus an
 // on-chain transact, so seconds normally; the ceiling tolerates a slow quorum.
@@ -111,11 +148,7 @@ export async function depositV3(
   const tx = await connection.getTransaction(signature, {
     maxSupportedTransactionVersion: 0
   })
-  let leafIndex = -1
-  for (const line of tx?.meta?.logMessages ?? []) {
-    const m = line.match(/^Program log: Deposit note appended at leaf (\d+)$/)
-    if (m) leafIndex = Number(m[1])
-  }
+  let leafIndex = parseDepositLeafIndex(tx?.meta?.logMessages ?? [])
   if (leafIndex < 0) {
     // Fallback: locate our commitment in the rebuilt leaf list.
     const leaves = await fetchV3Leaves(connection)
@@ -254,13 +287,12 @@ export async function spendV3(
   // Pad a single-note spend with a zero-value dummy (membership is skipped
   // in-circuit for zero notes; the path just needs the right shape).
   if (inputSpecs.length === 1) {
-    const { path } = await v3MerklePath(leavesHex, inputSpecs[0].leafIndex)
     inputSpecs.push({
       amount: 0n,
       privkeyHex: randomHex32(),
       blindingHex: randomHex32(),
       leafIndex: 0,
-      pathHex: path
+      pathHex: dummyMerklePath()
     })
   }
 

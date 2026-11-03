@@ -665,7 +665,8 @@ export async function resumeSwapAtFreshAddress(
   freshSecretKeyHex: string,
   outputMint: string,
   reshield: boolean,
-  onReshielded?: (note: ReshieldedNote) => Promise<void>
+  onReshielded?: (note: ReshieldedNote) => Promise<void>,
+  spendPrivkeyHex?: string
 ): Promise<ResumeSwapResult> {
   const fresh = Keypair.fromSecretKey(
     Uint8Array.from(Buffer.from(freshSecretKeyHex, "hex"))
@@ -684,7 +685,25 @@ export async function resumeSwapAtFreshAddress(
   )
 
   let reshielded: ReshieldedNote | undefined
-  if (reshield && outputMint !== "SOL") {
+  if (reshield && isNativeSolOutput(outputMint)) {
+    if (spendPrivkeyHex) {
+      try {
+        const solBal = BigInt(await connection.getBalance(fresh.publicKey))
+        const reshieldLamports = solBal - RESHIELD_FEE_RESERVE
+        if (reshieldLamports > 0n) {
+          await depositV3(
+            connection,
+            { secretKey: fresh.secretKey },
+            shieldedAddress,
+            spendPrivkeyHex,
+            reshieldLamports
+          )
+        }
+      } catch {
+        // leave the swapped SOL as a private buy at the fresh address
+      }
+    }
+  } else if (reshield) {
     reshielded = await reshieldToken(
       connection,
       fresh,

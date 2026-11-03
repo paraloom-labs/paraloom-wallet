@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react"
 import { createRoot } from "react-dom/client"
-import { getStoredWallet, isWalletLocked, setLockState } from "~lib/storage/secure"
+import { getStoredWallet } from "~lib/storage/secure"
+import { reconcileEffectiveLockState } from "~lib/storage/lockState"
 import { loadSession } from "~lib/storage/session"
 import { useWalletStore } from "~lib/store/walletStore"
 import { ConnectApprove } from "~src/popup/ConnectApprove"
@@ -51,7 +52,9 @@ function Popup() {
     // storage.session; restore it so Home has the keys it needs. If it's gone
     // (browser was closed, or auto-lock fired and cleared it), require a re-unlock.
     if (wallet) {
-      const isLocked = await isWalletLocked()
+      // Also repairs a stale `locked: false` left behind by a browser restart
+      // that wiped chrome.storage.session.
+      const isLocked = await reconcileEffectiveLockState()
       if (!isLocked) {
         const session = await loadSession()
         if (session) {
@@ -61,8 +64,6 @@ function Popup() {
           if (session.currentAccountIndex) {
             store.switchAccount(session.currentAccountIndex)
           }
-        } else {
-          await setLockState(true)
         }
       }
     }
@@ -72,7 +73,7 @@ function Popup() {
 
   async function checkWalletState() {
     const wallet = await getStoredWallet()
-    const isLocked = await isWalletLocked()
+    const isLocked = await reconcileEffectiveLockState()
 
     // Resolve any pending dapp connection request BEFORE flipping state, so the
     // first unlocked render already carries it — otherwise Home flashes for one

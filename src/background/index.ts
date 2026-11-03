@@ -1,8 +1,9 @@
 import { Connection, PublicKey } from "@solana/web3.js"
 
-import { getAutoLockMinutes, getStoredWallet, isWalletLocked, setLockState } from "~lib/storage/secure"
+import { getAutoLockMinutes, getStoredWallet, setLockState } from "~lib/storage/secure"
 import { addApprovedOrigin, isOriginApproved, removeApprovedOrigin } from "~lib/storage/connections"
 import { clearSession, getLastActivity, loadSession, recordActivity } from "~lib/storage/session"
+import { reconcileEffectiveLockState } from "~lib/storage/lockState"
 import { addNote, getNotes, markNoteSpentByCommitment, shieldedBalance, shieldedTokenBalances, type ShieldedNote } from "~lib/paraloom/notes"
 import { scanForNotes } from "~lib/paraloom/scan"
 import {
@@ -59,18 +60,23 @@ async function swapInFlight(): Promise<boolean> {
 }
 
 async function maybeAutoLock(): Promise<void> {
-  if (await isWalletLocked()) return
+  // Reconcile disk `locked` against the live session before deciding. A stale
+  // `locked: false` after browser restart has no session and must lock, not
+  // start a new activity clock.
+  if (await reconcileEffectiveLockState()) return
   if (await swapInFlight()) return
   const last = await getLastActivity()
   if (last === null) {
-    // Unlocked but no timestamp yet (e.g. a legacy session): start the clock
-    // rather than lock, so we never lock a just-unlocked wallet.
+    // Unlocked with a live session but no timestamp yet (e.g. a legacy
+    // session): start the clock rather than lock, so we never lock a
+    // just-unlocked wallet.
     await recordActivity(Date.now())
     return
   }
   const minutes = await getAutoLockMinutes()
   if (Date.now() - last >= minutes * 60 * 1000) {
     connectedOrigin = null
+    rejectPendingApprovals()
     await setLockState(true)
     await clearSession()
   }
@@ -121,6 +127,17 @@ let pendingSwap:
   | null = null
 let swapIdCounter = 0
 
+// Reject any outstanding connection/swap approval so a lock (manual or idle)
+// cannot leave a held dApp promise waiting for a consent screen that is gone.
+function rejectPendingApprovals(): void {
+  if (pendingConnection) pendingConnection.resolve(false)
+  if (pendingSwap) pendingSwap.resolve(false)
+}
+
+function rejectPendingForOrigin(origin: string): void {
+  if (pendingConnection?.origin === origin) pendingConnection.resolve(false)
+  if (pendingSwap?.origin === origin) pendingSwap.resolve(false)
+}
 
 // Message types the popup UI is the only legitimate sender of. A page relayed
 // through the content script must never reach these: `GET_PENDING_CONNECTION`
@@ -136,6 +153,7 @@ const POPUP_ONLY_TYPES = new Set([
   "ACTIVITY",
   "GET_WALLET_STATE",
   "LOCK_WALLET",
+  "REVOKE_ORIGIN",
   "GET_PENDING_CONNECTION",
   "APPROVE_CONNECTION",
   "REJECT_CONNECTION",
@@ -176,7 +194,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   }
 
   if (message.type === "GET_WALLET_STATE") {
-    isWalletLocked().then((locked) => {
+    reconcileEffectiveLockState().then((locked) => {
       sendResponse({ locked })
     })
     return true
@@ -184,9 +202,29 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 
   if (message.type === "LOCK_WALLET") {
     connectedOrigin = null
+    rejectPendingApprovals()
     Promise.all([setLockState(true), clearSession()]).then(() => {
       sendResponse({ success: true })
     })
+    return true
+  }
+
+  if (message.type === "REVOKE_ORIGIN") {
+    // Popup-only: remove a connected site's durable approval AND clear the
+    // worker's in-memory session for that origin, including any approval it is
+    // still waiting on. Storage removal alone leaves `connectedOrigin` live
+    // until the worker is evicted, which a dApp can postpone indefinitely.
+    const origin = typeof message.origin === "string" ? message.origin : ""
+    if (!origin) {
+      sendResponse({ success: false, error: "missing origin" })
+      return false
+    }
+    void (async () => {
+      await removeApprovedOrigin(origin)
+      if (connectedOrigin === origin) connectedOrigin = null
+      rejectPendingForOrigin(origin)
+      sendResponse({ success: true })
+    })()
     return true
   }
 
@@ -202,15 +240,19 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (message.type === "DISCONNECT_WALLET") {
     // A page may only disconnect ITSELF. Without the sender check any injected
     // *.paraloom.io page could revoke a different connected origin's approval
-    // and force a surprise re-approval prompt (same #711/#719 shape). Revoke
-    // only when the caller is the connected origin.
+    // and force a surprise re-approval prompt (same #711/#719 shape). Check the
+    // durable approval list as well as the in-memory pointer, so a page can
+    // still disconnect after an MV3 worker restart or after another origin
+    // connected.
     const origin = senderOrigin(sender)
-    if (origin && connectedOrigin === origin) {
-      removeApprovedOrigin(connectedOrigin)
-      connectedOrigin = null
-    }
-    sendResponse({ success: true })
-    return false
+    void (async () => {
+      if (origin && (connectedOrigin === origin || (await isOriginApproved(origin)))) {
+        await removeApprovedOrigin(origin)
+        if (connectedOrigin === origin) connectedOrigin = null
+      }
+      sendResponse({ success: true })
+    })()
+    return true
   }
 
   // ── Connection-approval messages (from the popup) ──
@@ -460,7 +502,10 @@ async function handleConnect(sender: chrome.runtime.MessageSender) {
   }
 
   const alreadyApproved = await isOriginApproved(origin)
-  const locked = await isWalletLocked()
+  // Require a live session, not just the durable `locked: false` flag: after a
+  // browser restart the flag survives but the session does not, and silently
+  // succeeding here would leave the dApp in a broken sessionless state.
+  const locked = await reconcileEffectiveLockState()
 
   // Trusted site that's already unlocked → reconnect silently (Phantom-style).
   if (alreadyApproved && !locked) {
@@ -581,7 +626,9 @@ function waitForUnlock(timeoutMs: number): Promise<boolean> {
   return new Promise((resolve) => {
     const start = Date.now()
     const check = async () => {
-      if (!(await isWalletLocked())) return resolve(false)
+      // `locked: false` alone is not enough: Unlock.tsx writes the session
+      // before flipping the flag, so a live session must also exist.
+      if (!(await reconcileEffectiveLockState())) return resolve(false)
       if (Date.now() - start >= timeoutMs) return resolve(true)
       setTimeout(check, 400)
     }
@@ -598,6 +645,11 @@ async function handleGetAddress(sender: chrome.runtime.MessageSender) {
   if (!(await isAuthorizedSender(sender))) {
     return { address: null }
   }
+
+  // Match the other getters: a locked wallet has no session and must not leak
+  // the shielded address to an approved origin.
+  const session = await loadSession()
+  if (!session) return { address: null }
 
   const stored = await getStoredWallet()
   return { address: stored?.address || null }
@@ -618,7 +670,9 @@ async function isAuthorizedSender(
 ): Promise<boolean> {
   const origin = senderOrigin(sender)
   if (!origin) return false
-  if (connectedOrigin === origin) return true
+  // Authorize strictly against the durable approval list. The old in-memory
+  // `connectedOrigin === origin` shortcut kept a site authorized after the user
+  // removed it from Connected Sites, because revocation only updates storage.
   return isOriginApproved(origin)
 }
 

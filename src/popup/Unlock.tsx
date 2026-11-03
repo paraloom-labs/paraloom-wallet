@@ -84,11 +84,13 @@ export function Unlock({ onUnlock }: UnlockProps) {
       }
 
       unlock(wallet, seedPhrase)
-      await setLockState(false)
       setAttempts(0)
 
       // Persist the decrypted session in memory-only storage so reopening the
       // popup doesn't force a re-unlock (the idle auto-lock timer still applies).
+      // Write the session BEFORE clearing the locked flag: waitForUnlock() and
+      // the effective-lock check require both, and flipping the flag first
+      // leaves a window where callers see "unlocked" with no session.
       const st = useWalletStore.getState()
       await saveSession({
         wallet,
@@ -96,6 +98,7 @@ export function Unlock({ onUnlock }: UnlockProps) {
         currentAccountIndex: st.currentAccountIndex,
         seedPhrase: seedPhrase ?? st.seedPhrase
       })
+      await setLockState(false)
 
       chrome.runtime.sendMessage({ type: "ACTIVITY" })
       onUnlock()

@@ -183,6 +183,11 @@ export function Home({ onLock }: HomeProps) {
 
   async function handleRevokeSite(origin: string) {
     await removeApprovedOrigin(origin)
+    // Storage removal alone does not clear the background worker's in-memory
+    // connectedOrigin/pending approvals; tell it to revoke the live session too.
+    void chrome.runtime
+      .sendMessage({ type: "REVOKE_ORIGIN", origin })
+      .catch(() => {})
     setConnectedSites((prev) => prev.filter((o) => o !== origin))
   }
 
@@ -218,6 +223,9 @@ export function Home({ onLock }: HomeProps) {
 
   async function handleLock() {
     lock()
+    // The background worker keeps connectedOrigin and pending approvals in
+    // module memory; without this message a manual lock leaves them live.
+    void chrome.runtime.sendMessage({ type: "LOCK_WALLET" }).catch(() => {})
     await setLockState(true)
     await clearSession()
     onLock()

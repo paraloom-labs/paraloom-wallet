@@ -295,7 +295,7 @@ export async function submitTransact(
     nullifiers: bundle.nullifiers,
     output_commitments: bundle.output_commitments,
     root: rootHex,
-    ext_amount: Number(extAmount),
+    ext_amount: extAmount.toString(),
     proof: bundle.proof,
     ciphertexts
   }

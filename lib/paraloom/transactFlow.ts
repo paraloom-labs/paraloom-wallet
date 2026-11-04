@@ -297,6 +297,8 @@ export async function spendV3(
   } else {
     extAmount = 0n
     recipientHex = "00".repeat(32)
+    const body = parseShieldedAddress(dest.recipientShielded)
+    if (!body) throw new Error("invalid recipient shielded address")
     const toSpendPub = addressSpendPubHex(dest.recipientShielded)
     const toBoxPub = addressBoxPubHex(dest.recipientShielded)
     const payBlind = randomHex32()

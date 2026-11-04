@@ -82,7 +82,7 @@ export async function recoverReshields(
       const tokenAmount = bal ? BigInt(bal.value.amount) : 0n
       if (tokenAmount > 0n) {
         const assetId = await assetIdForMint(mintHex)
-        await depositSpl(
+        const dep = await depositSpl(
           connection,
           fresh,
           shieldedAddress,
@@ -99,6 +99,19 @@ export async function recoverReshields(
               depositSignature: note.signature
             })
         )
+        // Only a CONFIRMED deposit settles the strand. On a confirmation
+        // timeout the transaction may have been dropped: marking the row
+        // recovered here would strand the tokens at the fresh address
+        // permanently — no later pass would ever look again (#117). Leaving
+        // the row unmarked is safe: the next pass re-checks Case A first (a
+        // late-landing deposit is found on-chain and settled there), and
+        // Case B only re-runs while the tokens are still at the ATA.
+        if (!dep.confirmed) {
+          console.log(
+            `[paraloom] reshield deposit ${dep.signature} at ${o.freshAddress} submitted but unconfirmed; leaving it for the next recovery pass`
+          )
+          continue
+        }
         await saveSwapOutput({ ...o, reshieldRecovered: true })
         recovered++
         console.log(`[paraloom] finished pending reshield at ${o.freshAddress}`)

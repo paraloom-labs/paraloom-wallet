@@ -198,6 +198,15 @@ export function buildDepositSplInstruction(
   })
 }
 
+/** A submitted SPL deposit plus whether it confirmed inside the wait window.
+ *  `confirmed: false` does NOT mean the deposit failed — the transaction may
+ *  still land — it means the caller must not treat the note as settled: the
+ *  strand stays recoverable (see recoverReshields) instead of being reported
+ *  as a completed re-shield or marked recovered (#117). */
+export interface DepositSplResult extends DepositResult {
+  confirmed: boolean
+}
+
 // Re-shield `amount` base units of `mint` held at `depositor`'s associated
 // token account into the shielded pool, crediting `shieldedAddress`. `depositor`
 // is the (fresh) keypair that owns the tokens (e.g. a private-swap output
@@ -216,8 +225,11 @@ export async function depositSpl(
   // and in the on-chain tx, so persisting the note now means a confirmation
   // timeout or a worker eviction can never lose a shielded balance that already
   // landed on-chain (#reshield-note-loss).
-  onSubmitted?: (result: DepositResult) => Promise<void>
-): Promise<DepositResult> {
+  onSubmitted?: (result: DepositResult) => Promise<void>,
+  // How long to wait for the deposit to confirm before reporting
+  // `confirmed: false`. Defaults to the tolerant 90s window.
+  confirmTimeoutMs: number = 90_000
+): Promise<DepositSplResult> {
   const recipient = hexToBytes(addressSpendPubHex(shieldedAddress))
   const blinding = new Uint8Array(32)
   crypto.getRandomValues(blinding)
@@ -252,10 +264,17 @@ export async function depositSpl(
     }
   }
   // Tolerant confirm (not the hard blockhash deadline): a busy mainnet must not
-  // throw "block height exceeded" on a deposit that actually lands.
-  await confirmBySignatureStatus(connection, signature)
+  // throw "block height exceeded" on a deposit that actually lands. The outcome
+  // is REPORTED, not swallowed: a timeout used to be indistinguishable from a
+  // landed deposit, so callers marked strands recovered and reported notes
+  // that never entered the tree (#117).
+  const confirmed = await confirmBySignatureStatus(
+    connection,
+    signature,
+    confirmTimeoutMs
+  )
 
-  return result
+  return { ...result, confirmed }
 }
 
 // Build the Associated Token Account program's CreateIdempotent instruction:

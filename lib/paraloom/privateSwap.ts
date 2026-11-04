@@ -257,6 +257,15 @@ async function reshieldToken(
         }
       }
     )
+    if (!dep.confirmed) {
+      // Submitted but not confirmed inside the window: do not report a
+      // re-shielded note that may never enter the tree (#117). The strand is
+      // not lost — the swap output row stays unrecovered, so recoverReshields
+      // settles it on a later pass (Case A if the deposit landed late,
+      // Case B if it was dropped) — and the swap result honestly shows the
+      // token as a private buy at the fresh address until then.
+      return undefined
+    }
     return {
       assetId,
       mint: mintBase58,

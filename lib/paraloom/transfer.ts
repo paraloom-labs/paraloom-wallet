@@ -4,6 +4,10 @@
 // recipient's shielded address (#196) so only they can discover and spend it.
 // The spend secrets never leave the wallet.
 
+import {
+  isValidShieldedAddress,
+  normalizeShieldedAddress
+} from "~lib/crypto/addressChecksum"
 import { addressBoxPubHex, addressSpendPubHex } from "~lib/crypto/keyManagement"
 import { NATIVE_ASSET_HEX, noteCommitmentV2, proveTransferV2 } from "~lib/prover"
 
@@ -58,6 +62,25 @@ export async function transfer(
   inputs: [ShieldedNote, ShieldedNote],
   spendPrivkeyHex: string
 ): Promise<TransferResult> {
+  // Execution-boundary address validation (#116). The popup checks the
+  // recipient, but this function is the boundary every caller crosses, and
+  // the slicing helpers below derive keys from whatever string they are
+  // handed: a length-preserving typo in the recipient would otherwise prove
+  // and settle into an unspendable note with no recovery. The RECIPIENT is
+  // held to the full checksum standard. The wallet's OWN address may be a
+  // legacy checksum-less one (stored before #781), so it is normalized
+  // instead of rejected — a pre-checksum user must not be frozen out of
+  // their own funds for having an old wallet.
+  if (!isValidShieldedAddress(recipientShieldedAddress)) {
+    throw new Error(
+      "Recipient shielded address is invalid or its checksum does not match — refusing to transfer into an unspendable note"
+    )
+  }
+  const ownAddress = normalizeShieldedAddress(ownShieldedAddress)
+  if (ownAddress === null) {
+    throw new Error("Own shielded address is malformed")
+  }
+
   const inputTotal = inputs.reduce((sum, n) => sum + BigInt(n.amount), 0n)
   if (inputTotal < amount) {
     throw new Error("Selected notes do not cover the transfer amount")
@@ -68,8 +91,8 @@ export async function transfer(
   // spend it) and is encrypted to their box pubkey (so only they can read it).
   const recipientSpendPub = addressSpendPubHex(recipientShieldedAddress)
   const recipientBoxPub = addressBoxPubHex(recipientShieldedAddress)
-  const ownSpendPub = addressSpendPubHex(ownShieldedAddress)
-  const ownBoxPub = addressBoxPubHex(ownShieldedAddress)
+  const ownSpendPub = addressSpendPubHex(ownAddress)
+  const ownBoxPub = addressBoxPubHex(ownAddress)
 
   // Pull each input's Merkle path. Both must prove against the same root; the
   // tree is stable between these two quick reads on devnet, so use the latest.

@@ -41,3 +41,36 @@ export function parseShieldedAddress(addr: string): string | null {
 export function isValidShieldedAddress(addr: string): boolean {
   return parseShieldedAddress(addr) !== null
 }
+
+// Return the 128-hex body of a checksummed address OR of a legacy
+// checksum-less one (`paraloom1` + 128 hex, the format stored by wallets
+// created before #781), or null for anything else. A 136-char address whose
+// checksum does NOT match returns null — a typo'd checksummed address must
+// never silently degrade to "legacy" and sail through on length alone; that
+// is exactly the typo #781 closed. This is the derivation-grade check: it is
+// safe for slicing the wallet's OWN address (either era) but is NOT a
+// substitute for `parseShieldedAddress` on an external recipient, where the
+// checksum itself is the protection.
+export function shieldedAddressBody(addr: string): string | null {
+  const checksummed = parseShieldedAddress(addr)
+  if (checksummed !== null) return checksummed
+  if (!addr.startsWith("paraloom1")) return null
+  const rest = addr.slice("paraloom1".length)
+  if (rest.length !== SHIELDED_BODY_HEX) return null
+  if (!/^[0-9a-fA-F]+$/.test(rest)) return null
+  return rest
+}
+
+export function isLegacyShieldedAddress(addr: string): boolean {
+  return !isValidShieldedAddress(addr) && shieldedAddressBody(addr) !== null
+}
+
+// Canonical checksummed form of a valid or legacy address, or null if the
+// address is neither. Lets own-address flows accept a pre-#781 stored
+// address and work with its modern form instead of failing on it.
+export function normalizeShieldedAddress(addr: string): string | null {
+  if (isValidShieldedAddress(addr)) return addr
+  const body = shieldedAddressBody(addr)
+  if (body === null) return null
+  return `paraloom1${withChecksum(body)}`
+}

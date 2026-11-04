@@ -5,6 +5,7 @@
 
 import { Connection, Keypair, PublicKey } from "@solana/web3.js"
 
+import { isValidShieldedAddress } from "~lib/crypto/addressChecksum"
 import { addressBoxPubHex, addressSpendPubHex } from "~lib/crypto/keyManagement"
 import {
   proveTransact,
@@ -201,6 +202,18 @@ export async function spendV3(
 ): Promise<SpendResult> {
   if (inputs.length < 1 || inputs.length > 2) {
     throw new Error("transact spends 1 or 2 notes")
+  }
+  // Execution-boundary recipient validation (#116): fail before any note
+  // selection or proving, not after the proof is built. A shielded
+  // destination that fails the checksum would settle into an unspendable
+  // note with no recovery path.
+  if (
+    dest.kind === "transfer" &&
+    !isValidShieldedAddress(dest.recipientShielded)
+  ) {
+    throw new Error(
+      "Recipient shielded address is invalid or its checksum does not match — refusing to spend into an unspendable note"
+    )
   }
   const sumIn = inputs.reduce((acc, n) => acc + BigInt(n.amount), 0n)
   if (payLamports <= 0n || payLamports > sumIn) {

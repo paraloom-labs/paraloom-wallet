@@ -289,23 +289,52 @@ export async function submitTransact(
   // `recipientHex` is the recipient token account.
   mintHex?: string
 ): Promise<TransactSubmission> {
+  // The proof binds extAmount as an i64, and the ingress verifies the
+  // payload's ext_amount against that public input. Casting through Number()
+  // silently rounds any |extAmount| above 2^53, so the verifier sees a
+  // different value than the proof commits to and rejects the spend (#121).
+  // An i64 always has an exact JSON-number representation — emit the raw
+  // digits instead of a double. (A JSON string would preserve the digits too,
+  // but the ingress field is a typed i64; the wire type must stay a number.)
+  if (
+    extAmount > 9_223_372_036_854_775_807n ||
+    extAmount < -9_223_372_036_854_775_808n
+  ) {
+    throw new Error(
+      `extAmount ${extAmount.toString()} is outside the i64 range the transact proof binds`
+    )
+  }
   const bundle = JSON.parse(proofBundleJson)
+  // JSON.stringify cannot serialize a bigint; park a placeholder where the
+  // amount belongs and splice the exact digits into the serialized payload.
+  // The placeholder is not valid hex or base64, so it cannot collide with a
+  // proof, commitment, or ciphertext field (and the count check below proves
+  // it appears exactly once).
+  const EXT_AMOUNT_PLACEHOLDER = "__paraloom_ext_amount__"
   const body: Record<string, unknown> = {
     recipient: recipientHex,
     nullifiers: bundle.nullifiers,
     output_commitments: bundle.output_commitments,
     root: rootHex,
-    ext_amount: Number(extAmount),
+    ext_amount: EXT_AMOUNT_PLACEHOLDER,
     proof: bundle.proof,
     ciphertexts
   }
   if (mintHex) body.mint = mintHex
   const headers: Record<string, string> = { "Content-Type": "application/json" }
   if (ingressToken) headers["Authorization"] = `Bearer ${ingressToken}`
+  const serialized = JSON.stringify(body)
+  const placeholderCount = serialized.split(`"${EXT_AMOUNT_PLACEHOLDER}"`).length - 1
+  if (placeholderCount !== 1) {
+    throw new Error("ext_amount placeholder collision in transact payload")
+  }
   const res = await fetch(`${TRANSACT_INGRESS_URL}/transact/submit`, {
     method: "POST",
     headers,
-    body: JSON.stringify(body)
+    body: serialized.replace(
+      `"${EXT_AMOUNT_PLACEHOLDER}"`,
+      extAmount.toString()
+    )
   })
   if (!res.ok) {
     throw new Error(`transact ingress rejected: ${res.status} ${await res.text()}`)

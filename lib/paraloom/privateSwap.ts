@@ -319,6 +319,13 @@ export async function privateSwap(
     outAmount: 0,
     swapSignature: "",
     reshield: params.reshield ?? false,
+    // Owner + cluster: recovery credits a stranded row to the account that
+    // ran the swap, not whichever account is active when recovery runs.
+    // Private swaps settle on mainnet regardless of the selected network
+    // (the reconciler is mainnet-only — see Home.tsx), so the cluster is
+    // fixed here rather than read from ambient state.
+    shieldedAddress,
+    network: "mainnet-beta",
     createdAt: Date.now()
   })
 
@@ -391,6 +398,11 @@ export async function privateSwap(
     outputMint: params.outputMint,
     outAmount: out_amount,
     swapSignature,
+    // Re-stated rather than relied on: the upsert keeps the row's existing
+    // owner, but sending it means the row is correct even if this write is
+    // the first one to land.
+    shieldedAddress,
+    network: "mainnet-beta",
     createdAt: Date.now()
   })
 
@@ -508,6 +520,10 @@ export async function privateSwapFromToken(
     outAmount: 0,
     swapSignature: "",
     reshield: params.reshield ?? false,
+    // Owner + cluster, as at the other creation write: the row belongs to
+    // the account running this swap and settles on mainnet (see above).
+    shieldedAddress,
+    network: "mainnet-beta",
     createdAt: Date.now()
   })
 
@@ -597,6 +613,9 @@ export async function privateSwapFromToken(
     outputMint: params.outputMint,
     outAmount: out_amount,
     swapSignature,
+    // Owner + cluster re-stated (see the privateSwap landed write).
+    shieldedAddress,
+    network: "mainnet-beta",
     createdAt: Date.now()
   })
   await waitForSwapConfirmation(connection, swapSignature)

@@ -459,4 +459,12 @@ describe("ordinary scanning", () => {
     respondWith([])
     expect(await scan()).toBe(0)
   })
+
+  it("skips 0-value filler/change ciphertexts instead of storing them as unspent notes (#247)", async () => {
+    respondWith([honest(0n), honest(500n)])
+    expect(await scan()).toBe(1)
+    const notes = await getNotes(ACCOUNT)
+    expect(notes).toHaveLength(1)
+    expect(notes[0].amount).toBe("500")
+  })
 })

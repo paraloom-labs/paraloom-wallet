@@ -1,5 +1,10 @@
-import { describe, expect, it } from "vitest"
+import { beforeEach, describe, expect, it } from "vitest"
 
+import {
+  dismissSwapOutput,
+  listSwapOutputs,
+  saveSwapOutput
+} from "../lib/paraloom/swapOutputs"
 import {
   classifyStrand,
   isNativeSolOutput,
@@ -7,8 +12,13 @@ import {
   RESUME_MIN_LAMPORTS,
   WSOL_MINT
 } from "../lib/paraloom/swapReconcileClassify"
+import { installFakeChrome } from "./support/chromeStorage"
 
 const OLD = RESUME_GRACE_MS + 1
+
+beforeEach(() => {
+  installFakeChrome()
+})
 
 describe("classifyStrand", () => {
   it("skips a row that already has a signature (done)", () => {
@@ -102,5 +112,70 @@ describe("isNativeSolOutput", () => {
 
   it("treats USDC (any SPL mint) as NOT native SOL", () => {
     expect(isNativeSolOutput("EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v")).toBe(false)
+  })
+
+  it("handles whitespace-padded SOL and WSOL mint strings", () => {
+    expect(isNativeSolOutput(" SOL ")).toBe(true)
+    expect(isNativeSolOutput(` ${WSOL_MINT} `)).toBe(true)
+  })
+})
+
+describe("classifyStrand NaN ageMs and swapOutputs upsert invariants (#264)", () => {
+  it("skips a row whose ageMs is NaN or non-finite instead of bypassing RESUME_GRACE_MS", () => {
+    expect(
+      classifyStrand({
+        hasSignature: false,
+        ageMs: Number.NaN,
+        solLamports: RESUME_MIN_LAMPORTS + 100n,
+        tokenAmount: 500n
+      })
+    ).toBe("skip")
+  })
+
+  it("preserves original createdAt, reshield, and secretKey on upsert and guards non-array storage", async () => {
+    await chrome.storage.local.set({ paraloom_swap_outputs: { corrupted: true } })
+    expect(await listSwapOutputs()).toEqual([])
+
+    await saveSwapOutput({
+      freshAddress: "FreshAddr11111111111111111111111111111111111",
+      freshSecretKeyHex: "aa".repeat(64),
+      outputMint: "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
+      outAmount: 0,
+      swapSignature: "",
+      reshield: true,
+      createdAt: 1000
+    })
+
+    // Second-stage update passes a later createdAt and omits reshield
+    await saveSwapOutput({
+      freshAddress: "FreshAddr11111111111111111111111111111111111",
+      freshSecretKeyHex: "",
+      outputMint: "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
+      outAmount: 250000,
+      swapSignature: "sig-landed",
+      createdAt: 9999
+    })
+
+    const rows = await listSwapOutputs()
+    expect(rows).toHaveLength(1)
+    expect(rows[0].createdAt).toBe(1000)
+    expect(rows[0].reshield).toBe(true)
+    expect(rows[0].freshSecretKeyHex).toBe("aa".repeat(64))
+    expect(rows[0].outAmount).toBe(250000)
+    expect(rows[0].swapSignature).toBe("sig-landed")
+
+    await expect(
+      saveSwapOutput({
+        freshAddress: "",
+        freshSecretKeyHex: "bb".repeat(64),
+        outputMint: "SOL",
+        outAmount: 0,
+        swapSignature: "",
+        createdAt: 1000
+      })
+    ).rejects.toThrow(/freshAddress/)
+
+    await dismissSwapOutput("FreshAddr11111111111111111111111111111111111")
+    expect(await listSwapOutputs()).toEqual([])
   })
 })

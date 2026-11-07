@@ -159,6 +159,13 @@ function isFromPopup(sender: chrome.runtime.MessageSender): boolean {
 }
 
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
+  if (
+    !message ||
+    typeof message !== "object" ||
+    typeof (message as { type?: unknown }).type !== "string"
+  ) {
+    return false
+  }
   // Popup-only messages are refused outright when they arrive from a page.
   // Without this the approval screen is decorative: a script on any injected
   // origin approves its own connection and reads the visitor's shielded
@@ -270,7 +277,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   }
 
   if (message.type === "APPROVE_SWAP") {
-    if (pendingSwap && pendingSwap.id === message.id) {
+    if (typeof message.id === "number" && pendingSwap && pendingSwap.id === message.id) {
       pendingSwap.resolve(true)
     }
     sendResponse({ success: true })
@@ -278,7 +285,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   }
 
   if (message.type === "REJECT_SWAP") {
-    if (pendingSwap && pendingSwap.id === message.id) {
+    if (typeof message.id === "number" && pendingSwap && pendingSwap.id === message.id) {
       pendingSwap.resolve(false)
     }
     sendResponse({ success: true })
@@ -436,8 +443,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 async function handleConnect(sender: chrome.runtime.MessageSender) {
   // sender.origin is the origin of the page that called window.paraloom.connect
   // (set for content-script senders without needing the "tabs" permission).
-  const origin =
-    sender.origin ?? (sender.tab?.url ? new URL(sender.tab.url).origin : null)
+  const origin = senderOrigin(sender)
   if (!origin) {
     throw new Error("Unable to determine the requesting site's origin")
   }
@@ -494,6 +500,9 @@ async function handleConnect(sender: chrome.runtime.MessageSender) {
 // Register a pending connection request and resolve once the user approves or
 // rejects it in the popup (or the timeout elapses → treated as a rejection).
 function requestApproval(origin: string, timeoutMs: number): Promise<boolean> {
+  if (pendingConnection) {
+    pendingConnection.resolve(false)
+  }
   return new Promise((resolve) => {
     const id = ++connectionIdCounter
     const clearPersisted = () =>
@@ -610,7 +619,16 @@ async function handleGetAddress(sender: chrome.runtime.MessageSender) {
 // The requesting page's origin, resolved without the "tabs" permission. A popup
 // (extension context) has no tab; a content-script relay always does.
 function senderOrigin(sender: chrome.runtime.MessageSender): string | null {
-  return sender.origin ?? (sender.tab?.url ? new URL(sender.tab.url).origin : null)
+  const candidate = sender.origin ?? sender.tab?.url ?? null
+  if (!candidate || candidate === "null") return null
+  try {
+    const parsed = new URL(candidate)
+    if (parsed.protocol !== "https:" && parsed.protocol !== "http:") return null
+    if (!parsed.origin || parsed.origin === "null") return null
+    return parsed.origin
+  } catch {
+    return null
+  }
 }
 
 async function isAuthorizedSender(
@@ -710,6 +728,9 @@ function requestSwapApproval(
   params: SwapRequestParams,
   timeoutMs: number
 ): Promise<boolean> {
+  if (pendingSwap) {
+    pendingSwap.resolve(false)
+  }
   return new Promise((resolve) => {
     const id = ++swapIdCounter
     const timer = setTimeout(() => {

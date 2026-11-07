@@ -1,15 +1,13 @@
-import * as bip39 from "bip39"
-import { sha256 } from "@noble/hashes/sha256"
 import { scrypt } from "@noble/hashes/scrypt"
+import { sha256 } from "@noble/hashes/sha256"
 import { randomBytes } from "@noble/hashes/utils"
-
-import { withChecksum } from "./addressChecksum"
-import * as nacl from "tweetnacl"
-
 // Circuit v3 (#350): the address carries the circom-Poseidon spend pubkey the
 // v3 note commitments bind to. Addresses derived before the v3 cutover used
 // the old sponge Poseidon and died with the pool reset.
 import { v3NotePubkey as deriveSpendPub } from "~lib/prover"
+import * as bip39 from "bip39"
+import * as nacl from "tweetnacl"
+import { withChecksum } from "./addressChecksum"
 
 // scrypt parameters for password-based key derivation.
 // N=2^15 / r=8 / p=1 → ~100ms in-popup, 32 MiB memory-hard work factor.
@@ -41,6 +39,13 @@ export interface WalletKeyPair {
  * derived from it so the seed phrase alone recovers everything (#196).
  */
 export function deriveBoxKeypair(ed25519SecretKey: Uint8Array): nacl.BoxKeyPair {
+  if (
+    !ed25519SecretKey ||
+    !(ed25519SecretKey instanceof Uint8Array || ArrayBuffer.isView(ed25519SecretKey)) ||
+    ed25519SecretKey.length < 32
+  ) {
+    throw new Error("Secret key must be at least 32 bytes")
+  }
   return nacl.box.keyPair.fromSecretKey(ed25519SecretKey.slice(0, 32))
 }
 
@@ -51,6 +56,13 @@ export function deriveBoxKeypair(ed25519SecretKey: Uint8Array): nacl.BoxKeyPair 
  * recovers it.
  */
 export function deriveSpendPrivkey(ed25519SecretKey: Uint8Array): Uint8Array {
+  if (
+    !ed25519SecretKey ||
+    !(ed25519SecretKey instanceof Uint8Array || ArrayBuffer.isView(ed25519SecretKey)) ||
+    ed25519SecretKey.length < 32
+  ) {
+    throw new Error("Secret key must be at least 32 bytes")
+  }
   const accountSeed = ed25519SecretKey.slice(0, 32)
   const tag = new TextEncoder().encode("paraloom-spend-v2")
   const input = new Uint8Array(tag.length + accountSeed.length)
@@ -132,6 +144,15 @@ export async function deriveKeypairFromSeed(
     throw new Error("Invalid seed phrase")
   }
 
+  if (
+    typeof accountIndex !== "number" ||
+    !Number.isInteger(accountIndex) ||
+    accountIndex < 0 ||
+    accountIndex > 0xffffffff
+  ) {
+    throw new Error("Invalid account index")
+  }
+
   // Convert seed to bytes
   const seed = bip39.mnemonicToSeedSync(seedPhrase)
 
@@ -202,10 +223,7 @@ function deriveKey(password: string, salt: Uint8Array, legacy: boolean): Uint8Ar
  * Encrypt wallet with password.
  * Key derivation: scrypt. Cipher: NaCl secretbox (XSalsa20-Poly1305).
  */
-export function encryptWallet(
-  keypair: WalletKeyPair,
-  password: string
-): EncryptedWallet {
+export function encryptWallet(keypair: WalletKeyPair, password: string): EncryptedWallet {
   // Generate random salt
   const salt = randomBytes(32)
 
@@ -241,10 +259,28 @@ export async function decryptWallet(
   password: string,
   legacy: boolean = false
 ): Promise<WalletKeyPair> {
+  if (
+    !encryptedWallet ||
+    typeof encryptedWallet !== "object" ||
+    typeof encryptedWallet.encrypted !== "string" ||
+    typeof encryptedWallet.nonce !== "string" ||
+    typeof encryptedWallet.salt !== "string"
+  ) {
+    throw new Error("Invalid encrypted wallet data")
+  }
+
   // Parse hex strings
   const encrypted = Buffer.from(encryptedWallet.encrypted, "hex")
   const nonce = Buffer.from(encryptedWallet.nonce, "hex")
   const salt = Buffer.from(encryptedWallet.salt, "hex")
+
+  if (
+    salt.length !== 32 ||
+    nonce.length !== nacl.secretbox.nonceLength ||
+    encrypted.length < nacl.secretbox.overheadLength
+  ) {
+    throw new Error("Invalid encrypted wallet data")
+  }
 
   // Derive encryption key from password (scrypt, or legacy chain for old vaults)
   const encryptionKey = deriveKey(password, salt, legacy)
@@ -257,18 +293,50 @@ export async function decryptWallet(
   }
 
   // Parse wallet data
-  const walletData = JSON.parse(new TextDecoder().decode(decrypted))
+  let walletData: any
+  try {
+    walletData = JSON.parse(new TextDecoder().decode(decrypted))
+  } catch {
+    throw new Error("Invalid wallet data")
+  }
+
+  if (
+    !walletData ||
+    typeof walletData !== "object" ||
+    typeof walletData.secretKey !== "string" ||
+    typeof walletData.publicKey !== "string"
+  ) {
+    throw new Error("Invalid wallet data")
+  }
+
+  const secretKey = Buffer.from(walletData.secretKey, "hex")
+  const publicKey = Buffer.from(walletData.publicKey, "hex")
+
+  if (
+    secretKey.length !== nacl.sign.secretKeyLength ||
+    publicKey.length !== nacl.sign.publicKeyLength
+  ) {
+    throw new Error("Wallet integrity check failed")
+  }
+
+  if (!nacl.verify(secretKey.subarray(32), publicKey)) {
+    throw new Error("Wallet integrity check failed")
+  }
+
+  const derived = nacl.sign.keyPair.fromSeed(secretKey.subarray(0, 32))
+  if (!nacl.verify(derived.publicKey, publicKey) || !nacl.verify(derived.secretKey, secretKey)) {
+    throw new Error("Wallet integrity check failed")
+  }
 
   // Derive the box keypair from the stored ed25519 secret and recompute the
   // shielded address from the box public key (#196). This overrides any
   // address stored by a pre-#196 vault (which used sha256(pubkey)), migrating
   // existing wallets to the box-pubkey address with no re-onboarding.
-  const secretKey = Buffer.from(walletData.secretKey, "hex")
   const box = deriveBoxKeypair(secretKey)
   const spendPrivkey = deriveSpendPrivkey(secretKey)
 
   return {
-    publicKey: Buffer.from(walletData.publicKey, "hex"),
+    publicKey,
     secretKey,
     shieldedAddress: await deriveShieldedAddress(box.publicKey, spendPrivkey),
     boxPublicKey: box.publicKey,
@@ -322,7 +390,15 @@ export function decryptSeedPhrase(
   password: string,
   legacy: boolean = false
 ): string {
+  if (!encryptedData || typeof encryptedData !== "string") {
+    throw new Error("Invalid encrypted data")
+  }
+
   const combined = Buffer.from(encryptedData, "hex")
+  const minLength = 32 + nacl.secretbox.nonceLength + nacl.secretbox.overheadLength
+  if (combined.length < minLength) {
+    throw new Error("Invalid encrypted data")
+  }
 
   // Extract salt, nonce, and encrypted data
   const salt = combined.subarray(0, 32)
@@ -336,5 +412,10 @@ export function decryptSeedPhrase(
     throw new Error("Invalid password")
   }
 
-  return new TextDecoder().decode(decrypted)
+  const seedPhrase = new TextDecoder().decode(decrypted)
+  if (!validateSeedPhrase(seedPhrase)) {
+    throw new Error("Invalid seed phrase integrity")
+  }
+
+  return seedPhrase
 }

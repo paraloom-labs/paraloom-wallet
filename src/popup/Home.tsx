@@ -80,6 +80,17 @@ function selectSolWithdrawNotes(
   return null
 }
 
+// Format a bigint atomic balance into an exact decimal string without floating-point precision loss.
+export function formatLamportsExact(balance: bigint, decimals = 9): string {
+  if (balance <= 0n) return "0"
+  const divisor = 10n ** BigInt(decimals)
+  const whole = balance / divisor
+  const frac = balance % divisor
+  if (frac === 0n) return whole.toString()
+  const fracStr = frac.toString().padStart(decimals, "0").replace(/0+$/, "")
+  return `${whole}.${fracStr}`
+}
+
 interface Token {
   symbol: string
   name: string
@@ -115,6 +126,7 @@ export function Home({ onLock }: HomeProps) {
   const [toast, setToast] = useState<{ message: string; type: "success" | "error" | "info" } | null>(null)
 
   // Paraloom bridge state
+  const loadVersionRef = useRef(0)
   const [solBalance, setSolBalance] = useState(0n)
   const [shieldedLamports, setShieldedLamports] = useState(0n)
   const [shieldedTokens, setShieldedTokens] = useState<Record<string, bigint>>({})
@@ -126,7 +138,7 @@ export function Home({ onLock }: HomeProps) {
   const [swapOutputs, setSwapOutputs] = useState<SwapOutput[]>([])
   // The activity row the user tapped, shown in an in-app detail sheet.
   const [activityDetail, setActivityDetail] = useState<{
-    kind: "buy" | "deposit"
+    kind: "buy" | "deposit" | "transfer"
     pending: boolean
     amount: string
     sym: string
@@ -152,6 +164,8 @@ export function Home({ onLock }: HomeProps) {
   const [showSeedModal, setShowSeedModal] = useState(false)
   const [settingsPassword, setSettingsPassword] = useState("")
   const [settingsPasswordError, setSettingsPasswordError] = useState("")
+  const [exportAttempts, setExportAttempts] = useState(0)
+  const [exportLockedUntil, setExportLockedUntil] = useState(0)
   const [revealedPK, setRevealedPK] = useState<string | null>(null)
   const [pkVisible, setPkVisible] = useState(false)
   const [revealedSeed, setRevealedSeed] = useState<string | null>(null)
@@ -160,6 +174,7 @@ export function Home({ onLock }: HomeProps) {
   const [connectedSites, setConnectedSites] = useState<string[]>([])
 
   const autoLockRef = useRef<HTMLDivElement>(null)
+  const isExportLockedOut = Date.now() < exportLockedUntil
 
   // Load settings on mount
   useEffect(() => {
@@ -286,35 +301,48 @@ export function Home({ onLock }: HomeProps) {
 
   async function loadBalances() {
     if (!wallet) return
+    const version = ++loadVersionRef.current
+    const currentAddr = wallet.shieldedAddress
+    const currentPubkey = wallet.publicKey
+    const currentNet = network
+
     try {
-      const sol = await getSolBalance(getConnection(network), wallet.publicKey)
-      setSolBalance(sol)
+      const sol = await getSolBalance(getConnection(currentNet), currentPubkey)
+      if (loadVersionRef.current === version) {
+        setSolBalance(sol)
+      }
     } catch {
-      // RPC unreachable — leave the last known balance in place
+      // RPC unreachable
     }
+    if (loadVersionRef.current !== version) return
+
     // Best-effort scan for received transfer notes (#196) before reading the
     // balance, so discovered notes are included. Swallowed if the transfer
     // node is unreachable — the shielded balance still reflects local notes.
     try {
       const boxSecret = deriveBoxKeypair(wallet.secretKey).secretKey
       await scanForNotes(
-        wallet.shieldedAddress,
+        currentAddr,
         boxSecret,
         Buffer.from(wallet.spendPrivkey).toString("hex")
       )
     } catch {
       // transfer node down / no scan endpoint — ignore
     }
+    if (loadVersionRef.current !== version) return
+
     // Recover any re-shield whose deposit landed on-chain but whose note was
     // never persisted (or whose deposit never ran but the token is still at the
     // fresh address). Runs directly in the popup — no service-worker relay — so
     // it always fires when the wallet is opened, and the reads below then reflect
     // the recovered shielded balance.
     try {
-      await recoverReshields(getConnection(network), wallet.shieldedAddress)
+      await recoverReshields(getConnection(currentNet), currentAddr)
     } catch {
       // best-effort — the reads below still show whatever is already local
     }
+    if (loadVersionRef.current !== version) return
+
     // Resolve stranded swap rows so Activity stops showing settled swaps as
     // "Pending" forever. Private swaps are mainnet-only, so this always runs
     // against the mainnet archival RPC regardless of the selected network. It
@@ -323,24 +351,42 @@ export function Home({ onLock }: HomeProps) {
     try {
       const resolved = await reconcileSwapOutputs(
         getConnection("mainnet-beta"),
-        wallet.shieldedAddress
+        currentAddr
       )
-      if (resolved > 0) {
-        listSwapOutputs().then(setSwapOutputs).catch(() => {})
+      if (resolved > 0 && loadVersionRef.current === version) {
+        listSwapOutputs().then((outputs) => {
+          if (loadVersionRef.current === version) setSwapOutputs(outputs)
+        }).catch(() => {})
       }
     } catch {
       // best-effort
     }
+    if (loadVersionRef.current !== version) return
+
     try {
-      setShieldedLamports(await shieldedBalance(wallet.shieldedAddress))
-      setShieldedTokens(await shieldedTokenBalances(wallet.shieldedAddress))
-      setNotes((await getNotes(wallet.shieldedAddress)).slice().reverse())
+      const [lamports, tokens, rawNotes] = await Promise.all([
+        shieldedBalance(currentAddr),
+        shieldedTokenBalances(currentAddr),
+        getNotes(currentAddr)
+      ])
+      if (loadVersionRef.current === version) {
+        setShieldedLamports(lamports)
+        setShieldedTokens(tokens)
+        setNotes(rawNotes.slice().reverse())
+      }
     } catch {
       // storage read failed — ignore
     }
   }
 
   useEffect(() => {
+    // Invalidate in-flight loads and reset balances/notes immediately on switch
+    loadVersionRef.current++
+    setSolBalance(0n)
+    setShieldedLamports(0n)
+    setShieldedTokens({})
+    setNotes([])
+    setSwapOutputs([])
     loadBalances()
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [wallet, network])
@@ -591,36 +637,116 @@ export function Home({ onLock }: HomeProps) {
     await setAutoLockMinutes(minutes)
   }
 
+  const MAX_EXPORT_ATTEMPTS = 5
+  const EXPORT_LOCKOUT_SECONDS = 30
+
   async function handleExportPK() {
+    if (Date.now() < exportLockedUntil) {
+      const remaining = Math.ceil((exportLockedUntil - Date.now()) / 1000)
+      setSettingsPasswordError(`Too many attempts. Try again in ${remaining}s`)
+      return
+    }
     setSettingsPasswordError("")
+
+    let stored: Awaited<ReturnType<typeof getStoredWallet>>
     try {
-      const stored = await getStoredWallet()
-      if (!stored) throw new Error("No wallet found")
-      const isLegacy = (stored.kdfVersion ?? 0) < KDF_VERSION_SCRYPT
+      stored = await getStoredWallet()
+    } catch {
+      setSettingsPasswordError("Failed to read stored wallet")
+      return
+    }
+    if (!stored) {
+      setSettingsPasswordError("No wallet found")
+      return
+    }
+
+    const isLegacy = (stored.kdfVersion ?? 0) < KDF_VERSION_SCRYPT
+    try {
       await decryptWallet(stored.encryptedData, settingsPassword, isLegacy)
-      // Password correct — show the secret key as hex
-      const hexKey = Buffer.from(wallet!.secretKey).toString("hex")
+    } catch {
+      const newAttempts = exportAttempts + 1
+      setExportAttempts(newAttempts)
+      if (newAttempts >= MAX_EXPORT_ATTEMPTS) {
+        setExportLockedUntil(Date.now() + EXPORT_LOCKOUT_SECONDS * 1000)
+        setSettingsPasswordError(`Too many attempts. Try again in ${EXPORT_LOCKOUT_SECONDS}s`)
+        setExportAttempts(0)
+        setTimeout(() => {
+          setExportLockedUntil(0)
+          setSettingsPasswordError("")
+        }, EXPORT_LOCKOUT_SECONDS * 1000)
+      } else {
+        setSettingsPasswordError(`Incorrect password (${MAX_EXPORT_ATTEMPTS - newAttempts} attempts remaining)`)
+      }
+      return
+    }
+
+    setExportAttempts(0)
+    setExportLockedUntil(0)
+    try {
+      if (!wallet) throw new Error("No wallet loaded")
+      const hexKey = Buffer.from(wallet.secretKey).toString("hex")
       setRevealedPK(hexKey)
       setPkVisible(false)
       setShowPKModal(false)
       setSettingsPassword("")
-    } catch {
-      setSettingsPasswordError("Incorrect password")
+    } catch (err) {
+      setSettingsPasswordError(err instanceof Error ? err.message : "Failed to export private key")
     }
   }
 
   async function handleShowSeed() {
+    if (Date.now() < exportLockedUntil) {
+      const remaining = Math.ceil((exportLockedUntil - Date.now()) / 1000)
+      setSettingsPasswordError(`Too many attempts. Try again in ${remaining}s`)
+      return
+    }
     setSettingsPasswordError("")
+
+    let stored: Awaited<ReturnType<typeof getStoredWallet>>
     try {
-      const stored = await getStoredWallet()
-      if (!stored?.encryptedSeedPhrase) throw new Error("No seed phrase stored")
-      const isLegacy = (stored.kdfVersion ?? 0) < KDF_VERSION_SCRYPT
-      const phrase = decryptSeedPhrase(stored.encryptedSeedPhrase, settingsPassword, isLegacy)
+      stored = await getStoredWallet()
+    } catch {
+      setSettingsPasswordError("Failed to read stored wallet")
+      return
+    }
+    if (!stored) {
+      setSettingsPasswordError("No wallet found")
+      return
+    }
+    if (!stored.encryptedSeedPhrase) {
+      setSettingsPasswordError("No seed phrase stored")
+      return
+    }
+
+    const isLegacy = (stored.kdfVersion ?? 0) < KDF_VERSION_SCRYPT
+    let phrase: string
+    try {
+      phrase = decryptSeedPhrase(stored.encryptedSeedPhrase, settingsPassword, isLegacy)
+    } catch {
+      const newAttempts = exportAttempts + 1
+      setExportAttempts(newAttempts)
+      if (newAttempts >= MAX_EXPORT_ATTEMPTS) {
+        setExportLockedUntil(Date.now() + EXPORT_LOCKOUT_SECONDS * 1000)
+        setSettingsPasswordError(`Too many attempts. Try again in ${EXPORT_LOCKOUT_SECONDS}s`)
+        setExportAttempts(0)
+        setTimeout(() => {
+          setExportLockedUntil(0)
+          setSettingsPasswordError("")
+        }, EXPORT_LOCKOUT_SECONDS * 1000)
+      } else {
+        setSettingsPasswordError(`Incorrect password (${MAX_EXPORT_ATTEMPTS - newAttempts} attempts remaining)`)
+      }
+      return
+    }
+
+    setExportAttempts(0)
+    setExportLockedUntil(0)
+    try {
       setRevealedSeed(phrase)
       setShowSeedModal(false)
       setSettingsPassword("")
-    } catch {
-      setSettingsPasswordError("Incorrect password")
+    } catch (err) {
+      setSettingsPasswordError(err instanceof Error ? err.message : "Failed to export recovery phrase")
     }
   }
 
@@ -892,18 +1018,18 @@ export function Home({ onLock }: HomeProps) {
         ) : bottomTab === "activity" ? (
           <div className="activity-content">
             {(() => {
-              // Only real deposits belong in the feed. The zero-value change/
-              // filler notes a transact emits carry an empty signature, so
-              // rendering them all under key="" collided React keys.
-              const deposits = notes.filter(
-                (n) => n.source === "deposit" && Number(n.amount) > 0
+              // Real deposits and received transfers belong in the feed. The zero-value change/
+              // filler notes a transact emits carry an empty signature/amount, so
+              // rendering them all collided React keys.
+              const incoming = notes.filter(
+                (n) => (n.source === "deposit" || n.source === "transfer") && Number(n.amount) > 0
               )
               const USDC_MINT = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"
               // Wrapped-SOL mint: the swaps app sends this as the outputMint for a
               // SOL output, so a token->SOL buy must be shown (and scaled) as SOL.
               const WSOL_MINT = "So11111111111111111111111111111111111111112"
 
-              if (deposits.length === 0 && swapOutputs.length === 0) {
+              if (incoming.length === 0 && swapOutputs.length === 0) {
                 return (
                   <div className="empty-state">
                     <svg width="64" height="64" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" opacity="0.2">
@@ -919,14 +1045,18 @@ export function Home({ onLock }: HomeProps) {
                 )
               }
 
-              // Unify buys + deposits into one time-ordered feed, then bucket by
+              // Unify buys + deposits/transfers into one time-ordered feed, then bucket by
               // day so the list reads like a real transaction history.
               type Entry =
                 | { kind: "buy"; ts: number; s: SwapOutput }
-                | { kind: "deposit"; ts: number; n: ShieldedNote }
+                | { kind: "deposit" | "transfer"; ts: number; n: ShieldedNote }
               const entries: Entry[] = [
                 ...swapOutputs.map((s) => ({ kind: "buy" as const, ts: s.createdAt, s })),
-                ...deposits.map((n) => ({ kind: "deposit" as const, ts: n.createdAt, n }))
+                ...incoming.map((n) => ({
+                  kind: (n.source === "transfer" ? "transfer" : "deposit") as "deposit" | "transfer",
+                  ts: n.createdAt,
+                  n
+                }))
               ].sort((a, b) => b.ts - a.ts)
 
               const groups: { label: string; items: Entry[] }[] = []
@@ -1032,6 +1162,7 @@ export function Home({ onLock }: HomeProps) {
                               : n.mint
                                 ? n.amount
                                 : (Number(n.amount) / 1e9).toFixed(4)
+                          const isTransfer = n.source === "transfer"
                           return (
                             <div
                               key={n.signature || n.commitment || `dep-${i}`}
@@ -1040,13 +1171,13 @@ export function Home({ onLock }: HomeProps) {
                               tabIndex={0}
                               onClick={() =>
                                 setActivityDetail({
-                                  kind: "deposit",
+                                  kind: isTransfer ? "transfer" : "deposit",
                                   pending: false,
                                   amount: `+${depAmount} ${depSym}`,
                                   sym: depSym,
                                   address: "",
-                                  signature: n.signature,
-                                  explorerUrl: `https://explorer.solana.com/tx/${n.signature}?cluster=${network}`,
+                                  signature: n.signature || n.commitment || "",
+                                  explorerUrl: n.signature ? `https://explorer.solana.com/tx/${n.signature}?cluster=${network}` : "",
                                   createdAt: n.createdAt
                                 })
                               }
@@ -1065,7 +1196,7 @@ export function Home({ onLock }: HomeProps) {
                               </div>
                               <div className="activity-info">
                                 <div className="activity-row">
-                                  <span className="activity-title">Deposit</span>
+                                  <span className="activity-title">{isTransfer ? "Received transfer" : "Deposit"}</span>
                                   <span className="activity-amount pos">
                                     +{depAmount} {depSym}
                                   </span>
@@ -1074,7 +1205,7 @@ export function Home({ onLock }: HomeProps) {
                                   <span className="activity-sub">
                                     Shielded
                                     <span className="activity-dot">·</span>
-                                    {shortSig(n.signature)}
+                                    {n.signature ? shortSig(n.signature) : n.commitment ? `${n.commitment.slice(0, 4)}…${n.commitment.slice(-4)}` : "Private"}
                                   </span>
                                   <span className="activity-time">{timeAgo(n.createdAt)}</span>
                                 </div>
@@ -1094,9 +1225,9 @@ export function Home({ onLock }: HomeProps) {
                 <div className="detail-overlay" onClick={() => setActivityDetail(null)}>
                 <div className="detail-sheet" onClick={(e) => e.stopPropagation()}>
                   <div className={`detail-title ${activityDetail.pending ? "muted" : ""}`}>
-                    {activityDetail.kind === "buy" ? "Private buy" : "Deposit"}
+                    {activityDetail.kind === "buy" ? "Private buy" : activityDetail.kind === "transfer" ? "Received transfer" : "Deposit"}
                   </div>
-                  <div className={`detail-hero-icon ${activityDetail.kind}`}>
+                  <div className={`detail-hero-icon ${activityDetail.kind === "buy" ? "buy" : "deposit"}`}>
                     {activityDetail.kind === "buy" ? (
                       <svg width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2">
                         <polyline points="17 1 21 5 17 9"></polyline>
@@ -1152,7 +1283,9 @@ export function Home({ onLock }: HomeProps) {
                       <span className="detail-val">
                         {activityDetail.kind === "buy"
                           ? `Private swap → ${activityDetail.sym}`
-                          : "Shielded deposit"}
+                          : activityDetail.kind === "transfer"
+                            ? "Received transfer"
+                            : "Shielded deposit"}
                       </span>
                     </div>
                     {activityDetail.kind === "buy" && (
@@ -1736,7 +1869,7 @@ export function Home({ onLock }: HomeProps) {
                         <button
                           type="button"
                           className="label-max"
-                          onClick={() => setWithdrawAmount(String(Number(maxOne) / 1e9))}
+                          onClick={() => setWithdrawAmount(formatLamportsExact(maxOne, 9))}
                         >
                           Max {(Number(maxOne) / 1e9).toFixed(4)} SOL
                         </button>
@@ -1949,7 +2082,7 @@ export function Home({ onLock }: HomeProps) {
                   <button
                     type="button"
                     className="max-button"
-                    onClick={() => setAmount(formatBalance(currentToken.balance, currentToken.decimals))}
+                    onClick={() => setAmount(formatLamportsExact(currentToken.balance, currentToken.decimals))}
                   >
                     Max
                   </button>
@@ -2001,14 +2134,15 @@ export function Home({ onLock }: HomeProps) {
                   placeholder="Password"
                   value={settingsPassword}
                   onChange={(e) => { setSettingsPassword(e.target.value); setSettingsPasswordError(""); }}
-                  onKeyDown={(e) => { if (e.key === "Enter") handleExportPK(); }}
+                  onKeyDown={(e) => { if (e.key === "Enter" && !isExportLockedOut) handleExportPK(); }}
+                  disabled={isExportLockedOut}
                   autoFocus
                 />
                 {settingsPasswordError && <div className="error">{settingsPasswordError}</div>}
               </div>
               <div className="settings-modal-actions">
                 <button className="button button-secondary" onClick={() => { setShowPKModal(false); setSettingsPassword(""); setSettingsPasswordError(""); }}>Cancel</button>
-                <button className="button" onClick={handleExportPK} disabled={!settingsPassword}>Confirm</button>
+                <button className="button" onClick={handleExportPK} disabled={!settingsPassword || isExportLockedOut}>Confirm</button>
               </div>
             </div>
           </div>
@@ -2037,14 +2171,15 @@ export function Home({ onLock }: HomeProps) {
                   placeholder="Password"
                   value={settingsPassword}
                   onChange={(e) => { setSettingsPassword(e.target.value); setSettingsPasswordError(""); }}
-                  onKeyDown={(e) => { if (e.key === "Enter") handleShowSeed(); }}
+                  onKeyDown={(e) => { if (e.key === "Enter" && !isExportLockedOut) handleShowSeed(); }}
+                  disabled={isExportLockedOut}
                   autoFocus
                 />
                 {settingsPasswordError && <div className="error">{settingsPasswordError}</div>}
               </div>
               <div className="settings-modal-actions">
                 <button className="button button-secondary" onClick={() => { setShowSeedModal(false); setSettingsPassword(""); setSettingsPasswordError(""); }}>Cancel</button>
-                <button className="button" onClick={handleShowSeed} disabled={!settingsPassword}>Confirm</button>
+                <button className="button" onClick={handleShowSeed} disabled={!settingsPassword || isExportLockedOut}>Confirm</button>
               </div>
             </div>
           </div>

@@ -52,70 +52,89 @@ export function Unlock({ onUnlock }: UnlockProps) {
       // Vaults written before the scrypt migration have no kdfVersion and
       // must be decrypted with the legacy SHA-256 KDF.
       const isLegacy = (stored.kdfVersion ?? 0) < KDF_VERSION_SCRYPT
-      const wallet = await decryptWallet(stored.encryptedData, password, isLegacy)
+      let wallet: Awaited<ReturnType<typeof decryptWallet>>
+      try {
+        wallet = await decryptWallet(stored.encryptedData, password, isLegacy)
+      } catch {
+        // Only decryptWallet failure represents an incorrect password
+        const newAttempts = attempts + 1
+        setAttempts(newAttempts)
 
-      let seedPhrase: string | undefined
-      if (stored.encryptedSeedPhrase) {
-        try {
-          seedPhrase = decryptSeedPhrase(stored.encryptedSeedPhrase, password, isLegacy)
-        } catch {}
-      }
+        if (newAttempts >= MAX_ATTEMPTS) {
+          setLockedUntil(Date.now() + LOCKOUT_SECONDS * 1000)
+          setError(`Too many attempts. Try again in ${LOCKOUT_SECONDS}s`)
+          setAttempts(0)
 
-      // Transparently upgrade legacy vaults to scrypt now that the password
-      // is confirmed correct. Best-effort: a failure here doesn't block unlock.
-      if (isLegacy) {
-        try {
-          const upgraded = encryptWallet(wallet, password)
-          await migrateWalletToScrypt(upgraded, seedPhrase, password)
-        } catch {}
-      }
-
-      if (stored.accounts && stored.accounts.length > 0 && seedPhrase) {
-        for (const storedAccount of stored.accounts) {
-          const keypair = await deriveKeypairFromSeed(seedPhrase, storedAccount.index)
-          const account: Account = {
-            index: storedAccount.index,
-            name: storedAccount.name,
-            keypair,
-            balance: BigInt(storedAccount.balance)
-          }
-          addAccount(account)
+          setTimeout(() => {
+            setLockedUntil(0)
+            setError("")
+          }, LOCKOUT_SECONDS * 1000)
+        } else {
+          setError(`Invalid password (${MAX_ATTEMPTS - newAttempts} attempts remaining)`)
         }
+
+        setPassword("")
+        setLoading(false)
+        return
       }
 
-      unlock(wallet, seedPhrase)
-      await setLockState(false)
+      // Decryption succeeded — clear failed attempts counter
       setAttempts(0)
 
-      // Persist the decrypted session in memory-only storage so reopening the
-      // popup doesn't force a re-unlock (the idle auto-lock timer still applies).
-      const st = useWalletStore.getState()
-      await saveSession({
-        wallet,
-        accounts: st.accounts,
-        currentAccountIndex: st.currentAccountIndex,
-        seedPhrase: seedPhrase ?? st.seedPhrase
-      })
+      try {
+        let seedPhrase: string | undefined
+        if (stored.encryptedSeedPhrase) {
+          try {
+            seedPhrase = decryptSeedPhrase(stored.encryptedSeedPhrase, password, isLegacy)
+          } catch {}
+        }
 
-      chrome.runtime.sendMessage({ type: "ACTIVITY" })
-      onUnlock()
-    } catch {
-      const newAttempts = attempts + 1
-      setAttempts(newAttempts)
+        // Transparently upgrade legacy vaults to scrypt now that the password
+        // is confirmed correct. Best-effort: a failure here doesn't block unlock.
+        if (isLegacy) {
+          try {
+            const upgraded = encryptWallet(wallet, password)
+            await migrateWalletToScrypt(upgraded, seedPhrase, password)
+          } catch {}
+        }
 
-      if (newAttempts >= MAX_ATTEMPTS) {
-        setLockedUntil(Date.now() + LOCKOUT_SECONDS * 1000)
-        setError(`Too many attempts. Try again in ${LOCKOUT_SECONDS}s`)
-        setAttempts(0)
+        if (stored.accounts && stored.accounts.length > 0 && seedPhrase) {
+          for (const storedAccount of stored.accounts) {
+            const keypair = await deriveKeypairFromSeed(seedPhrase, storedAccount.index)
+            const account: Account = {
+              index: storedAccount.index,
+              name: storedAccount.name,
+              keypair,
+              balance: BigInt(storedAccount.balance)
+            }
+            addAccount(account)
+          }
+        }
 
-        setTimeout(() => {
-          setLockedUntil(0)
-          setError("")
-        }, LOCKOUT_SECONDS * 1000)
-      } else {
-        setError(`Invalid password (${MAX_ATTEMPTS - newAttempts} attempts remaining)`)
+        unlock(wallet, seedPhrase)
+        await setLockState(false)
+
+        // Persist the decrypted session in memory-only storage so reopening the
+        // popup doesn't force a re-unlock (the idle auto-lock timer still applies).
+        const st = useWalletStore.getState()
+        await saveSession({
+          wallet,
+          accounts: st.accounts,
+          currentAccountIndex: st.currentAccountIndex,
+          seedPhrase: seedPhrase ?? st.seedPhrase
+        })
+
+        chrome.runtime.sendMessage({ type: "ACTIVITY" })
+        onUnlock()
+      } catch (postErr) {
+        // Post-decrypt errors (storage, account init) must NOT be penalized as bad password attempts
+        setError(postErr instanceof Error ? postErr.message : "Failed to load wallet data")
+      } finally {
+        setPassword("")
+        setLoading(false)
       }
-
+    } catch (outerErr) {
+      setError(outerErr instanceof Error ? outerErr.message : "Unlock failed")
       setPassword("")
       setLoading(false)
     }

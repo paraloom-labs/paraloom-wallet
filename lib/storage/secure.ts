@@ -50,7 +50,7 @@ export async function saveEncryptedWallet(
 
   // Serialize accounts if provided (convert keypair to address, balance to string)
   if (accounts && accounts.length > 0) {
-    data.accounts = accounts.map(acc => ({
+    data.accounts = accounts.map((acc) => ({
       index: acc.index,
       name: acc.name,
       address: acc.keypair.shieldedAddress,
@@ -117,13 +117,36 @@ export async function setLockState(locked: boolean): Promise<void> {
   }
 }
 
+export const MIN_AUTO_LOCK_MINUTES = 1
+export const MAX_AUTO_LOCK_MINUTES = 1440
+
 export async function getAutoLockMinutes(): Promise<number> {
   const result = await chrome.storage.local.get(STORAGE_KEY)
   const storage = result[STORAGE_KEY] as WalletStorage | undefined
-  return storage?.autoLockMinutes ?? 60
+  const minutes = storage?.autoLockMinutes
+  if (
+    typeof minutes === "number" &&
+    Number.isFinite(minutes) &&
+    minutes >= MIN_AUTO_LOCK_MINUTES &&
+    minutes <= MAX_AUTO_LOCK_MINUTES
+  ) {
+    return minutes
+  }
+  return 60
 }
 
 export async function setAutoLockMinutes(minutes: number): Promise<void> {
+  if (
+    typeof minutes !== "number" ||
+    !Number.isFinite(minutes) ||
+    minutes < MIN_AUTO_LOCK_MINUTES ||
+    minutes > MAX_AUTO_LOCK_MINUTES
+  ) {
+    throw new Error(
+      `Auto-lock minutes must be a number between ${MIN_AUTO_LOCK_MINUTES} and ${MAX_AUTO_LOCK_MINUTES}`
+    )
+  }
+
   const result = await chrome.storage.local.get(STORAGE_KEY)
   const storage = result[STORAGE_KEY] as WalletStorage
 
@@ -138,7 +161,7 @@ export async function updateAccounts(accounts: Account[]): Promise<void> {
   const storage = result[STORAGE_KEY] as WalletStorage
 
   if (storage?.wallet) {
-    storage.wallet.accounts = accounts.map(acc => ({
+    storage.wallet.accounts = accounts.map((acc) => ({
       index: acc.index,
       name: acc.name,
       address: acc.keypair.shieldedAddress,

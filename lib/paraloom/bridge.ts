@@ -8,6 +8,7 @@ import {
   sendAndConfirmTransaction
 } from "@solana/web3.js"
 
+import { parseShieldedAddress } from "~lib/crypto/addressChecksum"
 import { addressSpendPubHex, type WalletKeyPair } from "~lib/crypto/keyManagement"
 import { NATIVE_ASSET_HEX } from "~lib/prover"
 
@@ -75,8 +76,15 @@ function bridgeVaultPda(): PublicKey {
 
 // The 32-byte shielded-pool recipient carried by a `paraloom1<hex>` address.
 export function shieldedAddressToBytes(shieldedAddress: string): Uint8Array {
-  const hex = shieldedAddress.replace(/^paraloom1/, "")
-  if (hex.length !== 64) {
+  if (typeof shieldedAddress !== "string" || !shieldedAddress.startsWith("paraloom1")) {
+    throw new Error("invalid shielded address")
+  }
+  const parsedBody = parseShieldedAddress(shieldedAddress)
+  if (parsedBody) {
+    return Uint8Array.from(Buffer.from(parsedBody.slice(64, 128), "hex"))
+  }
+  const hex = shieldedAddress.slice("paraloom1".length)
+  if (hex.length !== 64 || !/^[0-9a-fA-F]{64}$/.test(hex) || /^0+$/.test(hex)) {
     throw new Error("invalid shielded address")
   }
   return Uint8Array.from(Buffer.from(hex, "hex"))

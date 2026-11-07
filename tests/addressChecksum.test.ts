@@ -48,4 +48,14 @@ describe("shielded address checksum (#781)", () => {
   it("round-trips: withChecksum then parse returns the same body", () => {
     expect(parseShieldedAddress(`paraloom1${withChecksum(BODY128)}`)).toBe(BODY128)
   })
+
+  it("rejects all-zero box or spend public keys and normalizes uppercase body hex", () => {
+    const zeroBox = "0".repeat(64) + "0123456789abcdef".repeat(4)
+    const zeroSpend = "0123456789abcdef".repeat(4) + "0".repeat(64)
+    expect(() => shieldedChecksum(zeroBox)).toThrow(/invalid shielded address body/)
+    expect(() => shieldedChecksum(zeroSpend)).toThrow(/invalid shielded address body/)
+    expect(parseShieldedAddress(`paraloom1${BODY128.toUpperCase()}${shieldedChecksum(BODY128)}`)).toBe(
+      BODY128
+    )
+  })
 })

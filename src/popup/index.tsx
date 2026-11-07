@@ -1,5 +1,3 @@
-import { useEffect, useState } from "react"
-import { createRoot } from "react-dom/client"
 import { getStoredWallet, isWalletLocked, setLockState } from "~lib/storage/secure"
 import { loadSession } from "~lib/storage/session"
 import { useWalletStore } from "~lib/store/walletStore"
@@ -8,6 +6,9 @@ import { Home } from "~src/popup/Home"
 import { Onboarding } from "~src/popup/Onboarding"
 import { SwapApprove } from "~src/popup/SwapApprove"
 import { Unlock } from "~src/popup/Unlock"
+import { useEffect, useState } from "react"
+import { createRoot } from "react-dom/client"
+import "./style.css"
 
 interface PendingSwap {
   id: number
@@ -20,8 +21,6 @@ interface PendingSwap {
     reshield?: boolean
   }
 }
-
-import "./style.css"
 
 function sendMessage(message: Record<string, unknown>): Promise<unknown> {
   return new Promise((resolve) => chrome.runtime.sendMessage(message, resolve))
@@ -56,9 +55,21 @@ function Popup() {
         const session = await loadSession()
         if (session) {
           const store = useWalletStore.getState()
-          store.unlock(session.wallet, session.seedPhrase ?? undefined)
+          store.unlock(
+            session.wallet,
+            session.seedPhrase ?? undefined,
+            session.currentAccountIndex ?? 0
+          )
           session.accounts.forEach((a) => store.addAccount(a))
-          if (session.currentAccountIndex) {
+          if (store.accounts.length === 0 && session.wallet) {
+            store.addAccount({
+              index: 0,
+              name: "Account 1",
+              keypair: session.wallet,
+              balance: 0n
+            })
+          }
+          if (session.currentAccountIndex !== undefined) {
             store.switchAccount(session.currentAccountIndex)
           }
         } else {

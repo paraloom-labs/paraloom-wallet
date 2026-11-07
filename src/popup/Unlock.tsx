@@ -1,7 +1,6 @@
-import { useState } from "react"
 import {
-  decryptWallet,
   decryptSeedPhrase,
+  decryptWallet,
   deriveKeypairFromSeed,
   encryptWallet,
   KDF_VERSION_SCRYPT
@@ -9,12 +8,14 @@ import {
 import {
   getStoredWallet,
   migrateWalletToScrypt,
-  setLockState
+  setLockState,
+  updateAccounts
 } from "~lib/storage/secure"
 import { saveSession } from "~lib/storage/session"
 import { useWalletStore } from "~lib/store/walletStore"
 import type { Account } from "~lib/store/walletStore"
 import logoImg from "data-base64:~/../assets/icon.png"
+import { useState } from "react"
 
 const MAX_ATTEMPTS = 5
 const LOCKOUT_SECONDS = 30
@@ -32,9 +33,7 @@ export function Unlock({ onUnlock }: UnlockProps) {
   const { unlock, setSeedPhrase, addAccount } = useWalletStore()
 
   const isLockedOut = Date.now() < lockedUntil
-  const remainingSeconds = isLockedOut
-    ? Math.ceil((lockedUntil - Date.now()) / 1000)
-    : 0
+  const remainingSeconds = isLockedOut ? Math.ceil((lockedUntil - Date.now()) / 1000) : 0
 
   async function handleUnlock() {
     if (isLockedOut) return
@@ -83,7 +82,19 @@ export function Unlock({ onUnlock }: UnlockProps) {
         }
       }
 
-      unlock(wallet, seedPhrase)
+      const currentStoreAccounts = useWalletStore.getState().accounts
+      if (currentStoreAccounts.length === 0) {
+        const defaultAccount: Account = {
+          index: 0,
+          name: "Account 1",
+          keypair: wallet,
+          balance: 0n
+        }
+        addAccount(defaultAccount)
+        await updateAccounts([defaultAccount])
+      }
+
+      unlock(wallet, seedPhrase, 0)
       await setLockState(false)
       setAttempts(0)
 
@@ -142,7 +153,7 @@ export function Unlock({ onUnlock }: UnlockProps) {
           <label className="unlock-label">Enter your password</label>
           <input
             type="password"
-            className={`input unlock-input ${error ? 'input-error shake' : ''}`}
+            className={`input unlock-input ${error ? "input-error shake" : ""}`}
             placeholder="••••••••"
             value={password}
             onChange={(e) => {
@@ -156,9 +167,15 @@ export function Unlock({ onUnlock }: UnlockProps) {
           {error && <div className="unlock-attempts">{error}</div>}
         </div>
 
-        <button className="button" onClick={handleUnlock} disabled={loading || isLockedOut || !password}>
+        <button
+          className="button"
+          onClick={handleUnlock}
+          disabled={loading || isLockedOut || !password}
+        >
           {loading ? (
-            <><span className="spinner" /> Unlocking...</>
+            <>
+              <span className="spinner" /> Unlocking...
+            </>
           ) : isLockedOut ? (
             `Locked (${remainingSeconds}s)`
           ) : (
@@ -168,7 +185,14 @@ export function Unlock({ onUnlock }: UnlockProps) {
       </div>
 
       <div className="unlock-footer">
-        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+        <svg
+          width="12"
+          height="12"
+          viewBox="0 0 24 24"
+          fill="none"
+          stroke="currentColor"
+          strokeWidth="2"
+        >
           <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z" />
         </svg>
         <span>Your wallet is encrypted locally</span>

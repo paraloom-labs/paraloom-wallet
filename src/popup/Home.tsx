@@ -547,13 +547,28 @@ export function Home({ onLock }: HomeProps) {
   }
 
   async function handleCreateAccount() {
-    if (!seedPhrase) {
+    if (!seedPhrase || !wallet) {
       showToast("No seed phrase available", "error")
       return
     }
 
     try {
-      const newIndex = accounts.length
+      const baseAccounts: Account[] =
+        accounts.length > 0
+          ? accounts
+          : [
+              {
+                index: 0,
+                name: "Account 1",
+                keypair: wallet,
+                balance: 0n
+              }
+            ]
+      if (accounts.length === 0) {
+        addAccount(baseAccounts[0])
+      }
+      const newIndex =
+        baseAccounts.reduce((max, a) => (a.index > max ? a.index : max), -1) + 1
       const keypair = await deriveKeypairFromSeed(seedPhrase, newIndex)
 
       const newAccount: Account = {
@@ -565,9 +580,15 @@ export function Home({ onLock }: HomeProps) {
 
       addAccount(newAccount)
 
-      const updatedAccounts = [...accounts, newAccount]
+      const updatedAccounts = [...baseAccounts, newAccount]
       await updateAccounts(updatedAccounts)
 
+      resetSettingsModals()
+      setWithdrawAddress(solanaAddress(newAccount.keypair.publicKey))
+      setWithdrawAmount("")
+      setTransferAddress("")
+      setTransferAmount("")
+      setDepositAmount("")
       switchAccount(newIndex)
 
       setShowAddAccount(false)
@@ -598,8 +619,10 @@ export function Home({ onLock }: HomeProps) {
       if (!stored) throw new Error("No wallet found")
       const isLegacy = (stored.kdfVersion ?? 0) < KDF_VERSION_SCRYPT
       await decryptWallet(stored.encryptedData, settingsPassword, isLegacy)
+      const activeWallet = useWalletStore.getState().wallet
+      if (!activeWallet) throw new Error("Wallet locked")
       // Password correct — show the secret key as hex
-      const hexKey = Buffer.from(wallet!.secretKey).toString("hex")
+      const hexKey = Buffer.from(activeWallet.secretKey).toString("hex")
       setRevealedPK(hexKey)
       setPkVisible(false)
       setShowPKModal(false)
@@ -721,6 +744,12 @@ export function Home({ onLock }: HomeProps) {
                   className={`account-item ${account.index === currentAccountIndex ? 'active' : ''}`}
                   onClick={() => {
                     if (account.index !== currentAccountIndex) {
+                      resetSettingsModals()
+                      setWithdrawAddress(solanaAddress(account.keypair.publicKey))
+                      setWithdrawAmount("")
+                      setTransferAddress("")
+                      setTransferAmount("")
+                      setDepositAmount("")
                       switchAccount(account.index)
                     }
                     setShowAccountSwitcher(false)

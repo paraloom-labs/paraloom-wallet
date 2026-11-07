@@ -57,11 +57,19 @@ function Popup() {
         if (session) {
           const store = useWalletStore.getState()
           store.unlock(session.wallet, session.seedPhrase ?? undefined)
-          session.accounts.forEach((a) => store.addAccount(a))
-          if (session.currentAccountIndex) {
-            store.switchAccount(session.currentAccountIndex)
+          if (session.accounts.length > 0) {
+            session.accounts.forEach((a) => store.addAccount(a))
+          } else {
+            store.addAccount({
+              index: 0,
+              name: "Account 1",
+              keypair: session.wallet,
+              balance: 0n
+            })
           }
+          store.switchAccount(session.currentAccountIndex)
         } else {
+          useWalletStore.getState().lock()
           await setLockState(true)
         }
       }

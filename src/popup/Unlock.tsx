@@ -81,6 +81,13 @@ export function Unlock({ onUnlock }: UnlockProps) {
           }
           addAccount(account)
         }
+      } else {
+        addAccount({
+          index: 0,
+          name: "Account 1",
+          keypair: wallet,
+          balance: 0n
+        })
       }
 
       unlock(wallet, seedPhrase)

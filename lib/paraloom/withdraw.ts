@@ -4,9 +4,8 @@
 // settlement. The note secret never leaves the wallet.
 
 import { noteCommitmentV2, proveWithdrawalV2 } from "~lib/prover"
-
-import { INGRESS_URL, PATH_SERVER_URL } from "./constants"
 import { solanaAddressToBytes } from "./bridge"
+import { INGRESS_URL, PATH_SERVER_URL } from "./constants"
 import type { ShieldedNote } from "./notes"
 
 interface MerklePathResponse {
@@ -31,6 +30,14 @@ export async function withdraw(
   toSolanaAddress: string,
   spendPrivkeyHex: string
 ): Promise<WithdrawResult> {
+  if (note.spent) {
+    throw new Error("Cannot withdraw a spent note")
+  }
+
+  if (!note.assetId || !note.assetId.trim()) {
+    throw new Error("Note has an empty or invalid assetId")
+  }
+
   const amount = BigInt(note.amount)
 
   const commitment = await noteCommitmentV2(amount, spendPrivkeyHex, note.blinding, note.assetId)

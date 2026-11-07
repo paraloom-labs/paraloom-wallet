@@ -5,8 +5,7 @@
 // The spend secrets never leave the wallet.
 
 import { addressBoxPubHex, addressSpendPubHex } from "~lib/crypto/keyManagement"
-import { NATIVE_ASSET_HEX, noteCommitmentV2, proveTransferV2 } from "~lib/prover"
-
+import { noteCommitmentV2, proveTransferV2 } from "~lib/prover"
 import { PATH_SERVER_URL, TRANSFER_INGRESS_URL } from "./constants"
 import { encryptNote } from "./noteCrypto"
 import {
@@ -58,6 +57,34 @@ export async function transfer(
   inputs: [ShieldedNote, ShieldedNote],
   spendPrivkeyHex: string
 ): Promise<TransferResult> {
+  if (inputs[0].spent || inputs[1].spent) {
+    throw new Error("Cannot transfer spent notes")
+  }
+
+  if (
+    inputs[0] === inputs[1] ||
+    inputs[0].blinding === inputs[1].blinding ||
+    (inputs[0].commitment && inputs[0].commitment === inputs[1].commitment) ||
+    (inputs[0].signature && inputs[0].signature === inputs[1].signature)
+  ) {
+    throw new Error("Cannot transfer duplicate notes")
+  }
+
+  if (
+    !inputs[0].assetId ||
+    !inputs[0].assetId.trim() ||
+    !inputs[1].assetId ||
+    !inputs[1].assetId.trim()
+  ) {
+    throw new Error("Note has an empty or invalid assetId")
+  }
+
+  if (inputs[0].assetId !== inputs[1].assetId) {
+    throw new Error("Input notes must share the same assetId")
+  }
+
+  const assetId = inputs[0].assetId
+
   const inputTotal = inputs.reduce((sum, n) => sum + BigInt(n.amount), 0n)
   if (inputTotal < amount) {
     throw new Error("Selected notes do not cover the transfer amount")
@@ -103,7 +130,7 @@ export async function transfer(
 
   const { nullifiers, output_commitments, proof } = await proveTransferV2(
     root,
-    NATIVE_ASSET_HEX,
+    assetId,
     proofInputs,
     outputs
   )
@@ -114,9 +141,9 @@ export async function transfer(
     encryptNote(recipientBoxPub, {
       amount,
       blindingHex: outBlind0,
-      assetIdHex: NATIVE_ASSET_HEX
+      assetIdHex: assetId
     }),
-    encryptNote(ownBoxPub, { amount: change, blindingHex: outBlind1, assetIdHex: NATIVE_ASSET_HEX })
+    encryptNote(ownBoxPub, { amount: change, blindingHex: outBlind1, assetIdHex: assetId })
   ]
 
   const body = {
@@ -154,7 +181,8 @@ export async function transfer(
   await addDiscoveredNote(account, {
     amount: change.toString(),
     blinding: outBlind1,
-    assetId: NATIVE_ASSET_HEX,
+    assetId,
+    ...(inputs[0].mint ? { mint: inputs[0].mint } : {}),
     signature: "",
     createdAt: Date.now(),
     spent: false,

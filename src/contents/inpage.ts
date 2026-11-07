@@ -1,9 +1,7 @@
 import type { PlasmoCSConfig } from "plasmo"
 
 const DEV_MATCHES =
-  process.env.NODE_ENV === "development"
-    ? ["http://localhost/*", "http://127.0.0.1/*"]
-    : []
+  process.env.NODE_ENV === "development" ? ["http://localhost/*", "http://127.0.0.1/*"] : []
 
 // Runs in the page's MAIN world so the dapp can see `window.paraloom`. A
 // MAIN-world content script is injected by the browser itself (not via a
@@ -27,11 +25,28 @@ let counter = 0
 
 function relay(type: string, payload?: Record<string, unknown>): Promise<any> {
   return new Promise((resolve, reject) => {
+    if (
+      payload !== undefined &&
+      (typeof payload !== "object" || payload === null || Array.isArray(payload))
+    ) {
+      return reject(new Error("Payload must be a plain object"))
+    }
+    if (typeof counter !== "number" || !Number.isFinite(counter)) {
+      counter = 0
+    }
     const id = ++counter
     const onMessage = (event: MessageEvent) => {
       if (event.source !== window) return
       const data = event.data
-      if (!data || data.channel !== RES || data.id !== id) return
+      if (
+        !data ||
+        data.channel !== RES ||
+        typeof data.id !== "number" ||
+        Number.isNaN(data.id) ||
+        !Number.isFinite(data.id) ||
+        data.id !== id
+      )
+        return
       window.removeEventListener("message", onMessage)
       if (data.error) reject(new Error(data.error))
       else resolve(data.result)

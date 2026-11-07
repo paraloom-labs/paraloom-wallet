@@ -1,9 +1,7 @@
 import type { PlasmoCSConfig } from "plasmo"
 
 const DEV_MATCHES =
-  process.env.NODE_ENV === "development"
-    ? ["http://localhost/*", "http://127.0.0.1/*"]
-    : []
+  process.env.NODE_ENV === "development" ? ["http://localhost/*", "http://127.0.0.1/*"] : []
 
 // Runs in the ISOLATED world (has chrome.*). It bridges window.paraloom calls
 // posted from the page's MAIN world (inpage.ts) to the background service
@@ -41,26 +39,41 @@ const ALLOWED_TYPES = new Set([
 window.addEventListener("message", (event: MessageEvent) => {
   if (event.source !== window) return
   const data = event.data
-  if (!data || data.channel !== REQ || typeof data.id !== "number") return
+  if (
+    !data ||
+    data.channel !== REQ ||
+    typeof data.id !== "number" ||
+    Number.isNaN(data.id) ||
+    !Number.isFinite(data.id)
+  )
+    return
   if (typeof data.type !== "string" || !ALLOWED_TYPES.has(data.type)) return
+  if (
+    data.payload !== undefined &&
+    (typeof data.payload !== "object" || data.payload === null || Array.isArray(data.payload))
+  ) {
+    return
+  }
 
   const reply = (result?: unknown, error?: string) => {
     window.postMessage({ channel: RES, id: data.id, result, error }, event.origin || "*")
   }
 
   try {
+    const payload =
+      typeof data.payload === "object" && data.payload !== null && !Array.isArray(data.payload)
+        ? data.payload
+        : {}
+
     // Pin the allowlisted `type` AFTER spreading the page-controlled payload, so
     // a `type` key smuggled inside `payload` cannot override the one we just
     // validated against ALLOWED_TYPES and cross the privilege boundary as a
     // different message (#736.2).
-    chrome.runtime.sendMessage(
-      { ...(data.payload || {}), type: data.type },
-      (response) => {
-        const err = chrome.runtime.lastError
-        if (err) reply(undefined, err.message)
-        else reply(response)
-      }
-    )
+    chrome.runtime.sendMessage({ ...payload, type: data.type }, (response) => {
+      const err = chrome.runtime.lastError
+      if (err) reply(undefined, err.message)
+      else reply(response)
+    })
   } catch (e) {
     reply(undefined, e instanceof Error ? e.message : String(e))
   }

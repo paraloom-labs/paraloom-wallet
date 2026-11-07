@@ -36,6 +36,10 @@ function pda(seed: string): PublicKey {
   return PublicKey.findProgramAddressSync([Buffer.from(seed)], programId)[0]
 }
 
+const MAX_U64 = 0xffffffffffffffffn
+const HEX32_RE = /^[0-9a-fA-F]{64}$/
+const HEX_NONEMPTY_RE = /^(?:[0-9a-fA-F]{2})+$/
+
 // Layout: DEPOSIT_NOTE discriminator (8) | amount u64 LE (8) | pubkey (32) |
 // blinding (32) — matching the on-chain `deposit_note(amount, pubkey, blinding)`.
 function depositNoteInstructionData(
@@ -43,6 +47,15 @@ function depositNoteInstructionData(
   pubkey: Uint8Array,
   blinding: Uint8Array
 ): Buffer {
+  if (typeof amountLamports !== "bigint" || amountLamports <= 0n || amountLamports > MAX_U64) {
+    throw new Error("depositNoteInstructionData: amountLamports must be in 1..=u64::MAX")
+  }
+  if (!(pubkey instanceof Uint8Array) || pubkey.length !== 32) {
+    throw new Error("depositNoteInstructionData: pubkey must be exactly 32 bytes")
+  }
+  if (!(blinding instanceof Uint8Array) || blinding.length !== 32) {
+    throw new Error("depositNoteInstructionData: blinding must be exactly 32 bytes")
+  }
   const data = new Uint8Array(8 + 8 + 32 + 32)
   data.set(DEPOSIT_NOTE_DISCRIMINATOR, 0)
   new DataView(data.buffer).setBigUint64(8, amountLamports, true)
@@ -289,7 +302,62 @@ export async function submitTransact(
   // `recipientHex` is the recipient token account.
   mintHex?: string
 ): Promise<TransactSubmission> {
-  const bundle = JSON.parse(proofBundleJson)
+  if (typeof extAmount !== "bigint" || extAmount > 0n) {
+    throw new Error("submitTransact: extAmount must be <= 0n")
+  }
+  if (typeof rootHex !== "string" || !HEX32_RE.test(rootHex)) {
+    throw new Error("submitTransact: rootHex must be 32-byte hex")
+  }
+  if (typeof recipientHex !== "string" || !HEX32_RE.test(recipientHex)) {
+    throw new Error("submitTransact: recipientHex must be 32-byte hex")
+  }
+  if (mintHex !== undefined && (typeof mintHex !== "string" || !HEX32_RE.test(mintHex))) {
+    throw new Error("submitTransact: mintHex must be 32-byte hex")
+  }
+  if (
+    !Array.isArray(ciphertexts) ||
+    ciphertexts.length !== 2 ||
+    typeof ciphertexts[0] !== "string" ||
+    typeof ciphertexts[1] !== "string" ||
+    !HEX_NONEMPTY_RE.test(ciphertexts[0]) ||
+    !HEX_NONEMPTY_RE.test(ciphertexts[1])
+  ) {
+    throw new Error("submitTransact: ciphertexts must be 2 non-empty hex strings")
+  }
+  const bundle = JSON.parse(proofBundleJson) as {
+    nullifiers?: unknown
+    output_commitments?: unknown
+    proof?: unknown
+  } | null
+  if (
+    !bundle ||
+    typeof bundle !== "object" ||
+    !Array.isArray(bundle.nullifiers) ||
+    bundle.nullifiers.length !== 2 ||
+    typeof bundle.nullifiers[0] !== "string" ||
+    typeof bundle.nullifiers[1] !== "string" ||
+    !HEX32_RE.test(bundle.nullifiers[0]) ||
+    !HEX32_RE.test(bundle.nullifiers[1]) ||
+    bundle.nullifiers[0].toLowerCase() === bundle.nullifiers[1].toLowerCase()
+  ) {
+    throw new Error("submitTransact: bundle.nullifiers must be 2 distinct 32-byte hex strings")
+  }
+  if (
+    !Array.isArray(bundle.output_commitments) ||
+    bundle.output_commitments.length !== 2 ||
+    typeof bundle.output_commitments[0] !== "string" ||
+    typeof bundle.output_commitments[1] !== "string" ||
+    !HEX32_RE.test(bundle.output_commitments[0]) ||
+    !HEX32_RE.test(bundle.output_commitments[1]) ||
+    bundle.output_commitments[0].toLowerCase() === bundle.output_commitments[1].toLowerCase()
+  ) {
+    throw new Error(
+      "submitTransact: bundle.output_commitments must be 2 distinct 32-byte hex strings"
+    )
+  }
+  if (typeof bundle.proof !== "string" || !HEX_NONEMPTY_RE.test(bundle.proof)) {
+    throw new Error("submitTransact: bundle.proof must be a non-empty hex string")
+  }
   const body: Record<string, unknown> = {
     recipient: recipientHex,
     nullifiers: bundle.nullifiers,
@@ -310,6 +378,10 @@ export async function submitTransact(
   if (!res.ok) {
     throw new Error(`transact ingress rejected: ${res.status} ${await res.text()}`)
   }
-  const json = await res.json()
-  return { requestId: json.request_id ?? json.requestId }
+  const json = (await res.json()) as { request_id?: unknown; requestId?: unknown } | null
+  const requestId = json?.request_id ?? json?.requestId
+  if (typeof requestId !== "string" || requestId.trim().length === 0) {
+    throw new Error("transact ingress response missing valid request_id")
+  }
+  return { requestId }
 }

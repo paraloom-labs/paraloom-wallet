@@ -5,14 +5,15 @@
 // makes these worth pinning.
 
 import { sha256 } from "@noble/hashes/sha256"
-import type { Connection } from "@solana/web3.js"
+import { PublicKey, type Connection } from "@solana/web3.js"
+import { buildDepositInstruction, buildDepositSplInstruction } from "~lib/paraloom/bridge"
 import {
   DEPOSIT_NOTE_EVENT_DISCRIMINATOR,
   DEPOSIT_NOTE_SPL_EVENT_DISCRIMINATOR,
   PROGRAM_ID,
   TRANSACT_EVENT_DISCRIMINATOR
 } from "~lib/paraloom/constants"
-import { fetchV3Leaves } from "~lib/paraloom/transact"
+import { depositNoteInstruction, fetchV3Leaves, submitTransact } from "~lib/paraloom/transact"
 import { describe, expect, it, vi } from "vitest"
 
 // transact.ts now reaches ~lib/prover through bridge.ts, and the wasm module
@@ -361,5 +362,68 @@ describe("refusing an unsafe tree", () => {
       { logs: emittedBy(PROGRAM_ID, depositEvent(0xa0, 0)), nullFor: Infinity }
     ])
     await expect(fetchV3Leaves(connection)).rejects.toThrow(/leaf history may be incomplete/)
+  })
+})
+
+describe("deposit instruction bounds and submitTransact validation (#263)", () => {
+  const depositor = new PublicKey(PROGRAM_ID)
+  const valid32 = new Uint8Array(32).fill(0x11)
+  const validBlinding = new Uint8Array(32).fill(0x22)
+
+  it("rejects non-positive, > u64::MAX, and non-32-byte pubkey/blinding in deposit instructions", () => {
+    expect(() => depositNoteInstruction(depositor, 0n, valid32, validBlinding)).toThrow(
+      /amountLamports/
+    )
+    expect(() =>
+      depositNoteInstruction(depositor, (1n << 64n) + 1n, valid32, validBlinding)
+    ).toThrow(/amountLamports/)
+    expect(() =>
+      depositNoteInstruction(depositor, 100n, new Uint8Array(16), validBlinding)
+    ).toThrow(/pubkey must be exactly 32 bytes/)
+    expect(() =>
+      buildDepositInstruction(depositor, -1n, valid32, validBlinding)
+    ).toThrow(/amount must be in 1\.\.=u64::MAX/)
+    expect(() =>
+      buildDepositSplInstruction(
+        depositor,
+        depositor,
+        depositor,
+        100n,
+        valid32,
+        new Uint8Array(31)
+      )
+    ).toThrow(/blinding\/randomness must be exactly 32 bytes/)
+  })
+
+  it("rejects malformed bundles, positive extAmount, and missing request_id in submitTransact", async () => {
+    const validBundle = JSON.stringify({
+      nullifiers: ["11".repeat(32), "22".repeat(32)],
+      output_commitments: ["33".repeat(32), "44".repeat(32)],
+      proof: "01" + "aa".repeat(128)
+    })
+    await expect(
+      submitTransact("aa".repeat(32), 10n, "bb".repeat(32), validBundle, ["01aa", "01bb"])
+    ).rejects.toThrow(/extAmount must be <= 0n/)
+
+    const dupNullifiers = JSON.stringify({
+      nullifiers: ["11".repeat(32), "11".repeat(32)],
+      output_commitments: ["33".repeat(32), "44".repeat(32)],
+      proof: "01" + "aa".repeat(128)
+    })
+    await expect(
+      submitTransact("aa".repeat(32), 0n, "00".repeat(32), dupNullifiers, ["01aa", "01bb"])
+    ).rejects.toThrow(/bundle\.nullifiers/)
+
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => ({
+        ok: true,
+        status: 200,
+        json: async () => ({})
+      }))
+    )
+    await expect(
+      submitTransact("aa".repeat(32), 0n, "00".repeat(32), validBundle, ["01aa", "01bb"])
+    ).rejects.toThrow(/missing valid request_id/)
   })
 })

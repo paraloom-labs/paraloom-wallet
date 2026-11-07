@@ -82,12 +82,32 @@ export function shieldedAddressToBytes(shieldedAddress: string): Uint8Array {
   return Uint8Array.from(Buffer.from(hex, "hex"))
 }
 
+const MAX_U64 = 0xffffffffffffffffn
+
+function validateDepositPayloadArgs(
+  amount: bigint,
+  keyOrRecipient: Uint8Array,
+  blindingOrRandomness: Uint8Array,
+  context: string
+): void {
+  if (typeof amount !== "bigint" || amount <= 0n || amount > MAX_U64) {
+    throw new Error(`${context}: amount must be in 1..=u64::MAX`)
+  }
+  if (!(keyOrRecipient instanceof Uint8Array) || keyOrRecipient.length !== 32) {
+    throw new Error(`${context}: pubkey/recipient must be exactly 32 bytes`)
+  }
+  if (!(blindingOrRandomness instanceof Uint8Array) || blindingOrRandomness.length !== 32) {
+    throw new Error(`${context}: blinding/randomness must be exactly 32 bytes`)
+  }
+}
+
 // Layout: DEPOSIT discriminator (8) | amount u64 LE (8) | recipient (32) | randomness (32).
 function depositInstructionData(
   amountLamports: bigint,
   recipient: Uint8Array,
   randomness: Uint8Array
 ): Buffer {
+  validateDepositPayloadArgs(amountLamports, recipient, randomness, "depositInstructionData")
   const data = new Uint8Array(8 + 8 + 32 + 32)
   data.set(DEPOSIT_DISCRIMINATOR, 0)
   new DataView(data.buffer).setBigUint64(8, amountLamports, true)
@@ -162,6 +182,7 @@ function depositSplInstructionData(
   pubkey: Uint8Array,
   blinding: Uint8Array
 ): Buffer {
+  validateDepositPayloadArgs(amount, pubkey, blinding, "depositSplInstructionData")
   const data = new Uint8Array(8 + 8 + 32 + 32)
   data.set(DEPOSIT_NOTE_SPL_DISCRIMINATOR, 0)
   new DataView(data.buffer).setBigUint64(8, amount, true)

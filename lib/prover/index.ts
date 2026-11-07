@@ -32,43 +32,92 @@ export async function assetIdForMint(mintHex: string): Promise<string> {
 }
 
 let initialized = false
+let initPromise: Promise<void> | null = null
 let provingKey: Uint8Array | null = null
+let provingKeyPromise: Promise<Uint8Array> | null = null
 let transferProvingKey: Uint8Array | null = null
+let transferProvingKeyPromise: Promise<Uint8Array> | null = null
 
 async function ensureInit(): Promise<void> {
-  if (!initialized) {
-    await init(wasmUrl)
-    initialized = true
+  if (initialized) return
+  if (!initPromise) {
+    initPromise = (async () => {
+      try {
+        await init(wasmUrl)
+        initialized = true
+      } catch (e) {
+        initPromise = null
+        throw e
+      }
+    })()
   }
+  await initPromise
+}
+
+async function fetchProvingKeyBytes(url: string, label: string): Promise<Uint8Array> {
+  const res = await fetch(url)
+  if (!res.ok) {
+    throw new Error(`Failed to fetch ${label} proving key (${res.status})`)
+  }
+  const bytes = new Uint8Array(await res.arrayBuffer())
+  if (bytes.byteLength === 0) {
+    throw new Error(`Fetched ${label} proving key is empty`)
+  }
+  return bytes
 }
 
 async function ensureReady(): Promise<Uint8Array> {
   await ensureInit()
-  if (!provingKey) {
-    const res = await fetch(keyUrl)
-    provingKey = new Uint8Array(await res.arrayBuffer())
+  if (provingKey) return provingKey
+  if (!provingKeyPromise) {
+    provingKeyPromise = fetchProvingKeyBytes(keyUrl, "withdraw_v2")
+      .then((bytes) => {
+        provingKey = bytes
+        return bytes
+      })
+      .catch((e) => {
+        provingKeyPromise = null
+        throw e
+      })
   }
-  return provingKey
+  return provingKeyPromise
 }
 
 async function ensureTransferReady(): Promise<Uint8Array> {
   await ensureInit()
-  if (!transferProvingKey) {
-    const res = await fetch(transferKeyUrl)
-    transferProvingKey = new Uint8Array(await res.arrayBuffer())
+  if (transferProvingKey) return transferProvingKey
+  if (!transferProvingKeyPromise) {
+    transferProvingKeyPromise = fetchProvingKeyBytes(transferKeyUrl, "transfer_v2")
+      .then((bytes) => {
+        transferProvingKey = bytes
+        return bytes
+      })
+      .catch((e) => {
+        transferProvingKeyPromise = null
+        throw e
+      })
   }
-  return transferProvingKey
+  return transferProvingKeyPromise
 }
 
 let transactProvingKey: Uint8Array | null = null
+let transactProvingKeyPromise: Promise<Uint8Array> | null = null
 
 async function ensureTransactReady(): Promise<Uint8Array> {
   await ensureInit()
-  if (!transactProvingKey) {
-    const res = await fetch(transactKeyUrl)
-    transactProvingKey = new Uint8Array(await res.arrayBuffer())
+  if (transactProvingKey) return transactProvingKey
+  if (!transactProvingKeyPromise) {
+    transactProvingKeyPromise = fetchProvingKeyBytes(transactKeyUrl, "transact_v3")
+      .then((bytes) => {
+        transactProvingKey = bytes
+        return bytes
+      })
+      .catch((e) => {
+        transactProvingKeyPromise = null
+        throw e
+      })
   }
-  return transactProvingKey
+  return transactProvingKeyPromise
 }
 
 // Derive the spend public key (`Poseidon(privkey)`) bound into note commitments;
@@ -205,6 +254,17 @@ export async function v3MerklePath(
   leavesHex: string[],
   leafIndex: number
 ): Promise<{ path: string[]; root: string }> {
+  if (!Array.isArray(leavesHex) || leavesHex.length === 0) {
+    throw new Error("v3MerklePath requires a non-empty leavesHex array")
+  }
+  if (
+    !Number.isSafeInteger(leafIndex) ||
+    leafIndex < 0 ||
+    leafIndex >= leavesHex.length ||
+    leafIndex > 0xffffffff
+  ) {
+    throw new Error(`v3MerklePath leafIndex out of range: ${leafIndex}`)
+  }
   await ensureInit()
   return JSON.parse(v3_merkle_path(JSON.stringify(leavesHex), leafIndex))
 }

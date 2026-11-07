@@ -27,6 +27,41 @@ function sendMessage(message: Record<string, unknown>): Promise<unknown> {
   return new Promise((resolve) => chrome.runtime.sendMessage(message, resolve))
 }
 
+function isValidPendingConnection(
+  v: unknown
+): v is { id: number; origin: string } {
+  if (!v || typeof v !== "object") return false
+  const rec = v as { id?: unknown; origin?: unknown }
+  return (
+    typeof rec.id === "number" &&
+    Number.isFinite(rec.id) &&
+    typeof rec.origin === "string" &&
+    rec.origin.length > 0
+  )
+}
+
+function isValidPendingSwap(v: unknown): v is PendingSwap {
+  if (!v || typeof v !== "object") return false
+  const rec = v as { id?: unknown; origin?: unknown; params?: unknown }
+  if (
+    typeof rec.id !== "number" ||
+    !Number.isFinite(rec.id) ||
+    typeof rec.origin !== "string" ||
+    rec.origin.length === 0 ||
+    !rec.params ||
+    typeof rec.params !== "object"
+  ) {
+    return false
+  }
+  const params = rec.params as { outputMint?: unknown; amountLamports?: unknown }
+  return (
+    typeof params.outputMint === "string" &&
+    params.outputMint.length > 0 &&
+    typeof params.amountLamports === "string" &&
+    params.amountLamports.length > 0
+  )
+}
+
 function Popup() {
   const [hasWallet, setHasWallet] = useState(false)
   const [locked, setLocked] = useState(true)
@@ -58,7 +93,11 @@ function Popup() {
           const store = useWalletStore.getState()
           store.unlock(session.wallet, session.seedPhrase ?? undefined)
           session.accounts.forEach((a) => store.addAccount(a))
-          if (session.currentAccountIndex) {
+          if (
+            typeof session.currentAccountIndex === "number" &&
+            Number.isInteger(session.currentAccountIndex) &&
+            session.currentAccountIndex >= 0
+          ) {
             store.switchAccount(session.currentAccountIndex)
           }
         } else {
@@ -82,21 +121,9 @@ function Popup() {
     let ps: PendingSwap | null = null
     if (wallet && !isLocked) {
       const pRaw = (await sendMessage({ type: "GET_PENDING_CONNECTION" })) as unknown
-      // Only a real pending request (with a numeric id) counts — never an error
-      // object like { success:false, error:"not permitted" }, which would render
-      // the approval screen with an undefined id.
-      p =
-        pRaw && typeof (pRaw as { id?: unknown }).id === "number"
-          ? (pRaw as { id: number; origin: string })
-          : null
-      // A pending swap only matters when there's no connection to approve first.
-      if (!p) {
-        const psRaw = (await sendMessage({ type: "GET_PENDING_SWAP" })) as unknown
-        ps =
-          psRaw && typeof (psRaw as { id?: unknown }).id === "number"
-            ? (psRaw as PendingSwap)
-            : null
-      }
+      p = isValidPendingConnection(pRaw) ? pRaw : null
+      const psRaw = (await sendMessage({ type: "GET_PENDING_SWAP" })) as unknown
+      ps = isValidPendingSwap(psRaw) ? psRaw : null
     }
 
     setHasWallet(!!wallet)
@@ -136,7 +163,10 @@ function Popup() {
         <ConnectApprove
           id={pending.id}
           origin={pending.origin}
-          onResolved={() => setPending(null)}
+          onResolved={() => {
+            setPending(null)
+            void checkWalletState()
+          }}
         />
       </div>
     )
@@ -149,7 +179,10 @@ function Popup() {
           id={pendingSwap.id}
           origin={pendingSwap.origin}
           params={pendingSwap.params}
-          onResolved={() => setPendingSwap(null)}
+          onResolved={() => {
+            setPendingSwap(null)
+            void checkWalletState()
+          }}
         />
       </div>
     )
@@ -157,7 +190,13 @@ function Popup() {
 
   return (
     <div className="app">
-      <Home onLock={() => setLocked(true)} />
+      <Home
+        onLock={() => {
+          setPending(null)
+          setPendingSwap(null)
+          setLocked(true)
+        }}
+      />
     </div>
   )
 }

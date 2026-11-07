@@ -1,5 +1,3 @@
-import { useEffect, useState } from "react"
-import { createRoot } from "react-dom/client"
 import { getStoredWallet, isWalletLocked, setLockState } from "~lib/storage/secure"
 import { loadSession } from "~lib/storage/session"
 import { useWalletStore } from "~lib/store/walletStore"
@@ -8,8 +6,11 @@ import { Home } from "~src/popup/Home"
 import { Onboarding } from "~src/popup/Onboarding"
 import { SwapApprove } from "~src/popup/SwapApprove"
 import { Unlock } from "~src/popup/Unlock"
+import React, { useEffect, useState } from "react"
+import { createRoot } from "react-dom/client"
+import "./style.css"
 
-interface PendingSwap {
+export interface PendingSwap {
   id: number
   origin: string
   params: {
@@ -21,13 +22,40 @@ interface PendingSwap {
   }
 }
 
-import "./style.css"
+export function isValidPendingSwap(raw: unknown): raw is PendingSwap {
+  if (!raw || typeof raw !== "object") return false
+  const r = raw as Partial<PendingSwap>
+  if (typeof r.id !== "number" || typeof r.origin !== "string" || !r.origin.trim()) return false
+  if (!r.params || typeof r.params !== "object") return false
+  const p = r.params as Partial<PendingSwap["params"]>
+  if (typeof p.outputMint !== "string" || !p.outputMint.trim()) return false
+  if (typeof p.amountLamports !== "string" || !p.amountLamports.trim()) return false
+  try {
+    const amt = BigInt(p.amountLamports)
+    if (amt <= 0n) return false
+  } catch {
+    return false
+  }
+  if (p.inputMint !== undefined && (typeof p.inputMint !== "string" || !p.inputMint.trim())) {
+    return false
+  }
+  if (
+    p.slippageBps !== undefined &&
+    (typeof p.slippageBps !== "number" || !Number.isFinite(p.slippageBps))
+  ) {
+    return false
+  }
+  if (p.reshield !== undefined && typeof p.reshield !== "boolean") {
+    return false
+  }
+  return true
+}
 
 function sendMessage(message: Record<string, unknown>): Promise<unknown> {
   return new Promise((resolve) => chrome.runtime.sendMessage(message, resolve))
 }
 
-function Popup() {
+export function Popup() {
   const [hasWallet, setHasWallet] = useState(false)
   const [locked, setLocked] = useState(true)
   const [loading, setLoading] = useState(true)
@@ -58,7 +86,7 @@ function Popup() {
           const store = useWalletStore.getState()
           store.unlock(session.wallet, session.seedPhrase ?? undefined)
           session.accounts.forEach((a) => store.addAccount(a))
-          if (session.currentAccountIndex) {
+          if (typeof session.currentAccountIndex === "number") {
             store.switchAccount(session.currentAccountIndex)
           }
         } else {
@@ -86,17 +114,14 @@ function Popup() {
       // object like { success:false, error:"not permitted" }, which would render
       // the approval screen with an undefined id.
       p =
-        pRaw && typeof (pRaw as { id?: unknown }).id === "number"
+        pRaw &&
+        typeof (pRaw as { id?: unknown }).id === "number" &&
+        typeof (pRaw as { origin?: unknown }).origin === "string"
           ? (pRaw as { id: number; origin: string })
           : null
-      // A pending swap only matters when there's no connection to approve first.
-      if (!p) {
-        const psRaw = (await sendMessage({ type: "GET_PENDING_SWAP" })) as unknown
-        ps =
-          psRaw && typeof (psRaw as { id?: unknown }).id === "number"
-            ? (psRaw as PendingSwap)
-            : null
-      }
+
+      const psRaw = (await sendMessage({ type: "GET_PENDING_SWAP" })) as unknown
+      ps = isValidPendingSwap(psRaw) ? psRaw : null
     }
 
     setHasWallet(!!wallet)
@@ -136,7 +161,10 @@ function Popup() {
         <ConnectApprove
           id={pending.id}
           origin={pending.origin}
-          onResolved={() => setPending(null)}
+          onResolved={() => {
+            setPending(null)
+            void checkWalletState()
+          }}
         />
       </div>
     )
@@ -149,7 +177,10 @@ function Popup() {
           id={pendingSwap.id}
           origin={pendingSwap.origin}
           params={pendingSwap.params}
-          onResolved={() => setPendingSwap(null)}
+          onResolved={() => {
+            setPendingSwap(null)
+            void checkWalletState()
+          }}
         />
       </div>
     )
@@ -162,5 +193,10 @@ function Popup() {
   )
 }
 
-const root = createRoot(document.getElementById("root")!)
-root.render(<Popup />)
+export default Popup
+
+const rootEl = typeof document !== "undefined" ? document.getElementById("root") : null
+if (rootEl) {
+  const root = createRoot(rootEl)
+  root.render(<Popup />)
+}

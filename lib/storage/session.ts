@@ -22,8 +22,15 @@ const ACTIVITY_KEY = "paraloom_last_activity"
 // the background service worker, where Buffer may be unavailable.
 const toHex = (u: Uint8Array): string =>
   Array.from(u, (b) => b.toString(16).padStart(2, "0")).join("")
-const fromHex = (h: string): Uint8Array => {
-  const out = new Uint8Array(h.length / 2)
+const fromHex = (h: string, expectedBytes: number): Uint8Array => {
+  if (
+    typeof h !== "string" ||
+    h.length !== expectedBytes * 2 ||
+    !/^[0-9a-fA-F]+$/.test(h)
+  ) {
+    throw new Error(`expected ${expectedBytes}-byte hex string`)
+  }
+  const out = new Uint8Array(expectedBytes)
   for (let i = 0; i < out.length; i++) {
     out[i] = parseInt(h.slice(i * 2, i * 2 + 2), 16)
   }
@@ -69,14 +76,19 @@ const serKp = (k: WalletKeyPair): SerKeyPair => ({
   spendPrivkey: toHex(k.spendPrivkey)
 })
 
-const deKp = (s: SerKeyPair): WalletKeyPair => ({
-  publicKey: fromHex(s.publicKey),
-  secretKey: fromHex(s.secretKey),
-  shieldedAddress: s.shieldedAddress,
-  boxPublicKey: fromHex(s.boxPublicKey),
-  boxSecretKey: fromHex(s.boxSecretKey),
-  spendPrivkey: fromHex(s.spendPrivkey)
-})
+const deKp = (s: SerKeyPair): WalletKeyPair => {
+  if (!s || typeof s.shieldedAddress !== "string" || !s.shieldedAddress) {
+    throw new Error("invalid serialized keypair")
+  }
+  return {
+    publicKey: fromHex(s.publicKey, 32),
+    secretKey: fromHex(s.secretKey, 64),
+    shieldedAddress: s.shieldedAddress,
+    boxPublicKey: fromHex(s.boxPublicKey, 32),
+    boxSecretKey: fromHex(s.boxSecretKey, 32),
+    spendPrivkey: fromHex(s.spendPrivkey, 32)
+  }
+}
 
 export async function saveSession(session: WalletSession): Promise<void> {
   const ser: SerSession = {
@@ -100,16 +112,25 @@ export async function loadSession(): Promise<WalletSession | null> {
   const result = await chrome.storage.session.get(SESSION_KEY)
   const ser = result[SESSION_KEY] as SerSession | undefined
   if (!ser) return null
-  return {
-    wallet: deKp(ser.wallet),
-    accounts: ser.accounts.map((a) => ({
-      index: a.index,
-      name: a.name,
-      keypair: deKp(a.keypair),
-      balance: BigInt(a.balance)
-    })),
-    currentAccountIndex: ser.currentAccountIndex,
-    seedPhrase: ser.seedPhrase
+  try {
+    if (!Array.isArray(ser.accounts)) {
+      throw new Error("invalid session accounts")
+    }
+    return {
+      wallet: deKp(ser.wallet),
+      accounts: ser.accounts.map((a) => ({
+        index: a.index,
+        name: a.name,
+        keypair: deKp(a.keypair),
+        balance: BigInt(a.balance)
+      })),
+      currentAccountIndex:
+        typeof ser.currentAccountIndex === "number" ? ser.currentAccountIndex : 0,
+      seedPhrase: typeof ser.seedPhrase === "string" ? ser.seedPhrase : null
+    }
+  } catch {
+    await clearSession().catch(() => {})
+    return null
   }
 }
 

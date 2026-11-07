@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest"
 
 import {
   confirmCommitmentInTree,
+  parseSolInputToLamports,
   type LeafRef
 } from "../lib/paraloom/settlementConfirm"
 
@@ -88,5 +89,70 @@ describe("confirmCommitmentInTree", () => {
     )
     expect(settled).toBe(true)
     expect(calls).toBe(2)
+  })
+
+  it("matches uppercase/mixed-case target commitments and rejects empty or malformed commitments", async () => {
+    const clock = fakeClock(1000)
+    const upperTarget = "AA".repeat(32)
+    expect(
+      await confirmCommitmentInTree(
+        async () => [{ commitmentHex: TARGET }],
+        upperTarget,
+        5000,
+        1000,
+        clock
+      )
+    ).toBe(true)
+
+    expect(
+      await confirmCommitmentInTree(async () => [{ commitmentHex: "" }], "", 5000, 1000, clock)
+    ).toBe(false)
+    expect(
+      await confirmCommitmentInTree(async () => [{ commitmentHex: TARGET }], "bad-hex", 5000, 1000, clock)
+    ).toBe(false)
+  })
+
+  it("clamps sleep to remaining deadline and guards non-positive pollMs", async () => {
+    let t = 0
+    const sleeps: number[] = []
+    const settled = await confirmCommitmentInTree(
+      async () => [{ commitmentHex: OTHER }],
+      TARGET,
+      2500,
+      1000,
+      {
+        now: () => t,
+        sleep: async (ms: number) => {
+          sleeps.push(ms)
+          t += ms
+        }
+      }
+    )
+    expect(settled).toBe(false)
+    expect(sleeps).toEqual([1000, 1000, 500])
+    expect(t).toBe(2500)
+  })
+})
+
+describe("parseSolInputToLamports", () => {
+  it("parses exact 9-decimal SOL strings without float drift and rejects Infinity/NaN/sub-lamport", () => {
+    expect(parseSolInputToLamports("1")).toBe(1_000_000_000n)
+    expect(parseSolInputToLamports("1.000000001")).toBe(1_000_000_001n)
+    expect(parseSolInputToLamports("0.000000001")).toBe(1n)
+    expect(parseSolInputToLamports("9007199.254740993")).toBe(9_007_199_254_740_993n)
+
+    for (const bad of [
+      "",
+      "0",
+      "0.000000000",
+      "0.0000000004",
+      "-1",
+      "Infinity",
+      "NaN",
+      "1e-10",
+      "18446744073.709551616"
+    ]) {
+      expect(parseSolInputToLamports(bad)).toBeNull()
+    }
   })
 })

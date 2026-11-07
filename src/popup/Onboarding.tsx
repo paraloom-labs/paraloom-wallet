@@ -1,4 +1,5 @@
-import { useState, useMemo } from "react"
+import { useState, useMemo, useRef, useEffect } from "react"
+import * as bip39 from "bip39"
 import {
   deriveKeypairFromSeed,
   encryptWallet,
@@ -24,14 +25,26 @@ function pickRandom(count: number, max: number): number[] {
   return indices.slice(0, count).sort((a, b) => a - b)
 }
 
-// Pick N decoy words that are NOT in the correct answers
-function pickDecoys(correctWord: string, allWords: string[], count: number): string[] {
-  const others = allWords.filter(w => w !== correctWord)
-  for (let i = others.length - 1; i > 0; i--) {
-    const j = Math.floor(Math.random() * (i + 1));
-    [others[i], others[j]] = [others[j], others[i]]
+// Pick N unique decoy words that are NOT the correct answer (and never collide
+// with each other even when the 12-word mnemonic contains repeated words).
+export function pickDecoys(correctWord: string, allWords: string[], count: number): string[] {
+  const uniqueOthers = Array.from(new Set(allWords.filter((w) => w !== correctWord)))
+  for (let i = uniqueOthers.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1))
+    ;[uniqueOthers[i], uniqueOthers[j]] = [uniqueOthers[j], uniqueOthers[i]]
   }
-  return others.slice(0, count)
+  const chosen = uniqueOthers.slice(0, count)
+  if (chosen.length < count) {
+    const used = new Set([correctWord, ...chosen])
+    for (const candidate of bip39.wordlists.english) {
+      if (!used.has(candidate)) {
+        chosen.push(candidate)
+        used.add(candidate)
+        if (chosen.length >= count) break
+      }
+    }
+  }
+  return chosen
 }
 
 export function Onboarding({ onComplete }: OnboardingProps) {
@@ -46,7 +59,19 @@ export function Onboarding({ onComplete }: OnboardingProps) {
   const [verifyAnswers, setVerifyAnswers] = useState<Record<number, string>>({})
   const [verifyError, setVerifyError] = useState("")
   const [activeQuestionIdx, setActiveQuestionIdx] = useState(0)
+  const stepTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const { unlock, addAccount, setSeedPhrase: setSeedPhraseStore } = useWalletStore()
+
+  function clearStepTimer() {
+    if (stepTimerRef.current !== null) {
+      clearTimeout(stepTimerRef.current)
+      stepTimerRef.current = null
+    }
+  }
+
+  useEffect(() => {
+    return () => clearStepTimer()
+  }, [])
 
   const words = seedPhrase ? seedPhrase.split(" ") : []
 
@@ -85,6 +110,8 @@ export function Onboarding({ onComplete }: OnboardingProps) {
   }
 
   function handleSelectWord(wordIdx: number, selected: string) {
+    if (verifyAnswers[wordIdx] !== undefined) return
+    clearStepTimer()
     const correct = words[wordIdx]
     if (selected === correct) {
       // Correct — save and auto-advance
@@ -96,14 +123,20 @@ export function Onboarding({ onComplete }: OnboardingProps) {
       const answeredCount = Object.keys(newAnswers).length
       if (answeredCount >= hiddenIndices.length) {
         // All correct — auto-advance to password after brief delay
-        setTimeout(() => setCreateStep(3), 600)
+        stepTimerRef.current = setTimeout(() => {
+          stepTimerRef.current = null
+          setCreateStep(3)
+        }, 600)
       } else {
         // Move to next unanswered question
         const nextIdx = hiddenIndices.findIndex(
           (idx) => !newAnswers[idx]
         )
         if (nextIdx !== -1) {
-          setTimeout(() => setActiveQuestionIdx(nextIdx), 300)
+          stepTimerRef.current = setTimeout(() => {
+            stepTimerRef.current = null
+            setActiveQuestionIdx(nextIdx)
+          }, 300)
         }
       }
     } else {
@@ -384,6 +417,7 @@ export function Onboarding({ onComplete }: OnboardingProps) {
                 <button
                   className="button button-ghost"
                   onClick={() => {
+                    clearStepTimer()
                     setCreateStep(1)
                     setVerifyAnswers({})
                     setVerifyError("")

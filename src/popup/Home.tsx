@@ -18,6 +18,7 @@ const SHIELDED_TOKEN_META: Record<string, { symbol: string; decimals: number }> 
 import { withdraw } from "~lib/paraloom/withdraw"
 import { transfer } from "~lib/paraloom/transfer"
 import { depositV3, spendV3 } from "~lib/paraloom/transactFlow"
+import { parseSolInputToLamports } from "~lib/paraloom/settlementConfirm"
 import { NATIVE_ASSET_HEX } from "~lib/prover"
 import { addressBoxPubHex } from "~lib/crypto/keyManagement"
 import { isValidShieldedAddress } from "~lib/crypto/addressChecksum"
@@ -46,6 +47,7 @@ const DEFAULT_AUTO_LOCK_MINUTES = 60
 // is worth: it is dust. Hidden from the withdraw selection so the picker isn't
 // buried under worthless fillers, but still counted in the shielded total.
 const WITHDRAW_DUST_LAMPORTS = 1_000_000n // 0.001 SOL
+const SOL_TX_FEE_RESERVE_LAMPORTS = 5_000n // Base Solana signature fee reserve
 
 // Unspent native (non-token) notes worth withdrawing, largest first.
 function spendableSolNotes(all: ShieldedNote[]): ShieldedNote[] {
@@ -366,14 +368,13 @@ export function Home({ onLock }: HomeProps) {
 
   async function handleDeposit() {
     if (!wallet) return
-    const sol = Number(depositAmount)
-    if (!sol || sol <= 0) {
+    const lamports = parseSolInputToLamports(depositAmount)
+    if (lamports === null) {
       showToast("Enter a valid amount", "error")
       return
     }
-    const lamports = BigInt(Math.round(sol * 1e9))
-    if (lamports > solBalance) {
-      showToast("Amount exceeds your SOL balance", "error")
+    if (lamports + SOL_TX_FEE_RESERVE_LAMPORTS > solBalance) {
+      showToast("Amount exceeds your available SOL balance (after network fee)", "error")
       return
     }
     setDepositing(true)
@@ -408,12 +409,12 @@ export function Home({ onLock }: HomeProps) {
       showToast("Invalid Solana address", "error")
       return
     }
-    const amt = Number(withdrawAmount)
-    if (!amt || amt <= 0) {
+    const lamports = parseSolInputToLamports(withdrawAmount)
+    if (lamports === null) {
       showToast("Enter an amount to withdraw", "error")
       return
     }
-    const lamports = BigInt(Math.round(amt * 1e9))
+    const amt = Number(lamports) / 1e9
     // Pick up to 2 spendable notes covering the amount; the wallet returns the
     // change as a new note, so the user withdraws a chosen amount instead of one
     // whole note. A single withdraw settles at most 2 notes.
@@ -487,12 +488,11 @@ export function Home({ onLock }: HomeProps) {
       showToast("Cannot transfer to your own address", "error")
       return
     }
-    const sol = parseFloat(transferAmount)
-    if (!Number.isFinite(sol) || sol <= 0) {
+    const amount = parseSolInputToLamports(transferAmount)
+    if (amount === null) {
       showToast("Enter a valid amount", "error")
       return
     }
-    const amount = BigInt(Math.round(sol * 1e9))
 
     // Circuit v3 (#350): spend 1 or 2 notes; change comes back as a new note
     // (audit #16), so partial amounts work from a single note.

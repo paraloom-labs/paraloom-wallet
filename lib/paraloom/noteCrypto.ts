@@ -19,6 +19,10 @@
 // v1 envelope tag: `crypto_box` (X25519 + XSalsa20-Poly1305). The remainder is
 // byte-identical to the pre-tag encoding.
 const ENVELOPE_TAG_V1 = 0x01
+const NOTE_PLAINTEXT_BYTES = 72
+const NACL_BOX_HEADER_BYTES = 32 + 24 // epk(32) || nonce(24)
+const NACL_BOX_MAC_BYTES = 16
+const MAX_U64 = 0xffff_ffff_ffff_ffffn
 
 import { randomBytes } from "@noble/hashes/utils"
 import * as nacl from "tweetnacl"
@@ -32,8 +36,15 @@ export interface NotePlaintext {
   assetIdHex: string
 }
 
+function isStrictHex(hex: string): boolean {
+  return hex.length > 0 && hex.length % 2 === 0 && /^[0-9a-fA-F]+$/.test(hex)
+}
+
 function hexToBytes(hex: string): Uint8Array {
   const clean = hex.startsWith("0x") ? hex.slice(2) : hex
+  if (!isStrictHex(clean)) {
+    throw new Error("invalid hex string")
+  }
   const out = new Uint8Array(clean.length / 2)
   for (let i = 0; i < out.length; i++) {
     out[i] = parseInt(clean.slice(i * 2, i * 2 + 2), 16)
@@ -41,15 +52,28 @@ function hexToBytes(hex: string): Uint8Array {
   return out
 }
 
+function hex32ToBytes(label: string, hex: string): Uint8Array {
+  const bytes = hexToBytes(hex)
+  if (bytes.length !== 32) {
+    throw new Error(`${label} must be 32 bytes`)
+  }
+  return bytes
+}
+
 function bytesToHex(bytes: Uint8Array): string {
   return Array.from(bytes, (b) => b.toString(16).padStart(2, "0")).join("")
 }
 
 function encodePlaintext(note: NotePlaintext): Uint8Array {
-  const pt = new Uint8Array(72)
+  if (typeof note.amount !== "bigint" || note.amount < 0n || note.amount > MAX_U64) {
+    throw new Error("note amount must be a u64 bigint")
+  }
+  const blinding = hex32ToBytes("blindingHex", note.blindingHex)
+  const assetId = hex32ToBytes("assetIdHex", note.assetIdHex)
+  const pt = new Uint8Array(NOTE_PLAINTEXT_BYTES)
   new DataView(pt.buffer).setBigUint64(0, note.amount, true) // amount, little-endian
-  pt.set(hexToBytes(note.blindingHex), 8)
-  pt.set(hexToBytes(note.assetIdHex), 40)
+  pt.set(blinding, 8)
+  pt.set(assetId, 40)
   return pt
 }
 
@@ -59,7 +83,7 @@ function encodePlaintext(note: NotePlaintext): Uint8Array {
  * hex bundle to carry in the transfer's `ciphertexts`.
  */
 export function encryptNote(recipientBoxPubHex: string, note: NotePlaintext): string {
-  const recipientPub = hexToBytes(recipientBoxPubHex)
+  const recipientPub = hex32ToBytes("recipientBoxPubHex", recipientBoxPubHex)
   const ephemeral = nacl.box.keyPair()
   const nonce = randomBytes(nacl.box.nonceLength) // 24
   const ct = nacl.box(encodePlaintext(note), nonce, recipientPub, ephemeral.secretKey)
@@ -78,23 +102,28 @@ export function encryptNote(recipientBoxPubHex: string, note: NotePlaintext): st
  * every delivered note and silently skip the ones not for them).
  */
 export function tryDecryptNote(boxSecretKey: Uint8Array, bundleHex: string): NotePlaintext | null {
-  const bundle = hexToBytes(bundleHex)
+  if (typeof bundleHex !== "string") return null
+  const clean = bundleHex.startsWith("0x") ? bundleHex.slice(2) : bundleHex
+  if (!isStrictHex(clean)) return null
+  const bundle = hexToBytes(clean)
 
-  // Parse the v1-tagged envelope (epk at offset 1) and, for notes delivered
-  // before the tag was added, the legacy untagged one (epk at offset 0). When
-  // the first byte is 0x01 both are possible (a legacy epk can start with 0x01),
-  // so try tagged first then legacy; `box.open` authenticates, so only the
-  // correct parse decrypts. Otherwise it can only be legacy.
+  // Parse the v1-tagged envelope (epk at offset 1, total 145 bytes) and, for
+  // notes delivered before the tag was added, the legacy untagged one (epk at
+  // offset 0, total 144 bytes). Checking the exact envelope length (`off + 144`)
+  // avoids running a second X25519 scalar multiplication at `off = 0` on 145-byte
+  // v1 bundles and rejects oversized/truncated ciphertexts before `nacl.box.open`.
   const offsets = bundle[0] === ENVELOPE_TAG_V1 ? [1, 0] : [0]
+  const expectedBodyLen =
+    NACL_BOX_HEADER_BYTES + NACL_BOX_MAC_BYTES + NOTE_PLAINTEXT_BYTES
   for (const off of offsets) {
-    if (bundle.length < off + 56 + 16) continue
+    if (bundle.length !== off + expectedBodyLen) continue
     const epk = bundle.slice(off, off + 32)
     const nonce = bundle.slice(off + 32, off + 56)
     const ct = bundle.slice(off + 56)
     const pt = nacl.box.open(ct, nonce, epk, boxSecretKey)
-    if (pt && pt.length === 72) {
+    if (pt && pt.length === NOTE_PLAINTEXT_BYTES) {
       return {
-        amount: new DataView(pt.buffer, pt.byteOffset, 72).getBigUint64(0, true),
+        amount: new DataView(pt.buffer, pt.byteOffset, NOTE_PLAINTEXT_BYTES).getBigUint64(0, true),
         blindingHex: bytesToHex(pt.slice(8, 40)),
         assetIdHex: bytesToHex(pt.slice(40, 72))
       }

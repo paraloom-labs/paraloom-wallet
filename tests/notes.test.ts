@@ -199,4 +199,19 @@ describe("note storage", () => {
     await addNote(ACCOUNT, deposit({ signature: "s2", spent: true }))
     expect(await shieldedBalance(ACCOUNT)).toBe(1000n)
   })
+
+  it("de-duplicates change notes across addDiscoveredNote and addNote by commitment (#247)", async () => {
+    const changeNote = received("cc".repeat(32), { amount: "750" })
+    await addDiscoveredNote(ACCOUNT, changeNote)
+    await addNote(ACCOUNT, { ...changeNote, commitment: "CC".repeat(32) })
+
+    const notes = await getNotes(ACCOUNT)
+    expect(notes).toHaveLength(1)
+    expect(await shieldedBalance(ACCOUNT)).toBe(750n)
+  })
+
+  it("ignores zero-amount notes in addDiscoveredNote (#247)", async () => {
+    await addDiscoveredNote(ACCOUNT, received("dd".repeat(32), { amount: "0" }))
+    expect(await getNotes(ACCOUNT)).toEqual([])
+  })
 })

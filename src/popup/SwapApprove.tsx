@@ -1,5 +1,6 @@
-import { useState } from "react"
+import { useState, useRef } from "react"
 import logoImg from "data-base64:~/../assets/icon.png"
+import { tokenLabel, inputInfo, formatAmount } from "~lib/paraloom/amount"
 
 interface SwapParams {
   outputMint: string
@@ -18,37 +19,13 @@ interface SwapApproveProps {
 
 type Status = "idle" | "approved" | "rejected"
 
-const USDC_MINT = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"
-
 function sendMessage(message: Record<string, unknown>): Promise<unknown> {
   return new Promise((resolve) => chrome.runtime.sendMessage(message, resolve))
 }
 
-function tokenLabel(mint: string): string {
-  if (mint === "SOL") return "SOL"
-  if (mint === USDC_MINT) return "USDC"
-  return `${mint.slice(0, 4)}…${mint.slice(-4)}`
-}
-
-// Decimals + symbol for the input side. Only native SOL and USDC are spendable
-// inputs today; an unknown mint falls back to showing raw base units.
-function inputInfo(inputMint?: string): { decimals: number; symbol: string } {
-  if (!inputMint || inputMint === "SOL") return { decimals: 9, symbol: "SOL" }
-  if (inputMint === USDC_MINT) return { decimals: 6, symbol: "USDC" }
-  return { decimals: 0, symbol: tokenLabel(inputMint) }
-}
-
-function formatAmount(amount: string, decimals: number): string {
-  try {
-    const n = decimals === 0 ? Number(BigInt(amount)) : Number(BigInt(amount)) / 10 ** decimals
-    return n.toLocaleString(undefined, { maximumFractionDigits: 6 })
-  } catch {
-    return amount
-  }
-}
-
 export function SwapApprove({ id, origin, params, onResolved }: SwapApproveProps) {
   const [status, setStatus] = useState<Status>("idle")
+  const decidingRef = useRef(false)
 
   let host = origin
   try {
@@ -56,7 +33,8 @@ export function SwapApprove({ id, origin, params, onResolved }: SwapApproveProps
   } catch {}
 
   async function decide(approved: boolean) {
-    if (status !== "idle") return
+    if (decidingRef.current || status !== "idle") return
+    decidingRef.current = true
     setStatus(approved ? "approved" : "rejected")
     await sendMessage({ type: approved ? "APPROVE_SWAP" : "REJECT_SWAP", id })
     // The swap runs in the background after approval; the window just closes.

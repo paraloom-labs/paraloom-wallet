@@ -1,4 +1,4 @@
-import { useState } from "react"
+import { useState, useRef } from "react"
 import logoImg from "data-base64:~/../assets/icon.png"
 
 interface ConnectApproveProps {
@@ -15,6 +15,7 @@ function sendMessage(message: Record<string, unknown>): Promise<unknown> {
 
 export function ConnectApprove({ id, origin, onResolved }: ConnectApproveProps) {
   const [status, setStatus] = useState<Status>("idle")
+  const decidingRef = useRef(false)
 
   let host = origin
   try {
@@ -22,7 +23,8 @@ export function ConnectApprove({ id, origin, onResolved }: ConnectApproveProps) 
   } catch {}
 
   async function decide(approved: boolean) {
-    if (status !== "idle") return
+    if (decidingRef.current || status !== "idle") return
+    decidingRef.current = true
     setStatus(approved ? "connected" : "rejected")
 
     await sendMessage({
@@ -67,16 +69,14 @@ export function ConnectApprove({ id, origin, onResolved }: ConnectApproveProps) 
   return (
     <div className="connect-approve">
       <img src={logoImg} alt="paraloom" className="connect-logo" />
-      <h2 className="connect-title">Connect wallet</h2>
+      <h2 className="connect-title">Connect to application</h2>
       <div className="connect-origin">{host}</div>
       <p className="connect-desc">
-        This site wants to connect to your Paraloom wallet and will be able to
-        see your shielded address. Only connect to sites you trust.
+        This application wants to view your shielded address and request
+        approvals for private transfers. Never approve sites you don't trust.
       </p>
       <div className="connect-actions">
-        <button
-          className="button button-secondary"
-          onClick={() => decide(false)}>
+        <button className="button button-secondary" onClick={() => decide(false)}>
           Reject
         </button>
         <button className="button" onClick={() => decide(true)}>

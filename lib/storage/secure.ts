@@ -120,17 +120,21 @@ export async function setLockState(locked: boolean): Promise<void> {
 export async function getAutoLockMinutes(): Promise<number> {
   const result = await chrome.storage.local.get(STORAGE_KEY)
   const storage = result[STORAGE_KEY] as WalletStorage | undefined
-  return storage?.autoLockMinutes ?? 60
+  const minutes = storage?.autoLockMinutes
+  if (typeof minutes === "number" && Number.isFinite(minutes) && minutes > 0) {
+    return minutes
+  }
+  return 60
 }
 
 export async function setAutoLockMinutes(minutes: number): Promise<void> {
-  const result = await chrome.storage.local.get(STORAGE_KEY)
-  const storage = result[STORAGE_KEY] as WalletStorage
-
-  if (storage) {
-    storage.autoLockMinutes = minutes
-    await chrome.storage.local.set({ [STORAGE_KEY]: storage })
+  if (typeof minutes !== "number" || !Number.isFinite(minutes) || minutes <= 0) {
+    return
   }
+  const result = await chrome.storage.local.get(STORAGE_KEY)
+  const storage = (result[STORAGE_KEY] as WalletStorage) || { locked: true, autoLockMinutes: 60 }
+  storage.autoLockMinutes = minutes
+  await chrome.storage.local.set({ [STORAGE_KEY]: storage })
 }
 
 export async function updateAccounts(accounts: Account[]): Promise<void> {
@@ -153,15 +157,19 @@ export async function getNetwork(): Promise<"mainnet-beta" | "devnet"> {
   // a previously stored choice (e.g. devnet for testing) is honoured.
   const result = await chrome.storage.local.get(STORAGE_KEY)
   const storage = result[STORAGE_KEY] as WalletStorage | undefined
-  return storage?.network ?? "mainnet-beta"
+  const net = storage?.network
+  if (net === "mainnet-beta" || net === "devnet") {
+    return net
+  }
+  return "mainnet-beta"
 }
 
 export async function setNetwork(network: "mainnet-beta" | "devnet"): Promise<void> {
-  const result = await chrome.storage.local.get(STORAGE_KEY)
-  const storage = result[STORAGE_KEY] as WalletStorage
-
-  if (storage) {
-    storage.network = network
-    await chrome.storage.local.set({ [STORAGE_KEY]: storage })
+  if (network !== "mainnet-beta" && network !== "devnet") {
+    return
   }
+  const result = await chrome.storage.local.get(STORAGE_KEY)
+  const storage = (result[STORAGE_KEY] as WalletStorage) || { locked: true, autoLockMinutes: 60 }
+  storage.network = network
+  await chrome.storage.local.set({ [STORAGE_KEY]: storage })
 }

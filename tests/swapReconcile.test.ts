@@ -1,5 +1,4 @@
 import { describe, expect, it } from "vitest"
-
 import {
   classifyStrand,
   isNativeSolOutput,
@@ -29,6 +28,44 @@ describe("classifyStrand", () => {
         ageMs: RESUME_GRACE_MS - 1,
         solLamports: 10_000_000n,
         tokenAmount: 5_000_000n
+      })
+    ).toBe("skip")
+  })
+
+  it("skips when ageMs is NaN or non-finite", () => {
+    expect(
+      classifyStrand({
+        hasSignature: false,
+        ageMs: NaN,
+        solLamports: 10_000_000n,
+        tokenAmount: 5_000_000n
+      })
+    ).toBe("skip")
+
+    expect(
+      classifyStrand({
+        hasSignature: false,
+        ageMs: Infinity,
+        solLamports: 10_000_000n,
+        tokenAmount: 0n
+      })
+    ).toBe("skip")
+
+    expect(
+      classifyStrand({
+        hasSignature: false,
+        ageMs: -1,
+        solLamports: 10_000_000n,
+        tokenAmount: 0n
+      })
+    ).toBe("skip")
+
+    expect(
+      classifyStrand({
+        hasSignature: false,
+        ageMs: undefined as unknown as number,
+        solLamports: 10_000_000n,
+        tokenAmount: 0n
       })
     ).toBe("skip")
   })

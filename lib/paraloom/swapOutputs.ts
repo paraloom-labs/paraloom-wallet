@@ -31,17 +31,62 @@ const KEY = "paraloom_swap_outputs"
 // signature once the swap lands. Keyed on the address so the two writes collapse
 // to one row.
 export async function saveSwapOutput(output: SwapOutput): Promise<void> {
+  if (
+    !output ||
+    typeof output !== "object" ||
+    typeof output.freshAddress !== "string" ||
+    !output.freshAddress.trim()
+  ) {
+    return
+  }
+
   const stored = await chrome.storage.local.get(KEY)
-  const current = (stored[KEY] as SwapOutput[]) ?? []
-  const i = current.findIndex((o) => o.freshAddress === output.freshAddress)
-  if (i >= 0) current[i] = { ...current[i], ...output }
-  else current.push(output)
+  const raw = stored?.[KEY]
+  const current: SwapOutput[] = Array.isArray(raw) ? raw : []
+  const i = current.findIndex(
+    (o) => o && typeof o === "object" && o.freshAddress === output.freshAddress
+  )
+  if (i >= 0) {
+    const existing = current[i]
+    current[i] = {
+      ...existing,
+      ...output,
+      // Preserve original createdAt and reshield metadata so subsequent updates
+      // (e.g. recording the swap signature) don't reset timestamps or lose reshield intent
+      createdAt:
+        typeof existing.createdAt === "number" && Number.isFinite(existing.createdAt)
+          ? existing.createdAt
+          : typeof output.createdAt === "number" && Number.isFinite(output.createdAt)
+            ? output.createdAt
+            : Date.now(),
+      reshield: existing.reshield !== undefined ? existing.reshield : output.reshield,
+      reshieldRecovered:
+        output.reshieldRecovered !== undefined
+          ? output.reshieldRecovered
+          : existing.reshieldRecovered
+    }
+  } else {
+    current.push({
+      ...output,
+      createdAt:
+        typeof output.createdAt === "number" && Number.isFinite(output.createdAt)
+          ? output.createdAt
+          : Date.now()
+    })
+  }
   await chrome.storage.local.set({ [KEY]: current })
 }
 
 export async function listSwapOutputs(): Promise<SwapOutput[]> {
   const stored = await chrome.storage.local.get(KEY)
-  return (stored[KEY] as SwapOutput[]) ?? []
+  const raw = stored?.[KEY]
+  return Array.isArray(raw)
+    ? raw.filter((o): o is SwapOutput =>
+        Boolean(
+          o && typeof o === "object" && typeof o.freshAddress === "string" && o.freshAddress.trim()
+        )
+      )
+    : []
 }
 
 // Drop a swap row by its fresh address. Used to clear a stale "pending" row the
@@ -49,8 +94,10 @@ export async function listSwapOutputs(): Promise<SwapOutput[]> {
 // swap either re-shielded into the pool or its input note was never spent), so
 // this only removes the misleading Activity entry, never any money.
 export async function dismissSwapOutput(freshAddress: string): Promise<void> {
+  if (typeof freshAddress !== "string" || !freshAddress.trim()) return
   const stored = await chrome.storage.local.get(KEY)
-  const current = (stored[KEY] as SwapOutput[]) ?? []
-  const next = current.filter((o) => o.freshAddress !== freshAddress)
+  const raw = stored?.[KEY]
+  const current: SwapOutput[] = Array.isArray(raw) ? raw : []
+  const next = current.filter((o) => o && typeof o === "object" && o.freshAddress !== freshAddress)
   await chrome.storage.local.set({ [KEY]: next })
 }

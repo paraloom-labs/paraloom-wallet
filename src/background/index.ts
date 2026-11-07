@@ -1,17 +1,18 @@
 import { Connection, PublicKey } from "@solana/web3.js"
-
-import { getAutoLockMinutes, getStoredWallet, isWalletLocked, setLockState } from "~lib/storage/secure"
-import { addApprovedOrigin, isOriginApproved, removeApprovedOrigin } from "~lib/storage/connections"
-import { clearSession, getLastActivity, loadSession, recordActivity } from "~lib/storage/session"
-import { addNote, getNotes, markNoteSpentByCommitment, shieldedBalance, shieldedTokenBalances, type ShieldedNote } from "~lib/paraloom/notes"
-import { scanForNotes } from "~lib/paraloom/scan"
 import {
   associatedTokenAddress,
   depositSpl,
   recoverReshieldedNote,
   solanaAddress
 } from "~lib/paraloom/bridge"
-import { fetchV3Leaves } from "~lib/paraloom/transact"
+import {
+  addNote,
+  getNotes,
+  markNoteSpentByCommitment,
+  shieldedBalance,
+  shieldedTokenBalances,
+  type ShieldedNote
+} from "~lib/paraloom/notes"
 import {
   GAS_LAMPORTS,
   privateSwap,
@@ -19,8 +20,18 @@ import {
   type ReshieldedNote
 } from "~lib/paraloom/privateSwap"
 import { persistReshieldedNote, recoverReshields } from "~lib/paraloom/reshieldRecovery"
+import { scanForNotes } from "~lib/paraloom/scan"
 import { reconcileSwapOutputs } from "~lib/paraloom/swapReconcile"
+import { fetchV3Leaves } from "~lib/paraloom/transact"
 import { assetIdForMint, NATIVE_ASSET_HEX } from "~lib/prover"
+import { addApprovedOrigin, isOriginApproved, removeApprovedOrigin } from "~lib/storage/connections"
+import {
+  getAutoLockMinutes,
+  getStoredWallet,
+  isWalletLocked,
+  setLockState
+} from "~lib/storage/secure"
+import { clearSession, getLastActivity, loadSession, recordActivity } from "~lib/storage/session"
 
 // Private swaps are mainnet-only (Jupiter liquidity) and rebuilding the v3 tree
 // needs an archival RPC, so the swap always runs against the node's archival
@@ -48,9 +59,7 @@ const AUTO_LOCK_ALARM = "paraloom-auto-lock"
 // a hung job can never block the lock forever.
 const SWAP_INFLIGHT_LOCK_GRACE_MS = 8 * 60 * 1000
 async function swapInFlight(): Promise<boolean> {
-  const job = (await chrome.storage.session.get("swapJob")).swapJob as
-    | SwapJob
-    | undefined
+  const job = (await chrome.storage.session.get("swapJob")).swapJob as SwapJob | undefined
   return (
     job?.status === "pending" &&
     typeof job.startedAt === "number" &&
@@ -79,17 +88,20 @@ async function maybeAutoLock(): Promise<void> {
 // Registered at top level so they re-register on every worker spawn. The alarm
 // is the backstop while the worker is alive-but-idle; the immediate call is the
 // backstop for a worker that was terminated past the lock threshold.
-chrome.alarms.create(AUTO_LOCK_ALARM, { periodInMinutes: 1 })
-chrome.alarms.onAlarm.addListener((alarm) => {
-  if (alarm.name === AUTO_LOCK_ALARM) void maybeAutoLock()
-})
-void maybeAutoLock()
+if (typeof chrome !== "undefined" && chrome.alarms) {
+  chrome.alarms.create(AUTO_LOCK_ALARM, { periodInMinutes: 1 })
+  chrome.alarms.onAlarm.addListener((alarm) => {
+    if (alarm.name === AUTO_LOCK_ALARM) void maybeAutoLock()
+  })
+}
+if (typeof chrome !== "undefined" && chrome.storage) {
+  void maybeAutoLock()
+}
 
 // A connection request awaiting the user's explicit approval in the popup
 // (Phantom-style). At most one is outstanding at a time.
-let pendingConnection:
-  | { id: number; origin: string; resolve: (approved: boolean) => void }
-  | null = null
+let pendingConnection: { id: number; origin: string; resolve: (approved: boolean) => void } | null =
+  null
 let connectionIdCounter = 0
 
 // A private-swap request awaiting the user's explicit per-request approval in
@@ -111,16 +123,13 @@ interface SwapRequestParams {
    *  of leaving it at the fresh address. */
   reshield?: boolean
 }
-let pendingSwap:
-  | {
-      id: number
-      origin: string
-      params: SwapRequestParams
-      resolve: (approved: boolean) => void
-    }
-  | null = null
+let pendingSwap: {
+  id: number
+  origin: string
+  params: SwapRequestParams
+  resolve: (approved: boolean) => void
+} | null = null
 let swapIdCounter = 0
-
 
 // Message types the popup UI is the only legitimate sender of. A page relayed
 // through the content script must never reach these: `GET_PENDING_CONNECTION`
@@ -148,6 +157,9 @@ const POPUP_ONLY_TYPES = new Set([
 ])
 
 function isFromPopup(sender: chrome.runtime.MessageSender): boolean {
+  if (!sender || typeof sender !== "object" || typeof sender.url !== "string") {
+    return false
+  }
   // A message from the extension's OWN pages (the popup) carries a
   // chrome-extension:// URL; a page relay (content script) carries the web
   // page's https:// URL. The old `sender.tab === undefined` heuristic was WRONG:
@@ -155,10 +167,27 @@ function isFromPopup(sender: chrome.runtime.MessageSender): boolean {
   // so every popup-only message (GET_PENDING_CONNECTION / APPROVE_CONNECTION /
   // GET_PENDING_SWAP / APPROVE_SWAP) was rejected as "not permitted" — the
   // approval popup could never read or resolve its own request.
-  return !!sender.url && sender.url.startsWith(chrome.runtime.getURL(""))
+  try {
+    const extUrl =
+      typeof chrome !== "undefined" && chrome.runtime?.getURL ? chrome.runtime.getURL("") : ""
+    return extUrl ? sender.url.startsWith(extUrl) : false
+  } catch {
+    return false
+  }
 }
 
-chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
+function onMessageListener(
+  message: any,
+  sender: chrome.runtime.MessageSender,
+  sendResponse: (response?: any) => void
+): boolean {
+  if (!message || typeof message !== "object" || typeof message.type !== "string") {
+    if (typeof sendResponse === "function") {
+      sendResponse({ success: false, error: "invalid message" })
+    }
+    return false
+  }
+
   // Popup-only messages are refused outright when they arrive from a page.
   // Without this the approval screen is decorative: a script on any injected
   // origin approves its own connection and reads the visitor's shielded
@@ -193,9 +222,11 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   // ── dApp API messages (from content script) ──
 
   if (message.type === "CONNECT_WALLET") {
-    handleConnect(sender).then(sendResponse).catch((err) => {
-      sendResponse({ success: false, error: err.message })
-    })
+    handleConnect(sender)
+      .then(sendResponse)
+      .catch((err) => {
+        sendResponse({ success: false, error: err.message })
+      })
     return true
   }
 
@@ -220,7 +251,9 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     // the worker was recycled after the request was registered.
     chrome.storage.session
       .get("pendingConn")
-      .then((r) => sendResponse((r.pendingConn as { id: number; origin: string } | undefined) ?? null))
+      .then((r) =>
+        sendResponse((r.pendingConn as { id: number; origin: string } | undefined) ?? null)
+      )
       .catch(() => sendResponse(null))
     return true
   }
@@ -235,11 +268,15 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       .get("pendingConn")
       .then(async (r) => {
         const pc = r.pendingConn as { id: number; origin: string } | undefined
-        if (pc && pc.id === message.id) {
+        if (pc && typeof message.id === "number" && pc.id === message.id) {
           connectedOrigin = pc.origin
           await addApprovedOrigin(pc.origin)
           await chrome.storage.session.remove("pendingConn").catch(() => {})
-          if (pendingConnection && pendingConnection.id === message.id) {
+          if (
+            pendingConnection &&
+            typeof message.id === "number" &&
+            pendingConnection.id === message.id
+          ) {
             pendingConnection.resolve(true)
           }
         }
@@ -251,7 +288,11 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 
   if (message.type === "REJECT_CONNECTION") {
     void chrome.storage.session.remove("pendingConn").catch(() => {})
-    if (pendingConnection && pendingConnection.id === message.id) {
+    if (
+      pendingConnection &&
+      typeof message.id === "number" &&
+      pendingConnection.id === message.id
+    ) {
       pendingConnection.resolve(false)
     }
     sendResponse({ success: true })
@@ -270,7 +311,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   }
 
   if (message.type === "APPROVE_SWAP") {
-    if (pendingSwap && pendingSwap.id === message.id) {
+    if (pendingSwap && typeof message.id === "number" && pendingSwap.id === message.id) {
       pendingSwap.resolve(true)
     }
     sendResponse({ success: true })
@@ -278,7 +319,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   }
 
   if (message.type === "REJECT_SWAP") {
-    if (pendingSwap && pendingSwap.id === message.id) {
+    if (pendingSwap && typeof message.id === "number" && pendingSwap.id === message.id) {
       pendingSwap.resolve(false)
     }
     sendResponse({ success: true })
@@ -286,9 +327,11 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   }
 
   if (message.type === "GET_ADDRESS") {
-    handleGetAddress(sender).then(sendResponse).catch(() => {
-      sendResponse({ address: null })
-    })
+    handleGetAddress(sender)
+      .then(sendResponse)
+      .catch(() => {
+        sendResponse({ address: null })
+      })
     return true
   }
 
@@ -325,23 +368,29 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   }
 
   if (message.type === "GET_PUBLIC_ADDRESS") {
-    handlePublicAddress(sender).then(sendResponse).catch(() => {
-      sendResponse({ address: null })
-    })
+    handlePublicAddress(sender)
+      .then(sendResponse)
+      .catch(() => {
+        sendResponse({ address: null })
+      })
     return true
   }
 
   if (message.type === "GET_SHIELDED_BALANCE") {
-    handleShieldedBalance(sender).then(sendResponse).catch(() => {
-      sendResponse({ lamports: null })
-    })
+    handleShieldedBalance(sender)
+      .then(sendResponse)
+      .catch(() => {
+        sendResponse({ lamports: null })
+      })
     return true
   }
 
   if (message.type === "GET_SHIELDED_TOKEN_BALANCES") {
-    handleShieldedTokenBalances(sender).then(sendResponse).catch(() => {
-      sendResponse({ balances: {} })
-    })
+    handleShieldedTokenBalances(sender)
+      .then(sendResponse)
+      .catch(() => {
+        sendResponse({ balances: {} })
+      })
     return true
   }
 
@@ -416,14 +465,10 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         const session = await loadSession()
         if (!session) return sendResponse({ success: false, error: "locked" })
         const connection = new Connection(PRIVATE_SWAP_RPC_URL, "confirmed")
-        const recovered = await reconcileSwapOutputs(
-          connection,
-          session.wallet.shieldedAddress
+        const recovered = await reconcileSwapOutputs(connection, session.wallet.shieldedAddress)
+        const reshielded = await recoverReshields(connection, session.wallet.shieldedAddress).catch(
+          () => 0
         )
-        const reshielded = await recoverReshields(
-          connection,
-          session.wallet.shieldedAddress
-        ).catch(() => 0)
         sendResponse({ success: true, recovered: recovered + reshielded })
       })
       .catch((err) => sendResponse({ success: false, error: err.message }))
@@ -431,13 +476,16 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   }
 
   return false
-})
+}
+
+if (typeof chrome !== "undefined" && chrome.runtime?.onMessage) {
+  chrome.runtime.onMessage.addListener(onMessageListener)
+}
 
 async function handleConnect(sender: chrome.runtime.MessageSender) {
   // sender.origin is the origin of the page that called window.paraloom.connect
   // (set for content-script senders without needing the "tabs" permission).
-  const origin =
-    sender.origin ?? (sender.tab?.url ? new URL(sender.tab.url).origin : null)
+  const origin = senderOrigin(sender)
   if (!origin) {
     throw new Error("Unable to determine the requesting site's origin")
   }
@@ -495,9 +543,11 @@ async function handleConnect(sender: chrome.runtime.MessageSender) {
 // rejects it in the popup (or the timeout elapses → treated as a rejection).
 function requestApproval(origin: string, timeoutMs: number): Promise<boolean> {
   return new Promise((resolve) => {
+    if (pendingConnection) {
+      pendingConnection.resolve(false)
+    }
     const id = ++connectionIdCounter
-    const clearPersisted = () =>
-      void chrome.storage.session.remove("pendingConn").catch(() => {})
+    const clearPersisted = () => void chrome.storage.session.remove("pendingConn").catch(() => {})
     const timer = setTimeout(() => {
       if (pendingConnection?.id === id) {
         pendingConnection = null
@@ -610,12 +660,23 @@ async function handleGetAddress(sender: chrome.runtime.MessageSender) {
 // The requesting page's origin, resolved without the "tabs" permission. A popup
 // (extension context) has no tab; a content-script relay always does.
 function senderOrigin(sender: chrome.runtime.MessageSender): string | null {
-  return sender.origin ?? (sender.tab?.url ? new URL(sender.tab.url).origin : null)
+  if (!sender || typeof sender !== "object") return null
+  if (typeof sender.origin === "string" && sender.origin && sender.origin !== "null") {
+    return sender.origin
+  }
+  const urlStr = sender.tab?.url ?? sender.url
+  if (typeof urlStr === "string" && urlStr) {
+    try {
+      const u = new URL(urlStr)
+      if (u.origin && u.origin !== "null") return u.origin
+    } catch {
+      return null
+    }
+  }
+  return null
 }
 
-async function isAuthorizedSender(
-  sender: chrome.runtime.MessageSender
-): Promise<boolean> {
+async function isAuthorizedSender(sender: chrome.runtime.MessageSender): Promise<boolean> {
   const origin = senderOrigin(sender)
   if (!origin) return false
   if (connectedOrigin === origin) return true
@@ -695,12 +756,18 @@ async function handleSignMessage(_message: string) {
   throw new Error("Paraloom Network is not yet live. Signing will be available at mainnet launch.")
 }
 
-async function handlePrivateTransfer(_params: { recipient: string; amount: number; memo?: string }) {
+async function handlePrivateTransfer(_params: {
+  recipient: string
+  amount: number
+  memo?: string
+}) {
   if (!connectedOrigin) {
     throw new Error("Not connected")
   }
 
-  throw new Error("Paraloom Network is not yet live. Transfers will be available at mainnet launch.")
+  throw new Error(
+    "Paraloom Network is not yet live. Transfers will be available at mainnet launch."
+  )
 }
 
 // Register a pending swap approval and resolve once the user approves/rejects it
@@ -711,6 +778,11 @@ function requestSwapApproval(
   timeoutMs: number
 ): Promise<boolean> {
   return new Promise((resolve) => {
+    // If a previous swap approval request is already pending, resolve it with false
+    // so it doesn't hang in flight or leave dangling timers when superseded
+    if (pendingSwap) {
+      pendingSwap.resolve(false)
+    }
     const id = ++swapIdCounter
     const timer = setTimeout(() => {
       if (pendingSwap?.id === id) {
@@ -807,10 +879,7 @@ async function dropPhantomNotes(
 ): Promise<ShieldedNote[]> {
   const GRACE_MS = 120_000
   const suspects = notes.filter(
-    (n) =>
-      n.leafIndex === undefined &&
-      !!n.commitment &&
-      Date.now() - n.createdAt > GRACE_MS
+    (n) => n.leafIndex === undefined && !!n.commitment && Date.now() - n.createdAt > GRACE_MS
   )
   if (suspects.length === 0) return notes
 
@@ -830,9 +899,7 @@ async function dropPhantomNotes(
     }
   }
   if (dropped.size > 0) {
-    console.log(
-      `[paraloom] reconciled ${dropped.size} phantom note(s) not present on-chain`
-    )
+    console.log(`[paraloom] reconciled ${dropped.size} phantom note(s) not present on-chain`)
   }
   return notes.filter((n) => !(n.commitment && dropped.has(n.commitment)))
 }
@@ -869,18 +936,10 @@ async function handlePrivateSwap(
       new PublicKey(params.inputMint).toBuffer().toString("hex")
     )
     const allNotes = await getNotes(shieldedAddress)
-    const tokenCandidates = allNotes.filter(
-      (n) => !n.spent && n.assetId === inputAssetId
-    )
+    const tokenCandidates = allNotes.filter((n) => !n.spent && n.assetId === inputAssetId)
     const tokenInputs = selectNotes(tokenCandidates, amount)
-    const nativeCandidates = allNotes.filter(
-      (n) => !n.spent && n.assetId === NATIVE_ASSET_HEX
-    )
-    const gasNotes = await dropPhantomNotes(
-      connection,
-      shieldedAddress,
-      nativeCandidates
-    )
+    const nativeCandidates = allNotes.filter((n) => !n.spent && n.assetId === NATIVE_ASSET_HEX)
+    const gasNotes = await dropPhantomNotes(connection, shieldedAddress, nativeCandidates)
     let gasInputs: ShieldedNote[]
     try {
       gasInputs = selectNotes(gasNotes, GAS_LAMPORTS)
@@ -991,4 +1050,4 @@ function selectNotes(notes: ShieldedNote[], amount: bigint): ShieldedNote[] {
   throw new Error("insufficient shielded balance for this amount (max 2 notes per swap)")
 }
 
-export {}
+export { isFromPopup, onMessageListener, requestApproval, requestSwapApproval, senderOrigin }

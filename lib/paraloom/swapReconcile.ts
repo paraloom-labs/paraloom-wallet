@@ -19,15 +19,10 @@
 //                 hide a genuinely recoverable strand.
 
 import { Connection, PublicKey } from "@solana/web3.js"
-
 import { isNativeSolOutput, resumeSwapAtFreshAddress } from "./privateSwap"
 import { persistReshieldedNote } from "./reshieldRecovery"
-import {
-  classifyStrand,
-  RESUME_GRACE_MS,
-  RESUME_MIN_LAMPORTS
-} from "./swapReconcileClassify"
 import { listSwapOutputs, saveSwapOutput } from "./swapOutputs"
+import { classifyStrand, RESUME_GRACE_MS, RESUME_MIN_LAMPORTS } from "./swapReconcileClassify"
 
 export { classifyStrand, RESUME_GRACE_MS, RESUME_MIN_LAMPORTS }
 export type { StrandAction } from "./swapReconcileClassify"
@@ -49,7 +44,8 @@ export async function reconcileSwapOutputs(
     const now = Date.now()
     for (const o of outputs) {
       if (o.swapSignature) continue
-      if (now - o.createdAt < RESUME_GRACE_MS) continue
+      const age = now - o.createdAt
+      if (!Number.isFinite(age) || age < RESUME_GRACE_MS) continue
 
       const freshPub = new PublicKey(o.freshAddress)
       let solLamports = 0n
@@ -69,8 +65,8 @@ export async function reconcileSwapOutputs(
             (s, a) =>
               s +
               BigInt(
-                (a.account.data as { parsed: { info: { tokenAmount: { amount: string } } } })
-                  .parsed.info.tokenAmount.amount
+                (a.account.data as { parsed: { info: { tokenAmount: { amount: string } } } }).parsed
+                  .info.tokenAmount.amount
               ),
             0n
           )

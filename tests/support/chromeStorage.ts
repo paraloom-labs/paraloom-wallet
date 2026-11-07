@@ -55,11 +55,29 @@ function makeArea(): FakeArea {
 
 export interface FakeChrome {
   storage: { local: FakeArea; session: FakeArea }
+  alarms?: {
+    create: (name: string, info?: any) => void
+    onAlarm: { addListener: (cb: any) => void }
+  }
+  runtime?: {
+    onMessage: { addListener: (cb: any) => void }
+    getURL: (path: string) => string
+  }
 }
 
 /** Install a fresh `globalThis.chrome`. Call in `beforeEach`. */
 export function installFakeChrome(): FakeChrome {
-  const chrome: FakeChrome = { storage: { local: makeArea(), session: makeArea() } }
+  const chrome: FakeChrome = {
+    storage: { local: makeArea(), session: makeArea() },
+    alarms: {
+      create: () => {},
+      onAlarm: { addListener: () => {} }
+    },
+    runtime: {
+      onMessage: { addListener: () => {} },
+      getURL: (path: string) => `chrome-extension://fakeid/${path}`
+    }
+  }
   ;(globalThis as unknown as { chrome: FakeChrome }).chrome = chrome
   return chrome
 }

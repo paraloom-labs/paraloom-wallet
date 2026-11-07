@@ -36,7 +36,7 @@ export function classifyStrand(args: {
   tokenAmount: bigint
 }): StrandAction {
   if (args.hasSignature) return "skip"
-  if (args.ageMs < RESUME_GRACE_MS) return "skip"
+  if (!Number.isFinite(args.ageMs) || args.ageMs < RESUME_GRACE_MS) return "skip"
   if (args.solLamports > RESUME_MIN_LAMPORTS) return "resume"
   if (args.tokenAmount > 0n) return "landed"
   return "unresolved"

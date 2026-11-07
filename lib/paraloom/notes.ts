@@ -50,11 +50,14 @@ export async function getNotes(account: string): Promise<ShieldedNote[]> {
 export async function addNote(account: string, note: ShieldedNote): Promise<void> {
   const all = await readAll()
   const existing = all[account] ?? []
-  // Idempotent by (non-empty) deposit signature: the same shielded note can be
+  // Idempotent by (non-empty) deposit signature or commitment: the same shielded note can be
   // persisted more than once — the early on-submit persist AND the end-of-flow
-  // persist AND the recovery scan all target the same deposit — so dedupe here
-  // rather than double-counting the balance.
+  // persist AND the recovery scan all target the same deposit, and change notes carry
+  // commitment without a deposit signature — so dedupe here rather than double-counting the balance.
   if (note.signature && existing.some((n) => n.signature === note.signature)) {
+    return
+  }
+  if (note.commitment && existing.some((n) => n.commitment === note.commitment)) {
     return
   }
   all[account] = [...existing, note]
@@ -106,7 +109,10 @@ export async function setNoteLeafIndex(
 
 // Mark a note spent by its commitment (used for transfer inputs/outputs, which
 // are identified by commitment rather than a deposit signature).
-export async function markNoteSpentByCommitment(account: string, commitment: string): Promise<void> {
+export async function markNoteSpentByCommitment(
+  account: string,
+  commitment: string
+): Promise<void> {
   const all = await readAll()
   const notes = all[account] ?? []
   all[account] = notes.map((n) => (n.commitment === commitment ? { ...n, spent: true } : n))
@@ -136,16 +142,12 @@ export async function markNoteSpentByIdentity(account: string, note: ShieldedNot
 // it carries no `mint`. Use shieldedTokenBalances() for the SPL side.
 export async function shieldedBalance(account: string): Promise<bigint> {
   const notes = await getNotes(account)
-  return notes
-    .filter((n) => !n.spent && !n.mint)
-    .reduce((sum, n) => sum + BigInt(n.amount), 0n)
+  return notes.filter((n) => !n.spent && !n.mint).reduce((sum, n) => sum + BigInt(n.amount), 0n)
 }
 
 // Unspent shielded SPL balances keyed by base58 mint (#779). Each amount is in
 // that mint's own base units, kept separate from the native lamports sum.
-export async function shieldedTokenBalances(
-  account: string
-): Promise<Record<string, bigint>> {
+export async function shieldedTokenBalances(account: string): Promise<Record<string, bigint>> {
   const notes = await getNotes(account)
   const byMint: Record<string, bigint> = {}
   for (const n of notes) {

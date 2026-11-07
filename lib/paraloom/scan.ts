@@ -113,7 +113,7 @@ export async function scanForNotes(
       continue
     }
     const note = tryDecryptNote(boxSecretKey, d.ciphertext)
-    if (!note) {
+    if (!note || note.amount <= 0n) {
       continue
     }
     // The commitment must bind the decrypted amount, blinding and asset under

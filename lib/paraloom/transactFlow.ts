@@ -4,24 +4,17 @@
 // return change to the wallet as a new note — the audit #16 fix.
 
 import { Connection, Keypair, PublicKey } from "@solana/web3.js"
-
 import { addressBoxPubHex, addressSpendPubHex } from "~lib/crypto/keyManagement"
 import {
+  NATIVE_ASSET_HEX,
   proveTransact,
   v3MerklePath,
   v3NoteCommitment,
   v3NoteCommitmentAsset,
   v3NotePubkey
 } from "~lib/prover"
-
-import { NATIVE_ASSET_HEX } from "~lib/prover"
 import { encryptNote } from "./noteCrypto"
-import {
-  addNote,
-  markNoteSpentByIdentity,
-  setNoteLeafIndex,
-  type ShieldedNote
-} from "./notes"
+import { addNote, markNoteSpentByIdentity, setNoteLeafIndex, type ShieldedNote } from "./notes"
 import { confirmCommitmentInTree } from "./settlementConfirm"
 import { fetchV3Leaves, sendDepositNote, submitTransact } from "./transact"
 
@@ -53,13 +46,10 @@ function confirmSettledByTree(
   timeoutMs = SETTLE_CONFIRM_TIMEOUT_MS,
   pollMs = SETTLE_CONFIRM_POLL_MS
 ): Promise<boolean> {
-  return confirmCommitmentInTree(
-    () => fetchV3Leaves(connection),
-    commitmentHex,
-    timeoutMs,
-    pollMs
-  )
+  return confirmCommitmentInTree(() => fetchV3Leaves(connection), commitmentHex, timeoutMs, pollMs)
 }
+
+export const MAX_U64 = 18446744073709551615n
 
 /// Deposit lamports as a v3 note: the program computes the commitment and
 /// appends it on-chain; the leaf index comes back in the DepositNoteEvent.
@@ -70,6 +60,27 @@ export async function depositV3(
   spendPrivkeyHex: string,
   lamports: bigint
 ): Promise<{ signature: string; leafIndex: number }> {
+  if (!connection) {
+    throw new Error("invalid connection")
+  }
+  if (
+    !wallet ||
+    !wallet.secretKey ||
+    !(wallet.secretKey instanceof Uint8Array || ArrayBuffer.isView(wallet.secretKey)) ||
+    wallet.secretKey.length !== 64
+  ) {
+    throw new Error("invalid wallet secret key")
+  }
+  if (!shieldedAddress || typeof shieldedAddress !== "string" || !shieldedAddress.trim()) {
+    throw new Error("invalid shielded address")
+  }
+  if (!spendPrivkeyHex || typeof spendPrivkeyHex !== "string" || !spendPrivkeyHex.trim()) {
+    throw new Error("invalid spend private key")
+  }
+  if (typeof lamports !== "bigint" || lamports <= 0n || lamports > MAX_U64) {
+    throw new Error("deposit amount must be a positive u64")
+  }
+
   const blindingHex = randomHex32()
   const pubkeyHex = await v3NotePubkey(spendPrivkeyHex)
   const payer = Keypair.fromSecretKey(wallet.secretKey)
@@ -199,11 +210,84 @@ export async function spendV3(
     | { kind: "transfer"; recipientShielded: string },
   opts: SpendOptions = {}
 ): Promise<SpendResult> {
-  if (inputs.length < 1 || inputs.length > 2) {
+  if (!connection) {
+    throw new Error("invalid connection")
+  }
+  if (!shieldedAddress || typeof shieldedAddress !== "string" || !shieldedAddress.trim()) {
+    throw new Error("invalid shielded address")
+  }
+  if (!spendPrivkeyHex || typeof spendPrivkeyHex !== "string" || !spendPrivkeyHex.trim()) {
+    throw new Error("invalid spend private key")
+  }
+  if (!ownBoxPubHex || typeof ownBoxPubHex !== "string" || !ownBoxPubHex.trim()) {
+    throw new Error("invalid box public key")
+  }
+  if (!dest || typeof dest !== "object") {
+    throw new Error("invalid destination")
+  }
+  if (dest.kind === "withdraw") {
+    if (
+      !dest.recipientSolanaHex ||
+      typeof dest.recipientSolanaHex !== "string" ||
+      !dest.recipientSolanaHex.trim()
+    ) {
+      throw new Error("invalid withdraw recipient")
+    }
+  } else if (dest.kind === "transfer") {
+    if (
+      !dest.recipientShielded ||
+      typeof dest.recipientShielded !== "string" ||
+      !dest.recipientShielded.trim()
+    ) {
+      throw new Error("invalid transfer recipient")
+    }
+  } else {
+    throw new Error("invalid destination kind")
+  }
+
+  if (!Array.isArray(inputs) || inputs.length < 1 || inputs.length > 2) {
     throw new Error("transact spends 1 or 2 notes")
   }
+
+  if (inputs.some((n) => n.spent)) {
+    throw new Error("cannot spend spent notes")
+  }
+
+  if (
+    inputs.length === 2 &&
+    (inputs[0] === inputs[1] ||
+      inputs[0].blinding === inputs[1].blinding ||
+      (inputs[0].commitment && inputs[0].commitment === inputs[1].commitment) ||
+      (inputs[0].signature && inputs[0].signature === inputs[1].signature))
+  ) {
+    throw new Error("cannot spend duplicate notes")
+  }
+
+  for (const n of inputs) {
+    let amt: bigint
+    try {
+      amt = BigInt(n.amount)
+    } catch {
+      throw new Error("invalid note amount")
+    }
+    if (amt <= 0n || amt > MAX_U64) {
+      throw new Error("note amount out of u64 bounds")
+    }
+    if (!n.blinding || typeof n.blinding !== "string" || !n.blinding.trim()) {
+      throw new Error("note missing blinding")
+    }
+  }
+
   const sumIn = inputs.reduce((acc, n) => acc + BigInt(n.amount), 0n)
-  if (payLamports <= 0n || payLamports > sumIn) {
+  if (sumIn > MAX_U64) {
+    throw new Error("total input amount exceeds u64 bounds")
+  }
+
+  if (typeof payLamports !== "bigint" || payLamports <= 0n || payLamports > MAX_U64) {
+    throw new Error("pay amount must be a positive u64")
+  }
+
+  if (payLamports > sumIn) {
     throw new Error("amount exceeds the selected notes")
   }
   const change = sumIn - payLamports
@@ -216,7 +300,8 @@ export async function spendV3(
     throw new Error("all spent notes must share one asset")
   }
   const isSpl = assetIdHex !== NATIVE_ASSET_HEX
-  const mintHex = isSpl && inputs[0].mint ? new PublicKey(inputs[0].mint).toBuffer().toString("hex") : undefined
+  const mintHex =
+    isSpl && inputs[0].mint ? new PublicKey(inputs[0].mint).toBuffer().toString("hex") : undefined
   if (isSpl && !mintHex) {
     throw new Error("a shielded SPL note must carry its mint to be spent")
   }

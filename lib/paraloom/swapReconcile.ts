@@ -49,9 +49,20 @@ export async function reconcileSwapOutputs(
     const now = Date.now()
     for (const o of outputs) {
       if (o.swapSignature) continue
-      if (now - o.createdAt < RESUME_GRACE_MS) continue
+      if (
+        typeof o.createdAt !== "number" ||
+        !Number.isFinite(o.createdAt) ||
+        now - o.createdAt < RESUME_GRACE_MS
+      ) {
+        continue
+      }
 
-      const freshPub = new PublicKey(o.freshAddress)
+      let freshPub: PublicKey
+      try {
+        freshPub = new PublicKey(o.freshAddress)
+      } catch {
+        continue
+      }
       let solLamports = 0n
       try {
         solLamports = BigInt(await connection.getBalance(freshPub))
@@ -65,15 +76,20 @@ export async function reconcileSwapOutputs(
           const accts = await connection.getParsedTokenAccountsByOwner(freshPub, {
             mint: new PublicKey(o.outputMint)
           })
-          tokenAmount = accts.value.reduce(
-            (s, a) =>
-              s +
-              BigInt(
-                (a.account.data as { parsed: { info: { tokenAmount: { amount: string } } } })
-                  .parsed.info.tokenAmount.amount
-              ),
-            0n
-          )
+          tokenAmount = accts.value.reduce((s, a) => {
+            const raw = (
+              a.account?.data as
+                | { parsed?: { info?: { tokenAmount?: { amount?: string } } } }
+                | undefined
+            )?.parsed?.info?.tokenAmount?.amount
+            if (typeof raw !== "string") return s
+            try {
+              const v = BigInt(raw)
+              return v > 0n ? s + v : s
+            } catch {
+              return s
+            }
+          }, 0n)
         } catch {
           // no token account yet — leave as unresolved below
         }
@@ -128,12 +144,16 @@ export async function reconcileSwapOutputs(
           // resolves and links to the explorer. No re-shield here: the fresh
           // address has no gas SOL left to pay for it, and the token stays
           // recoverable at the address the wallet still holds the key for.
-          const sigs = await connection.getSignaturesForAddress(freshPub, { limit: 1 })
-          const sig = sigs[0]?.signature
+          const sigs = await connection.getSignaturesForAddress(freshPub, { limit: 10 })
+          const sig = sigs.find((s) => !s.err)?.signature
           if (!sig) continue // cannot attest it landed → leave for manual dismiss
+          const boundedOutAmount =
+            tokenAmount > BigInt(Number.MAX_SAFE_INTEGER)
+              ? Number.MAX_SAFE_INTEGER
+              : Number(tokenAmount)
           await saveSwapOutput({
             ...o,
-            outAmount: Number(tokenAmount),
+            outAmount: boundedOutAmount,
             swapSignature: sig
           })
           resolved++

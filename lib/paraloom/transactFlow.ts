@@ -70,6 +70,9 @@ export async function depositV3(
   spendPrivkeyHex: string,
   lamports: bigint
 ): Promise<{ signature: string; leafIndex: number }> {
+  if (lamports <= 0n || lamports > 0xffff_ffff_ffff_ffffn) {
+    throw new Error("depositV3: lamports must be in (0, 2^64)")
+  }
   const blindingHex = randomHex32()
   const pubkeyHex = await v3NotePubkey(spendPrivkeyHex)
   const payer = Keypair.fromSecretKey(wallet.secretKey)
@@ -202,6 +205,26 @@ export async function spendV3(
   if (inputs.length < 1 || inputs.length > 2) {
     throw new Error("transact spends 1 or 2 notes")
   }
+  for (const n of inputs) {
+    if (n.spent) {
+      throw new Error("cannot spend an already-spent note")
+    }
+    if (BigInt(n.amount) <= 0n) {
+      throw new Error("input note amount must be > 0")
+    }
+  }
+  if (
+    inputs.length === 2 &&
+    ((inputs[0].commitment &&
+      inputs[1].commitment &&
+      inputs[0].commitment.toLowerCase() === inputs[1].commitment.toLowerCase()) ||
+      (inputs[0].signature &&
+        inputs[1].signature &&
+        inputs[0].signature === inputs[1].signature) ||
+      inputs[0].blinding.toLowerCase() === inputs[1].blinding.toLowerCase())
+  ) {
+    throw new Error("duplicate input notes are not allowed")
+  }
   const sumIn = inputs.reduce((acc, n) => acc + BigInt(n.amount), 0n)
   if (payLamports <= 0n || payLamports > sumIn) {
     throw new Error("amount exceeds the selected notes")
@@ -250,6 +273,9 @@ export async function spendV3(
       leafIndex,
       pathHex: path
     })
+  }
+  if (inputSpecs.length === 2 && inputSpecs[0].leafIndex === inputSpecs[1].leafIndex) {
+    throw new Error("duplicate input leafIndex is not allowed")
   }
   // Pad a single-note spend with a zero-value dummy (membership is skipped
   // in-circuit for zero notes; the path just needs the right shape).
@@ -356,18 +382,11 @@ export async function spendV3(
     : await confirmSettledByTree(connection, settleCommitmentHex)
 
   if (settled) {
-    // Mark inputs spent and record the change note locally. Deliberately WITHOUT
-    // a leaf index: the index can only be predicted from a pre-settlement tree
-    // snapshot, and any deposit or transact that lands in the prove+ingress
-    // window shifts the real slot. A wrong index was persisted and then trusted
-    // forever by ensureLeafIndex, so the change output built a membership path to
-    // the wrong slot and became permanently unspendable. Storing only the
-    // commitment forces ensureLeafIndex to locate the note by commitment against
-    // a fresh rebuild at spend time, which is authoritative. (Deposit notes keep
-    // their index because it comes from the on-chain event and never moves.)
-    for (const note of inputs) {
-      await markNoteSpentByIdentity(shieldedAddress, note)
-    }
+    // Persist the change note BEFORE marking inputs spent so an interrupted
+    // write never marks inputs spent while losing the change blinding.
+    // Deliberately WITHOUT a leaf index: storing only the commitment forces
+    // ensureLeafIndex to locate the note by commitment against a fresh rebuild
+    // at spend time.
     if (change > 0n) {
       await addNote(shieldedAddress, {
         amount: change.toString(),
@@ -380,6 +399,9 @@ export async function spendV3(
         source: "transfer",
         commitment: await noteCommitment(change, ownPubHex, changeBlind)
       })
+    }
+    for (const note of inputs) {
+      await markNoteSpentByIdentity(shieldedAddress, note)
     }
   }
 

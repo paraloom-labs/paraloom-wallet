@@ -248,4 +248,25 @@ describe("trial decryption", () => {
     bundle.set(ct, 57)
     expect(tryDecryptNote(RECIPIENT_SECRET, hex(bundle))).toBeNull()
   })
+
+  it("rejects malformed hex, non-32-byte encryption fields, and out-of-range u64 amounts", () => {
+    expect(tryDecryptNote(RECIPIENT_SECRET, "01" + "zz".repeat(144))).toBeNull()
+    expect(tryDecryptNote(RECIPIENT_SECRET, V1_BUNDLE_HEX + "00")).toBeNull()
+
+    expect(() =>
+      encryptNote("aa".repeat(31), NOTE)
+    ).toThrow(/recipientBoxPubHex must be 32 bytes/)
+    expect(() =>
+      encryptNote(RECIPIENT_PUB_HEX, { ...NOTE, blindingHex: "aa".repeat(31) })
+    ).toThrow(/blindingHex must be 32 bytes/)
+    expect(() =>
+      encryptNote(RECIPIENT_PUB_HEX, { ...NOTE, assetIdHex: "00".repeat(33) })
+    ).toThrow(/assetIdHex must be 32 bytes/)
+    expect(() =>
+      encryptNote(RECIPIENT_PUB_HEX, { ...NOTE, amount: -1n })
+    ).toThrow(/note amount must be a u64 bigint/)
+    expect(() =>
+      encryptNote(RECIPIENT_PUB_HEX, { ...NOTE, amount: 1n << 64n })
+    ).toThrow(/note amount must be a u64 bigint/)
+  })
 })

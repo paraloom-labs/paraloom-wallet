@@ -8,7 +8,7 @@ import { deriveKeypairFromSeed, decryptWallet, decryptSeedPhrase, deriveBoxKeypa
 import { getStoredWallet } from "~lib/storage/secure"
 import type { Account } from "~lib/store/walletStore"
 import { getConnection, deposit, getSolBalance, solanaAddress, solanaAddressToBytes } from "~lib/paraloom/bridge"
-import { addNote, getNotes, markNoteSpent, shieldedBalance, shieldedTokenBalances, type ShieldedNote } from "~lib/paraloom/notes"
+import { addNote, formatExactUnits, getNotes, markNoteSpent, shieldedBalance, shieldedTokenBalances, type ShieldedNote } from "~lib/paraloom/notes"
 
 // Known shielded SPL tokens for display; unknown mints fall back to a truncated
 // mint and raw base units.
@@ -152,6 +152,7 @@ export function Home({ onLock }: HomeProps) {
   const [showSeedModal, setShowSeedModal] = useState(false)
   const [settingsPassword, setSettingsPassword] = useState("")
   const [settingsPasswordError, setSettingsPasswordError] = useState("")
+  const [settingsPasswordAttempts, setSettingsPasswordAttempts] = useState(0)
   const [revealedPK, setRevealedPK] = useState<string | null>(null)
   const [pkVisible, setPkVisible] = useState(false)
   const [revealedSeed, setRevealedSeed] = useState<string | null>(null)
@@ -160,6 +161,7 @@ export function Home({ onLock }: HomeProps) {
   const [connectedSites, setConnectedSites] = useState<string[]>([])
 
   const autoLockRef = useRef<HTMLDivElement>(null)
+  const loadIdRef = useRef(0)
 
   // Load settings on mount
   useEffect(() => {
@@ -286,35 +288,45 @@ export function Home({ onLock }: HomeProps) {
 
   async function loadBalances() {
     if (!wallet) return
+    const loadId = ++loadIdRef.current
+    const activeAddress = wallet.shieldedAddress
+    const activePublicKey = wallet.publicKey
+    const activeSecretKey = wallet.secretKey
+    const activeSpendPrivkey = wallet.spendPrivkey
+    const activeNetwork = network
     try {
-      const sol = await getSolBalance(getConnection(network), wallet.publicKey)
+      const sol = await getSolBalance(getConnection(activeNetwork), activePublicKey)
+      if (loadId !== loadIdRef.current) return
       setSolBalance(sol)
     } catch {
       // RPC unreachable — leave the last known balance in place
     }
+    if (loadId !== loadIdRef.current) return
     // Best-effort scan for received transfer notes (#196) before reading the
     // balance, so discovered notes are included. Swallowed if the transfer
     // node is unreachable — the shielded balance still reflects local notes.
     try {
-      const boxSecret = deriveBoxKeypair(wallet.secretKey).secretKey
+      const boxSecret = deriveBoxKeypair(activeSecretKey).secretKey
       await scanForNotes(
-        wallet.shieldedAddress,
+        activeAddress,
         boxSecret,
-        Buffer.from(wallet.spendPrivkey).toString("hex")
+        Buffer.from(activeSpendPrivkey).toString("hex")
       )
     } catch {
       // transfer node down / no scan endpoint — ignore
     }
+    if (loadId !== loadIdRef.current) return
     // Recover any re-shield whose deposit landed on-chain but whose note was
     // never persisted (or whose deposit never ran but the token is still at the
     // fresh address). Runs directly in the popup — no service-worker relay — so
     // it always fires when the wallet is opened, and the reads below then reflect
     // the recovered shielded balance.
     try {
-      await recoverReshields(getConnection(network), wallet.shieldedAddress)
+      await recoverReshields(getConnection(activeNetwork), activeAddress)
     } catch {
       // best-effort — the reads below still show whatever is already local
     }
+    if (loadId !== loadIdRef.current) return
     // Resolve stranded swap rows so Activity stops showing settled swaps as
     // "Pending" forever. Private swaps are mainnet-only, so this always runs
     // against the mainnet archival RPC regardless of the selected network. It
@@ -323,27 +335,38 @@ export function Home({ onLock }: HomeProps) {
     try {
       const resolved = await reconcileSwapOutputs(
         getConnection("mainnet-beta"),
-        wallet.shieldedAddress
+        activeAddress
       )
-      if (resolved > 0) {
+      if (resolved > 0 && loadId === loadIdRef.current) {
         listSwapOutputs().then(setSwapOutputs).catch(() => {})
       }
     } catch {
       // best-effort
     }
+    if (loadId !== loadIdRef.current) return
     try {
-      setShieldedLamports(await shieldedBalance(wallet.shieldedAddress))
-      setShieldedTokens(await shieldedTokenBalances(wallet.shieldedAddress))
-      setNotes((await getNotes(wallet.shieldedAddress)).slice().reverse())
+      const [shLamports, shTokens, acctNotes] = await Promise.all([
+        shieldedBalance(activeAddress),
+        shieldedTokenBalances(activeAddress),
+        getNotes(activeAddress)
+      ])
+      if (loadId !== loadIdRef.current) return
+      setShieldedLamports(shLamports)
+      setShieldedTokens(shTokens)
+      setNotes(acctNotes.slice().reverse())
     } catch {
       // storage read failed — ignore
     }
   }
 
   useEffect(() => {
+    setSolBalance(0n)
+    setShieldedLamports(0n)
+    setShieldedTokens({})
+    setNotes([])
     loadBalances()
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [wallet, network])
+  }, [wallet?.shieldedAddress, network])
 
   // Clear a stale "pending" swap row the reconciler could not account for. The
   // funds are already safe (re-shielded into the pool, or the input note was
@@ -593,34 +616,54 @@ export function Home({ onLock }: HomeProps) {
 
   async function handleExportPK() {
     setSettingsPasswordError("")
+    const stored = await getStoredWallet()
+    if (!stored) {
+      setSettingsPasswordError("No wallet found")
+      return
+    }
     try {
-      const stored = await getStoredWallet()
-      if (!stored) throw new Error("No wallet found")
       const isLegacy = (stored.kdfVersion ?? 0) < KDF_VERSION_SCRYPT
       await decryptWallet(stored.encryptedData, settingsPassword, isLegacy)
       // Password correct — show the secret key as hex
       const hexKey = Buffer.from(wallet!.secretKey).toString("hex")
+      setSettingsPasswordAttempts(0)
       setRevealedPK(hexKey)
       setPkVisible(false)
       setShowPKModal(false)
       setSettingsPassword("")
     } catch {
-      setSettingsPasswordError("Incorrect password")
+      const next = settingsPasswordAttempts + 1
+      setSettingsPasswordAttempts(next)
+      if (next >= 5) {
+        await handleLock()
+        return
+      }
+      setSettingsPasswordError(`Incorrect password (${5 - next} attempts remaining)`)
     }
   }
 
   async function handleShowSeed() {
     setSettingsPasswordError("")
+    const stored = await getStoredWallet()
+    if (!stored?.encryptedSeedPhrase) {
+      setSettingsPasswordError("No seed phrase stored")
+      return
+    }
     try {
-      const stored = await getStoredWallet()
-      if (!stored?.encryptedSeedPhrase) throw new Error("No seed phrase stored")
       const isLegacy = (stored.kdfVersion ?? 0) < KDF_VERSION_SCRYPT
       const phrase = decryptSeedPhrase(stored.encryptedSeedPhrase, settingsPassword, isLegacy)
+      setSettingsPasswordAttempts(0)
       setRevealedSeed(phrase)
       setShowSeedModal(false)
       setSettingsPassword("")
     } catch {
-      setSettingsPasswordError("Incorrect password")
+      const next = settingsPasswordAttempts + 1
+      setSettingsPasswordAttempts(next)
+      if (next >= 5) {
+        await handleLock()
+        return
+      }
+      setSettingsPasswordError(`Incorrect password (${5 - next} attempts remaining)`)
     }
   }
 
@@ -892,12 +935,17 @@ export function Home({ onLock }: HomeProps) {
         ) : bottomTab === "activity" ? (
           <div className="activity-content">
             {(() => {
-              // Only real deposits belong in the feed. The zero-value change/
-              // filler notes a transact emits carry an empty signature, so
-              // rendering them all under key="" collided React keys.
-              const deposits = notes.filter(
-                (n) => n.source === "deposit" && Number(n.amount) > 0
-              )
+              // Include positive-amount deposits and received/change transfer notes.
+              const deposits = notes.filter((n) => {
+                try {
+                  return (
+                    (n.source === "deposit" || n.source === "transfer") &&
+                    BigInt(n.amount) > 0n
+                  )
+                } catch {
+                  return false
+                }
+              })
               const USDC_MINT = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"
               // Wrapped-SOL mint: the swaps app sends this as the outputMint for a
               // SOL output, so a token->SOL buy must be shown (and scaled) as SOL.
@@ -1736,7 +1784,7 @@ export function Home({ onLock }: HomeProps) {
                         <button
                           type="button"
                           className="label-max"
-                          onClick={() => setWithdrawAmount(String(Number(maxOne) / 1e9))}
+                          onClick={() => setWithdrawAmount(formatExactUnits(maxOne, 9))}
                         >
                           Max {(Number(maxOne) / 1e9).toFixed(4)} SOL
                         </button>
@@ -1949,7 +1997,7 @@ export function Home({ onLock }: HomeProps) {
                   <button
                     type="button"
                     className="max-button"
-                    onClick={() => setAmount(formatBalance(currentToken.balance, currentToken.decimals))}
+                    onClick={() => setAmount(formatExactUnits(currentToken.balance, currentToken.decimals))}
                   >
                     Max
                   </button>

@@ -199,4 +199,14 @@ describe("note storage", () => {
     await addNote(ACCOUNT, deposit({ signature: "s2", spent: true }))
     expect(await shieldedBalance(ACCOUNT)).toBe(1000n)
   })
+
+  it("formats exact BigInt base units without float or .toFixed(4) upward rounding (#242)", async () => {
+    const { formatExactUnits } = await import("~lib/paraloom/notes")
+    // 1.00005 SOL must not round up to "1.0001"
+    expect(formatExactUnits(1_000_050_000n, 9)).toBe("1.00005")
+    // Large u64 > Number.MAX_SAFE_INTEGER preserves all 9 decimal places
+    expect(formatExactUnits(9_007_199_254_740_993n, 9)).toBe("9007199.254740993")
+    expect(formatExactUnits(0n, 9)).toBe("0")
+    expect(formatExactUnits(2_000_000_000n, 9)).toBe("2")
+  })
 })

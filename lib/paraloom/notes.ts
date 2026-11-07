@@ -154,3 +154,16 @@ export async function shieldedTokenBalances(
   }
   return byMint
 }
+
+// Format a BigInt base-unit balance into an exact decimal string without float
+// rounding or `.toFixed(4)` upward rounding (used for Max buttons).
+export function formatExactUnits(balance: bigint, decimals: number): string {
+  if (balance <= 0n) return "0"
+  if (decimals <= 0) return balance.toString()
+  const base = 10n ** BigInt(decimals)
+  const whole = balance / base
+  const frac = balance % base
+  if (frac === 0n) return whole.toString()
+  const fracStr = frac.toString().padStart(decimals, "0").replace(/0+$/, "")
+  return `${whole.toString()}.${fracStr}`
+}

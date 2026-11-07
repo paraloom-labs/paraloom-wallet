@@ -1,4 +1,5 @@
 import { useState, useMemo } from "react"
+import * as bip39 from "bip39"
 import {
   deriveKeypairFromSeed,
   encryptWallet,
@@ -24,14 +25,26 @@ function pickRandom(count: number, max: number): number[] {
   return indices.slice(0, count).sort((a, b) => a - b)
 }
 
-// Pick N decoy words that are NOT in the correct answers
-function pickDecoys(correctWord: string, allWords: string[], count: number): string[] {
-  const others = allWords.filter(w => w !== correctWord)
-  for (let i = others.length - 1; i > 0; i--) {
+// Pick N decoy words that are NOT in the correct answers and contain no duplicates
+export function pickDecoys(correctWord: string, allWords: string[], count: number): string[] {
+  const uniqueOthers = Array.from(new Set(allWords.filter(w => w !== correctWord)))
+  for (let i = uniqueOthers.length - 1; i > 0; i--) {
     const j = Math.floor(Math.random() * (i + 1));
-    [others[i], others[j]] = [others[j], others[i]]
+    [uniqueOthers[i], uniqueOthers[j]] = [uniqueOthers[j], uniqueOthers[i]]
   }
-  return others.slice(0, count)
+  const decoys = uniqueOthers.slice(0, count)
+  if (decoys.length < count) {
+    const wordlist = bip39.wordlists?.english ?? []
+    const chosen = new Set([correctWord, ...decoys])
+    for (let i = 0; i < wordlist.length && decoys.length < count; i++) {
+      const candidate = wordlist[Math.floor(Math.random() * wordlist.length)]
+      if (!chosen.has(candidate)) {
+        chosen.add(candidate)
+        decoys.push(candidate)
+      }
+    }
+  }
+  return decoys
 }
 
 export function Onboarding({ onComplete }: OnboardingProps) {
@@ -357,9 +370,9 @@ export function Onboarding({ onComplete }: OnboardingProps) {
                       <span className="verify-label-progress">{progress}/{hiddenIndices.length}</span>
                     </div>
                     <div className="verify-options">
-                      {(verifyOptions[currentWordIdx] || []).map((option) => (
+                      {(verifyOptions[currentWordIdx] || []).map((option, optIdx) => (
                         <button
-                          key={option}
+                          key={`${currentWordIdx}-${option}-${optIdx}`}
                           className="verify-option"
                           onClick={() => handleSelectWord(currentWordIdx, option)}
                         >

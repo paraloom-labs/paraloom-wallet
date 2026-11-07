@@ -15,6 +15,11 @@ export interface ConfirmDeps {
   now?: () => number
 }
 
+function normalizeHex(h: string): string {
+  const s = h.trim().toLowerCase()
+  return s.startsWith("0x") ? s.slice(2) : s
+}
+
 // Poll `fetchLeaves` until `commitmentHex` is among the leaves (→ true) or the
 // timeout elapses (→ false). A throw from `fetchLeaves` is treated as a transient
 // RPC error and retried until the deadline, never as a settlement failure.
@@ -27,16 +32,19 @@ export async function confirmCommitmentInTree(
 ): Promise<boolean> {
   const sleep = deps.sleep ?? ((ms: number) => new Promise((r) => setTimeout(r, ms)))
   const now = deps.now ?? (() => Date.now())
+  const target = normalizeHex(commitmentHex)
+  const effectivePollMs = Number.isFinite(pollMs) && pollMs > 0 ? pollMs : 1_000
   const deadline = now() + timeoutMs
   for (;;) {
     try {
       const leaves = await fetchLeaves()
-      if (leaves.some((l) => l.commitmentHex === commitmentHex)) return true
+      if (leaves.some((l) => normalizeHex(l.commitmentHex) === target)) return true
     } catch {
       // A transient RPC error mid-rebuild is not a settlement failure — keep
       // polling until the deadline rather than declaring the spend unsettled.
     }
-    if (now() >= deadline) return false
-    await sleep(pollMs)
+    const remaining = deadline - now()
+    if (remaining <= 0) return false
+    await sleep(Math.min(effectivePollMs, remaining))
   }
 }

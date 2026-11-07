@@ -80,6 +80,21 @@ function selectSolWithdrawNotes(
   return null
 }
 
+// Parse a SOL decimal amount string into whole lamports.
+// Returns null for invalid, non-finite (e.g. Infinity, NaN), non-positive, or sub-lamport (< 1 lamport) inputs.
+export function parseSolToLamports(amountStr: string): bigint | null {
+  const trimmed = amountStr.trim()
+  if (!trimmed) return null
+  const sol = Number(trimmed)
+  if (!Number.isFinite(sol) || sol <= 0 || sol < 1e-9) return null
+  try {
+    const lamports = BigInt(Math.round(sol * 1e9))
+    return lamports > 0n ? lamports : null
+  } catch {
+    return null
+  }
+}
+
 interface Token {
   symbol: string
   name: string
@@ -366,12 +381,11 @@ export function Home({ onLock }: HomeProps) {
 
   async function handleDeposit() {
     if (!wallet) return
-    const sol = Number(depositAmount)
-    if (!sol || sol <= 0) {
+    const lamports = parseSolToLamports(depositAmount)
+    if (!lamports) {
       showToast("Enter a valid amount", "error")
       return
     }
-    const lamports = BigInt(Math.round(sol * 1e9))
     if (lamports > solBalance) {
       showToast("Amount exceeds your SOL balance", "error")
       return
@@ -408,12 +422,11 @@ export function Home({ onLock }: HomeProps) {
       showToast("Invalid Solana address", "error")
       return
     }
-    const amt = Number(withdrawAmount)
-    if (!amt || amt <= 0) {
+    const lamports = parseSolToLamports(withdrawAmount)
+    if (!lamports) {
       showToast("Enter an amount to withdraw", "error")
       return
     }
-    const lamports = BigInt(Math.round(amt * 1e9))
     // Pick up to 2 spendable notes covering the amount; the wallet returns the
     // change as a new note, so the user withdraws a chosen amount instead of one
     // whole note. A single withdraw settles at most 2 notes.
@@ -456,7 +469,7 @@ export function Home({ onLock }: HomeProps) {
         }
       )
       if (settled) {
-        showToast(`Withdrew ${amt.toFixed(4)} SOL to Solana`, "success")
+        showToast(`Withdrew ${(Number(lamports) / 1e9).toFixed(4)} SOL to Solana`, "success")
         setShowWithdrawModal(false)
         setWithdrawAddress("")
         setWithdrawAmount("")
@@ -487,12 +500,11 @@ export function Home({ onLock }: HomeProps) {
       showToast("Cannot transfer to your own address", "error")
       return
     }
-    const sol = parseFloat(transferAmount)
-    if (!Number.isFinite(sol) || sol <= 0) {
+    const amount = parseSolToLamports(transferAmount)
+    if (!amount) {
       showToast("Enter a valid amount", "error")
       return
     }
-    const amount = BigInt(Math.round(sol * 1e9))
 
     // Circuit v3 (#350): spend 1 or 2 notes; change comes back as a new note
     // (audit #16), so partial amounts work from a single note.
@@ -1766,7 +1778,7 @@ export function Home({ onLock }: HomeProps) {
                   withdrawing ||
                   !withdrawAddress.trim() ||
                   !withdrawAmount ||
-                  Number(withdrawAmount) <= 0 ||
+                  (parseSolToLamports(withdrawAmount) ?? 0n) <= 0n ||
                   spendableSolNotes(notes).length === 0
                 }
                 onClick={handleWithdraw}

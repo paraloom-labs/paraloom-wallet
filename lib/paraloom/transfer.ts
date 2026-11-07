@@ -15,6 +15,7 @@ import {
   markNoteSpentByCommitment,
   type ShieldedNote
 } from "./notes"
+import { validateMerklePathResponse } from "./withdraw"
 
 interface MerklePathResponse {
   root: string
@@ -43,7 +44,7 @@ async function fetchPath(commitment: string): Promise<MerklePathResponse> {
   if (!res.ok) {
     throw new Error(`Path server error (${res.status})`)
   }
-  return (await res.json()) as MerklePathResponse
+  return validateMerklePathResponse(await res.json())
 }
 
 // Send `amount` lamports from two owned input notes to `recipientShieldedAddress`,
@@ -58,6 +59,31 @@ export async function transfer(
   inputs: [ShieldedNote, ShieldedNote],
   spendPrivkeyHex: string
 ): Promise<TransferResult> {
+  if (amount <= 0n) {
+    throw new Error("Transfer amount must be greater than 0")
+  }
+  if (inputs.length !== 2) {
+    throw new Error("Transfer requires exactly 2 input notes")
+  }
+  for (const note of inputs) {
+    if (note.spent) {
+      throw new Error("Cannot spend an already-spent note")
+    }
+    if (BigInt(note.amount) <= 0n) {
+      throw new Error("Input note amount must be greater than 0")
+    }
+    const assetId = note.assetId || NATIVE_ASSET_HEX
+    if (assetId !== NATIVE_ASSET_HEX || note.mint) {
+      throw new Error("v2 transfer only supports native SOL notes")
+    }
+  }
+  if (
+    inputs[0].blinding === inputs[1].blinding ||
+    (inputs[0].commitment && inputs[0].commitment === inputs[1].commitment) ||
+    (inputs[0].signature && inputs[0].signature === inputs[1].signature)
+  ) {
+    throw new Error("Transfer input notes must be distinct")
+  }
   const inputTotal = inputs.reduce((sum, n) => sum + BigInt(n.amount), 0n)
   if (inputTotal < amount) {
     throw new Error("Selected notes do not cover the transfer amount")
@@ -76,11 +102,12 @@ export async function transfer(
   let root = ""
   const proofInputs = []
   for (const note of inputs) {
+    const assetId = note.assetId || NATIVE_ASSET_HEX
     const commitment = await noteCommitmentV2(
       BigInt(note.amount),
       spendPrivkeyHex,
       note.blinding,
-      note.assetId
+      assetId
     )
     const pathRes = await fetchPath(commitment)
     root = pathRes.root

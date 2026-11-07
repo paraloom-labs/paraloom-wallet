@@ -22,16 +22,22 @@ export const config: PlasmoCSConfig = {
 
 const REQ = "paraloom:request"
 const RES = "paraloom:response"
+const RELAY_TIMEOUT_MS = 180_000
 
 let counter = 0
 
 function relay(type: string, payload?: Record<string, unknown>): Promise<any> {
   return new Promise((resolve, reject) => {
     const id = ++counter
+    const timer = setTimeout(() => {
+      window.removeEventListener("message", onMessage)
+      reject(new Error(`Wallet relay timed out (${type})`))
+    }, RELAY_TIMEOUT_MS)
     const onMessage = (event: MessageEvent) => {
-      if (event.source !== window) return
+      if (event.source !== window || event.origin !== window.location.origin) return
       const data = event.data
       if (!data || data.channel !== RES || data.id !== id) return
+      clearTimeout(timer)
       window.removeEventListener("message", onMessage)
       if (data.error) reject(new Error(data.error))
       else resolve(data.result)
@@ -42,7 +48,7 @@ function relay(type: string, payload?: Record<string, unknown>): Promise<any> {
 }
 
 if (!(window as any).paraloom) {
-  ;(window as any).paraloom = {
+  const provider = Object.freeze({
     // Version marker so we can confirm from the page console which build is
     // actually injected (two extensions or a stale one caused confusion).
     __version: "1.5.6",
@@ -155,7 +161,12 @@ if (!(window as any).paraloom) {
       const r = await relay("RESUME_SWAPS").catch(() => null)
       return r?.recovered ?? 0
     }
-  }
+  })
+  Object.defineProperty(window, "paraloom", {
+    value: provider,
+    writable: false,
+    configurable: false
+  })
   console.log("[paraloom] wallet bridge ready (main world)")
 }
 

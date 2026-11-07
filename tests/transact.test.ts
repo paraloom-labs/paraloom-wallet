@@ -363,3 +363,66 @@ describe("refusing an unsafe tree", () => {
     await expect(fetchV3Leaves(connection)).rejects.toThrow(/leaf history may be incomplete/)
   })
 })
+
+describe("v2 withdraw and transfer validation (#241)", () => {
+  it("validates MerklePathResponse and rejects spent/duplicate/SPL notes in withdraw and transfer", async () => {
+    const { validateMerklePathResponse, withdraw } = await import("~lib/paraloom/withdraw")
+    const { transfer } = await import("~lib/paraloom/transfer")
+
+    expect(() => validateMerklePathResponse({ root: "bad", path: [], indices: [] })).toThrow(
+      /Invalid Merkle root/
+    )
+    expect(() =>
+      validateMerklePathResponse({
+        root: "aa".repeat(32),
+        path: ["bb".repeat(32)],
+        indices: [true]
+      })
+    ).toThrow(/32 levels/)
+
+    const validPath = validateMerklePathResponse({
+      root: "aa".repeat(32),
+      path: Array.from({ length: 32 }, () => "bb".repeat(32)),
+      indices: Array.from({ length: 32 }, () => true)
+    })
+    expect(validPath.path).toHaveLength(32)
+
+    const baseNote = {
+      amount: "1000000",
+      blinding: "11".repeat(32),
+      assetId: "",
+      signature: "sig1",
+      createdAt: 1,
+      spent: false
+    }
+
+    await expect(
+      withdraw({ ...baseNote, spent: true }, "11111111111111111111111111111111", "22".repeat(32))
+    ).rejects.toThrow(/already-spent/)
+
+    await expect(
+      transfer(
+        "acct",
+        "paraloom1" + "11".repeat(64) + "00000000",
+        "paraloom1" + "22".repeat(64) + "00000000",
+        500_000n,
+        [baseNote, baseNote],
+        "22".repeat(32)
+      )
+    ).rejects.toThrow(/distinct/)
+
+    await expect(
+      transfer(
+        "acct",
+        "paraloom1" + "11".repeat(64) + "00000000",
+        "paraloom1" + "22".repeat(64) + "00000000",
+        500_000n,
+        [
+          { ...baseNote, assetId: "cc".repeat(32), mint: "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v" },
+          { ...baseNote, blinding: "33".repeat(32), signature: "sig2" }
+        ],
+        "22".repeat(32)
+      )
+    ).rejects.toThrow(/native SOL/)
+  })
+})

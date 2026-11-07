@@ -38,14 +38,19 @@ const ALLOWED_TYPES = new Set([
   "RESUME_SWAPS"
 ])
 
+function isPlainObject(v: unknown): v is Record<string, unknown> {
+  return typeof v === "object" && v !== null && !Array.isArray(v)
+}
+
 window.addEventListener("message", (event: MessageEvent) => {
-  if (event.source !== window) return
+  if (event.source !== window || event.origin !== window.location.origin) return
   const data = event.data
-  if (!data || data.channel !== REQ || typeof data.id !== "number") return
+  if (!data || data.channel !== REQ || !Number.isSafeInteger(data.id)) return
   if (typeof data.type !== "string" || !ALLOWED_TYPES.has(data.type)) return
+  if (data.payload !== undefined && !isPlainObject(data.payload)) return
 
   const reply = (result?: unknown, error?: string) => {
-    window.postMessage({ channel: RES, id: data.id, result, error }, event.origin || "*")
+    window.postMessage({ channel: RES, id: data.id, result, error }, window.location.origin)
   }
 
   try {
@@ -53,8 +58,9 @@ window.addEventListener("message", (event: MessageEvent) => {
     // a `type` key smuggled inside `payload` cannot override the one we just
     // validated against ALLOWED_TYPES and cross the privilege boundary as a
     // different message (#736.2).
+    const safePayload = isPlainObject(data.payload) ? data.payload : {}
     chrome.runtime.sendMessage(
-      { ...(data.payload || {}), type: data.type },
+      { ...safePayload, type: data.type },
       (response) => {
         const err = chrome.runtime.lastError
         if (err) reply(undefined, err.message)

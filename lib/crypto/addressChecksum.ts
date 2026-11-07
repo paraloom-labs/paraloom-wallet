@@ -28,6 +28,7 @@ export function withChecksum(bodyHex: string): string {
 // (128-hex body, no checksum) is rejected by design: accepting it would let the
 // exact typo this guards against back in.
 export function parseShieldedAddress(addr: string): string | null {
+  if (typeof addr !== "string") return null
   if (!addr.startsWith("paraloom1")) return null
   const rest = addr.slice("paraloom1".length)
   if (rest.length !== SHIELDED_BODY_HEX + SHIELDED_CHECKSUM_HEX) return null
@@ -35,6 +36,16 @@ export function parseShieldedAddress(addr: string): string | null {
   const body = rest.slice(0, SHIELDED_BODY_HEX)
   const csum = rest.slice(SHIELDED_BODY_HEX).toLowerCase()
   if (shieldedChecksum(body) !== csum) return null
+
+  const boxPubHex = body.slice(0, 64)
+  const spendPubHex = body.slice(64, 128)
+
+  // Reject all-zero box pubkey or spend pubkey
+  if (/^0+$/.test(boxPubHex) || /^0+$/.test(spendPubHex)) return null
+
+  // Reject identical box and spend pubkeys
+  if (boxPubHex.toLowerCase() === spendPubHex.toLowerCase()) return null
+
   return body
 }
 

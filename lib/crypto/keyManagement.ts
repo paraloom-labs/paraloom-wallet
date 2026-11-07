@@ -1,15 +1,13 @@
-import * as bip39 from "bip39"
-import { sha256 } from "@noble/hashes/sha256"
 import { scrypt } from "@noble/hashes/scrypt"
+import { sha256 } from "@noble/hashes/sha256"
 import { randomBytes } from "@noble/hashes/utils"
-
-import { withChecksum } from "./addressChecksum"
-import * as nacl from "tweetnacl"
-
 // Circuit v3 (#350): the address carries the circom-Poseidon spend pubkey the
 // v3 note commitments bind to. Addresses derived before the v3 cutover used
 // the old sponge Poseidon and died with the pool reset.
 import { v3NotePubkey as deriveSpendPub } from "~lib/prover"
+import * as bip39 from "bip39"
+import * as nacl from "tweetnacl"
+import { parseShieldedAddress, withChecksum } from "./addressChecksum"
 
 // scrypt parameters for password-based key derivation.
 // N=2^15 / r=8 / p=1 → ~100ms in-popup, 32 MiB memory-hard work factor.
@@ -77,12 +75,20 @@ export async function deriveShieldedAddress(
 
 /** The box (encryption) public key half of a v2 shielded address, hex. */
 export function addressBoxPubHex(shieldedAddress: string): string {
-  return shieldedAddress.replace(/^paraloom1/, "").slice(0, 64)
+  const body = parseShieldedAddress(shieldedAddress)
+  if (!body) {
+    throw new Error("Invalid shielded address")
+  }
+  return body.slice(0, 64)
 }
 
 /** The spend (commitment-binding) public key half of a v2 shielded address, hex. */
 export function addressSpendPubHex(shieldedAddress: string): string {
-  return shieldedAddress.replace(/^paraloom1/, "").slice(64, 128)
+  const body = parseShieldedAddress(shieldedAddress)
+  if (!body) {
+    throw new Error("Invalid shielded address")
+  }
+  return body.slice(64, 128)
 }
 
 export interface EncryptedWallet {
@@ -202,10 +208,7 @@ function deriveKey(password: string, salt: Uint8Array, legacy: boolean): Uint8Ar
  * Encrypt wallet with password.
  * Key derivation: scrypt. Cipher: NaCl secretbox (XSalsa20-Poly1305).
  */
-export function encryptWallet(
-  keypair: WalletKeyPair,
-  password: string
-): EncryptedWallet {
+export function encryptWallet(keypair: WalletKeyPair, password: string): EncryptedWallet {
   // Generate random salt
   const salt = randomBytes(32)
 

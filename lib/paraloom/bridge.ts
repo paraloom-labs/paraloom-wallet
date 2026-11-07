@@ -2,15 +2,13 @@ import {
   Connection,
   Keypair,
   PublicKey,
+  sendAndConfirmTransaction,
   SystemProgram,
   Transaction,
-  TransactionInstruction,
-  sendAndConfirmTransaction
+  TransactionInstruction
 } from "@solana/web3.js"
-
 import { addressSpendPubHex, type WalletKeyPair } from "~lib/crypto/keyManagement"
 import { NATIVE_ASSET_HEX } from "~lib/prover"
-
 import {
   ASSET_CONFIG_SEED,
   ASSET_VAULT_SEED,
@@ -33,10 +31,7 @@ export type Network = "mainnet-beta" | "devnet"
 // JSON-RPC reads are idempotent, and sendTransaction is deduped by signature, so
 // re-issuing the same request is safe. 4xx is returned as-is (a real client
 // error, not worth retrying).
-async function retryingFetch(
-  input: RequestInfo | URL,
-  init?: RequestInit
-): Promise<Response> {
+async function retryingFetch(input: RequestInfo | URL, init?: RequestInit): Promise<Response> {
   let lastErr: unknown
   for (let attempt = 0; attempt < 4; attempt++) {
     try {
@@ -75,8 +70,11 @@ function bridgeVaultPda(): PublicKey {
 
 // The 32-byte shielded-pool recipient carried by a `paraloom1<hex>` address.
 export function shieldedAddressToBytes(shieldedAddress: string): Uint8Array {
-  const hex = shieldedAddress.replace(/^paraloom1/, "")
-  if (hex.length !== 64) {
+  if (typeof shieldedAddress !== "string" || !shieldedAddress.startsWith("paraloom1")) {
+    throw new Error("invalid shielded address")
+  }
+  const hex = shieldedAddress.slice("paraloom1".length)
+  if (hex.length !== 64 || !/^[0-9a-fA-F]{64}$/.test(hex)) {
     throw new Error("invalid shielded address")
   }
   return Uint8Array.from(Buffer.from(hex, "hex"))
@@ -339,12 +337,7 @@ export async function createTokenAccount(
   for (let attempt = 0; attempt < 3; attempt++) {
     if (await connection.getAccountInfo(ata, "confirmed")) return ata
     try {
-      const ix = buildCreateAtaIdempotentInstruction(
-        payer.publicKey,
-        owner,
-        mint,
-        tokenProgram
-      )
+      const ix = buildCreateAtaIdempotentInstruction(payer.publicKey, owner, mint, tokenProgram)
       const tx = new Transaction().add(ix)
       const { blockhash } = await connection.getLatestBlockhash("confirmed")
       tx.recentBlockhash = blockhash
@@ -415,8 +408,7 @@ export function solanaAddress(publicKey: Uint8Array): string {
 // random and lives only in the deposit instruction data, so recover it by
 // reading that instruction back from the fresh address's own deposit tx.
 
-const B58_ALPHABET =
-  "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz"
+const B58_ALPHABET = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz"
 
 function base58Decode(s: string): Uint8Array {
   const bytes: number[] = [0]

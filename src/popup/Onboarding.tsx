@@ -1,4 +1,4 @@
-import { useState, useMemo } from "react"
+import { useState, useMemo, useRef, useEffect } from "react"
 import {
   deriveKeypairFromSeed,
   encryptWallet,
@@ -48,6 +48,40 @@ export function Onboarding({ onComplete }: OnboardingProps) {
   const [activeQuestionIdx, setActiveQuestionIdx] = useState(0)
   const { unlock, addAccount, setSeedPhrase: setSeedPhraseStore } = useWalletStore()
 
+  const timersRef = useRef<ReturnType<typeof setTimeout>[]>([])
+
+  const clearPendingTimers = () => {
+    timersRef.current.forEach((t) => clearTimeout(t))
+    timersRef.current = []
+  }
+
+  useEffect(() => {
+    return () => {
+      clearPendingTimers()
+    }
+  }, [])
+
+  function resetImportState() {
+    clearPendingTimers()
+    setSeedPhrase("")
+    setPassword("")
+    setConfirmPassword("")
+    setError("")
+  }
+
+  function resetCreateState() {
+    clearPendingTimers()
+    setCreateStep(1)
+    setSeedPhrase("")
+    setSeedRevealed(false)
+    setPassword("")
+    setConfirmPassword("")
+    setError("")
+    setVerifyAnswers({})
+    setVerifyError("")
+    setActiveQuestionIdx(0)
+  }
+
   const words = seedPhrase ? seedPhrase.split(" ") : []
 
   // Pick 3 random word indices to quiz on (memoized per seed phrase)
@@ -75,6 +109,15 @@ export function Onboarding({ onComplete }: OnboardingProps) {
   }, [seedPhrase, hiddenIndices])
 
   function handleCreateWallet() {
+    clearPendingTimers()
+    setPassword("")
+    setConfirmPassword("")
+    setError("")
+    setSeedRevealed(false)
+    setVerifyAnswers({})
+    setVerifyError("")
+    setActiveQuestionIdx(0)
+    setCreateStep(1)
     try {
       const seed = generateSeedPhrase()
       setSeedPhrase(seed)
@@ -85,6 +128,7 @@ export function Onboarding({ onComplete }: OnboardingProps) {
   }
 
   function handleSelectWord(wordIdx: number, selected: string) {
+    clearPendingTimers()
     const correct = words[wordIdx]
     if (selected === correct) {
       // Correct — save and auto-advance
@@ -96,18 +140,21 @@ export function Onboarding({ onComplete }: OnboardingProps) {
       const answeredCount = Object.keys(newAnswers).length
       if (answeredCount >= hiddenIndices.length) {
         // All correct — auto-advance to password after brief delay
-        setTimeout(() => setCreateStep(3), 600)
+        const t = setTimeout(() => setCreateStep(3), 600)
+        timersRef.current.push(t)
       } else {
         // Move to next unanswered question
         const nextIdx = hiddenIndices.findIndex(
           (idx) => !newAnswers[idx]
         )
         if (nextIdx !== -1) {
-          setTimeout(() => setActiveQuestionIdx(nextIdx), 300)
+          const t = setTimeout(() => setActiveQuestionIdx(nextIdx), 300)
+          timersRef.current.push(t)
         }
       }
     } else {
       // Wrong — shake + reset all
+      clearPendingTimers()
       setVerifyError("Wrong word! Try again from the beginning.")
       setVerifyAnswers({})
       setActiveQuestionIdx(0)
@@ -115,6 +162,7 @@ export function Onboarding({ onComplete }: OnboardingProps) {
   }
 
   async function handleSaveWallet(seed: string) {
+    clearPendingTimers()
     setError("")
 
     if (password.length < 8) {
@@ -211,7 +259,12 @@ export function Onboarding({ onComplete }: OnboardingProps) {
           <button className="button" onClick={handleCreateWallet}>
             Create New Wallet
           </button>
-          <button className="button button-secondary" onClick={() => setStep("import")}>
+          <button
+            className="button button-secondary"
+            onClick={() => {
+              resetImportState()
+              setStep("import")
+            }}>
             Import Existing Wallet
           </button>
         </div>
@@ -282,6 +335,15 @@ export function Onboarding({ onComplete }: OnboardingProps) {
                   I've Saved It — Verify
                 </button>
               )}
+
+              <button
+                className="button button-ghost"
+                onClick={() => {
+                  resetCreateState()
+                  setStep("welcome")
+                }}>
+                Back
+              </button>
             </>
           )}
 
@@ -372,18 +434,30 @@ export function Onboarding({ onComplete }: OnboardingProps) {
 
                 {/* All done — success message */}
                 {allDone && (
-                  <div className="verify-success">
-                    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-                      <path d="M22 11.08V12a10 10 0 1 1-5.93-9.14" />
-                      <polyline points="22 4 12 14.01 9 11.01" />
-                    </svg>
-                    <span>Seed phrase verified!</span>
-                  </div>
+                  <>
+                    <div className="verify-success">
+                      <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                        <path d="M22 11.08V12a10 10 0 1 1-5.93-9.14" />
+                        <polyline points="22 4 12 14.01 9 11.01" />
+                      </svg>
+                      <span>Seed phrase verified!</span>
+                    </div>
+
+                    <button
+                      className="button"
+                      onClick={() => {
+                        clearPendingTimers()
+                        setCreateStep(3)
+                      }}>
+                      Continue
+                    </button>
+                  </>
                 )}
 
                 <button
                   className="button button-ghost"
                   onClick={() => {
+                    clearPendingTimers()
                     setCreateStep(1)
                     setVerifyAnswers({})
                     setVerifyError("")
@@ -445,7 +519,10 @@ export function Onboarding({ onComplete }: OnboardingProps) {
 
                 <button
                   className="button button-ghost"
-                  onClick={() => setCreateStep(2)}>
+                  onClick={() => {
+                    clearPendingTimers()
+                    setCreateStep(2)
+                  }}>
                   Back
                 </button>
               </div>
@@ -515,7 +592,12 @@ export function Onboarding({ onComplete }: OnboardingProps) {
               {loading ? <><span className="spinner" /> Importing...</> : "Import Wallet"}
             </button>
 
-            <button className="button button-ghost" onClick={() => setStep("welcome")}>
+            <button
+              className="button button-ghost"
+              onClick={() => {
+                resetImportState()
+                setStep("welcome")
+              }}>
               Back
             </button>
           </div>

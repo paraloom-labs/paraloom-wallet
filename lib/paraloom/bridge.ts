@@ -2,15 +2,13 @@ import {
   Connection,
   Keypair,
   PublicKey,
+  sendAndConfirmTransaction,
   SystemProgram,
   Transaction,
-  TransactionInstruction,
-  sendAndConfirmTransaction
+  TransactionInstruction
 } from "@solana/web3.js"
-
 import { addressSpendPubHex, type WalletKeyPair } from "~lib/crypto/keyManagement"
 import { NATIVE_ASSET_HEX } from "~lib/prover"
-
 import {
   ASSET_CONFIG_SEED,
   ASSET_VAULT_SEED,
@@ -33,10 +31,7 @@ export type Network = "mainnet-beta" | "devnet"
 // JSON-RPC reads are idempotent, and sendTransaction is deduped by signature, so
 // re-issuing the same request is safe. 4xx is returned as-is (a real client
 // error, not worth retrying).
-async function retryingFetch(
-  input: RequestInfo | URL,
-  init?: RequestInit
-): Promise<Response> {
+async function retryingFetch(input: RequestInfo | URL, init?: RequestInit): Promise<Response> {
   let lastErr: unknown
   for (let attempt = 0; attempt < 4; attempt++) {
     try {
@@ -82,12 +77,23 @@ export function shieldedAddressToBytes(shieldedAddress: string): Uint8Array {
   return Uint8Array.from(Buffer.from(hex, "hex"))
 }
 
+const MAX_U64 = 0xffff_ffff_ffff_ffffn
+
 // Layout: DEPOSIT discriminator (8) | amount u64 LE (8) | recipient (32) | randomness (32).
 function depositInstructionData(
   amountLamports: bigint,
   recipient: Uint8Array,
   randomness: Uint8Array
 ): Buffer {
+  if (typeof amountLamports !== "bigint" || amountLamports <= 0n || amountLamports > MAX_U64) {
+    throw new Error("amountLamports must be a positive u64 integer")
+  }
+  if (!recipient || !(recipient instanceof Uint8Array) || recipient.length !== 32) {
+    throw new Error("recipient must be a 32-byte Uint8Array")
+  }
+  if (!randomness || !(randomness instanceof Uint8Array) || randomness.length !== 32) {
+    throw new Error("randomness must be a 32-byte Uint8Array")
+  }
   const data = new Uint8Array(8 + 8 + 32 + 32)
   data.set(DEPOSIT_DISCRIMINATOR, 0)
   new DataView(data.buffer).setBigUint64(8, amountLamports, true)
@@ -162,6 +168,15 @@ function depositSplInstructionData(
   pubkey: Uint8Array,
   blinding: Uint8Array
 ): Buffer {
+  if (typeof amount !== "bigint" || amount <= 0n || amount > MAX_U64) {
+    throw new Error("amount must be a positive u64 integer")
+  }
+  if (!pubkey || !(pubkey instanceof Uint8Array) || pubkey.length !== 32) {
+    throw new Error("pubkey must be a 32-byte Uint8Array")
+  }
+  if (!blinding || !(blinding instanceof Uint8Array) || blinding.length !== 32) {
+    throw new Error("blinding must be a 32-byte Uint8Array")
+  }
   const data = new Uint8Array(8 + 8 + 32 + 32)
   data.set(DEPOSIT_NOTE_SPL_DISCRIMINATOR, 0)
   new DataView(data.buffer).setBigUint64(8, amount, true)
@@ -339,12 +354,7 @@ export async function createTokenAccount(
   for (let attempt = 0; attempt < 3; attempt++) {
     if (await connection.getAccountInfo(ata, "confirmed")) return ata
     try {
-      const ix = buildCreateAtaIdempotentInstruction(
-        payer.publicKey,
-        owner,
-        mint,
-        tokenProgram
-      )
+      const ix = buildCreateAtaIdempotentInstruction(payer.publicKey, owner, mint, tokenProgram)
       const tx = new Transaction().add(ix)
       const { blockhash } = await connection.getLatestBlockhash("confirmed")
       tx.recentBlockhash = blockhash
@@ -415,8 +425,7 @@ export function solanaAddress(publicKey: Uint8Array): string {
 // random and lives only in the deposit instruction data, so recover it by
 // reading that instruction back from the fresh address's own deposit tx.
 
-const B58_ALPHABET =
-  "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz"
+const B58_ALPHABET = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz"
 
 function base58Decode(s: string): Uint8Array {
   const bytes: number[] = [0]

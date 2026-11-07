@@ -2,6 +2,10 @@
 // keys, then builds proofs entirely in the extension — the spend key never
 // leaves the wallet. The proving keys and wasm are bundled as assets.
 
+import wasmUrl from "url:./paraloom_prover_wasm_bg.wasm"
+import transactKeyUrl from "url:./transact_v3_proving.key"
+import transferKeyUrl from "url:./transfer_v2_proving.key"
+import keyUrl from "url:./withdraw_v2_proving.key"
 import init, {
   mint_to_asset,
   note_commitment_v2,
@@ -14,10 +18,6 @@ import init, {
   v3_note_commitment_asset,
   v3_note_pubkey
 } from "./paraloom_prover_wasm.js"
-import wasmUrl from "url:./paraloom_prover_wasm_bg.wasm"
-import keyUrl from "url:./withdraw_v2_proving.key"
-import transferKeyUrl from "url:./transfer_v2_proving.key"
-import transactKeyUrl from "url:./transact_v3_proving.key"
 
 // Native-SOL asset id (#235): all-zero 32 bytes, hex. SPL assets use the mint.
 export const NATIVE_ASSET_HEX = "00".repeat(32)
@@ -32,43 +32,104 @@ export async function assetIdForMint(mintHex: string): Promise<string> {
 }
 
 let initialized = false
+let initPromise: Promise<void> | null = null
+
 let provingKey: Uint8Array | null = null
+let provingKeyPromise: Promise<Uint8Array> | null = null
+
 let transferProvingKey: Uint8Array | null = null
-
-async function ensureInit(): Promise<void> {
-  if (!initialized) {
-    await init(wasmUrl)
-    initialized = true
-  }
-}
-
-async function ensureReady(): Promise<Uint8Array> {
-  await ensureInit()
-  if (!provingKey) {
-    const res = await fetch(keyUrl)
-    provingKey = new Uint8Array(await res.arrayBuffer())
-  }
-  return provingKey
-}
-
-async function ensureTransferReady(): Promise<Uint8Array> {
-  await ensureInit()
-  if (!transferProvingKey) {
-    const res = await fetch(transferKeyUrl)
-    transferProvingKey = new Uint8Array(await res.arrayBuffer())
-  }
-  return transferProvingKey
-}
+let transferProvingKeyPromise: Promise<Uint8Array> | null = null
 
 let transactProvingKey: Uint8Array | null = null
+let transactProvingKeyPromise: Promise<Uint8Array> | null = null
 
-async function ensureTransactReady(): Promise<Uint8Array> {
-  await ensureInit()
-  if (!transactProvingKey) {
-    const res = await fetch(transactKeyUrl)
-    transactProvingKey = new Uint8Array(await res.arrayBuffer())
+export function _resetProverForTests(): void {
+  initialized = false
+  initPromise = null
+  provingKey = null
+  provingKeyPromise = null
+  transferProvingKey = null
+  transferProvingKeyPromise = null
+  transactProvingKey = null
+  transactProvingKeyPromise = null
+}
+
+export async function ensureInit(): Promise<void> {
+  if (initialized) return
+  if (!initPromise) {
+    initPromise = (async () => {
+      try {
+        await init(wasmUrl)
+        initialized = true
+      } finally {
+        initPromise = null
+      }
+    })()
   }
-  return transactProvingKey
+  await initPromise
+}
+
+async function loadProvingKey(url: string, name: string): Promise<Uint8Array> {
+  const res = await fetch(url)
+  if (!res.ok) {
+    throw new Error(`failed to fetch ${name} proving key: HTTP ${res.status}`)
+  }
+  const buf = await res.arrayBuffer()
+  if (!buf || buf.byteLength === 0) {
+    throw new Error(`fetched ${name} proving key is empty`)
+  }
+  return new Uint8Array(buf)
+}
+
+export async function ensureReady(): Promise<Uint8Array> {
+  await ensureInit()
+  if (provingKey && provingKey.length > 0) return provingKey
+  if (!provingKeyPromise) {
+    provingKeyPromise = (async () => {
+      try {
+        const key = await loadProvingKey(keyUrl, "withdrawal")
+        provingKey = key
+        return key
+      } finally {
+        provingKeyPromise = null
+      }
+    })()
+  }
+  return await provingKeyPromise
+}
+
+export async function ensureTransferReady(): Promise<Uint8Array> {
+  await ensureInit()
+  if (transferProvingKey && transferProvingKey.length > 0) return transferProvingKey
+  if (!transferProvingKeyPromise) {
+    transferProvingKeyPromise = (async () => {
+      try {
+        const key = await loadProvingKey(transferKeyUrl, "transfer")
+        transferProvingKey = key
+        return key
+      } finally {
+        transferProvingKeyPromise = null
+      }
+    })()
+  }
+  return await transferProvingKeyPromise
+}
+
+export async function ensureTransactReady(): Promise<Uint8Array> {
+  await ensureInit()
+  if (transactProvingKey && transactProvingKey.length > 0) return transactProvingKey
+  if (!transactProvingKeyPromise) {
+    transactProvingKeyPromise = (async () => {
+      try {
+        const key = await loadProvingKey(transactKeyUrl, "transact")
+        transactProvingKey = key
+        return key
+      } finally {
+        transactProvingKeyPromise = null
+      }
+    })()
+  }
+  return await transactProvingKeyPromise
 }
 
 // Derive the spend public key (`Poseidon(privkey)`) bound into note commitments;
@@ -165,7 +226,6 @@ export async function proveTransferV2(
   )
   return JSON.parse(json) as TransferProof
 }
-
 
 // ===== circuit v3 (#350): unified transact =====
 

@@ -16,7 +16,6 @@ import {
   TransactionInstruction,
   type Keypair
 } from "@solana/web3.js"
-
 import { confirmBySignatureStatus } from "./bridge"
 import {
   BRIDGE_STATE_SEED,
@@ -36,6 +35,8 @@ function pda(seed: string): PublicKey {
   return PublicKey.findProgramAddressSync([Buffer.from(seed)], programId)[0]
 }
 
+const MAX_U64 = 0xffff_ffff_ffff_ffffn
+
 // Layout: DEPOSIT_NOTE discriminator (8) | amount u64 LE (8) | pubkey (32) |
 // blinding (32) — matching the on-chain `deposit_note(amount, pubkey, blinding)`.
 function depositNoteInstructionData(
@@ -43,6 +44,15 @@ function depositNoteInstructionData(
   pubkey: Uint8Array,
   blinding: Uint8Array
 ): Buffer {
+  if (typeof amountLamports !== "bigint" || amountLamports <= 0n || amountLamports > MAX_U64) {
+    throw new Error("amountLamports must be a positive u64 integer")
+  }
+  if (!pubkey || !(pubkey instanceof Uint8Array) || pubkey.length !== 32) {
+    throw new Error("pubkey must be a 32-byte Uint8Array")
+  }
+  if (!blinding || !(blinding instanceof Uint8Array) || blinding.length !== 32) {
+    throw new Error("blinding must be a 32-byte Uint8Array")
+  }
   const data = new Uint8Array(8 + 8 + 32 + 32)
   data.set(DEPOSIT_NOTE_DISCRIMINATOR, 0)
   new DataView(data.buffer).setBigUint64(8, amountLamports, true)
@@ -213,7 +223,9 @@ export async function fetchV3Leaves(connection: Connection): Promise<V3Leaf[]> {
       if (startsWith(payload, DEPOSIT_NOTE_EVENT_DISCRIMINATOR)) {
         const body = payload.slice(8)
         const commitment = body.slice(40, 72)
-        const leafIndex = Number(new DataView(body.buffer, body.byteOffset + 72, 8).getBigUint64(0, true))
+        const leafIndex = Number(
+          new DataView(body.buffer, body.byteOffset + 72, 8).getBigUint64(0, true)
+        )
         leaves.push({ index: leafIndex, commitmentHex: Buffer.from(commitment).toString("hex") })
         transactLeafCursor = Math.max(transactLeafCursor ?? 0, leafIndex + 1)
       } else if (startsWith(payload, DEPOSIT_NOTE_SPL_EVENT_DISCRIMINATOR)) {
@@ -289,7 +301,42 @@ export async function submitTransact(
   // `recipientHex` is the recipient token account.
   mintHex?: string
 ): Promise<TransactSubmission> {
-  const bundle = JSON.parse(proofBundleJson)
+  if (typeof proofBundleJson !== "string" || !proofBundleJson.trim()) {
+    throw new Error("proofBundleJson must be a non-empty string")
+  }
+  let bundle: any
+  try {
+    bundle = JSON.parse(proofBundleJson)
+  } catch (e) {
+    throw new Error(`invalid proof bundle JSON: ${e instanceof Error ? e.message : String(e)}`)
+  }
+  if (!bundle || typeof bundle !== "object") {
+    throw new Error("invalid proof bundle: must be an object")
+  }
+  if (
+    !Array.isArray(bundle.nullifiers) ||
+    bundle.nullifiers.length !== 2 ||
+    !bundle.nullifiers.every((n: unknown) => typeof n === "string" && n.trim().length > 0)
+  ) {
+    throw new Error("invalid proof bundle: nullifiers must be an array of 2 non-empty strings")
+  }
+  if (
+    !Array.isArray(bundle.output_commitments) ||
+    bundle.output_commitments.length !== 2 ||
+    !bundle.output_commitments.every((c: unknown) => typeof c === "string" && c.trim().length > 0)
+  ) {
+    throw new Error(
+      "invalid proof bundle: output_commitments must be an array of 2 non-empty strings"
+    )
+  }
+  if (
+    !bundle.proof ||
+    (typeof bundle.proof !== "string" && typeof bundle.proof !== "object") ||
+    (typeof bundle.proof === "string" && bundle.proof.trim().length === 0)
+  ) {
+    throw new Error("invalid proof bundle: proof must be a non-empty string or object")
+  }
+
   const body: Record<string, unknown> = {
     recipient: recipientHex,
     nullifiers: bundle.nullifiers,
@@ -311,5 +358,10 @@ export async function submitTransact(
     throw new Error(`transact ingress rejected: ${res.status} ${await res.text()}`)
   }
   const json = await res.json()
-  return { requestId: json.request_id ?? json.requestId }
+  const requestId =
+    json && typeof json === "object" ? (json.request_id ?? json.requestId) : undefined
+  if (typeof requestId !== "string" || !requestId.trim()) {
+    throw new Error("transact ingress did not return a valid request ID")
+  }
+  return { requestId }
 }

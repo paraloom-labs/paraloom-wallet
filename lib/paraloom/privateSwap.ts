@@ -24,7 +24,7 @@ import {
   VersionedTransaction
 } from "@solana/web3.js"
 
-import { assetIdForMint } from "~lib/prover"
+import { assetIdForMint, NATIVE_ASSET_HEX } from "~lib/prover"
 
 import { associatedTokenAddress, createTokenAccount, depositSpl } from "./bridge"
 import { SWAP_ROUTER_URL } from "./constants"
@@ -145,12 +145,23 @@ async function fetchWithTimeout(
 
 // Ask the routing service for an UNSIGNED swap tx, with a bounded timeout and a
 // few retries. The service holds no key; it only builds the tx for `freshPubkey`.
-async function routeSwap(
+export async function routeSwap(
   freshPubkey: string,
   outputMint: string,
   amount: bigint,
-  inputMint = "SOL"
+  inputMint = "SOL",
+  slippageBps = 100
 ): Promise<{ out_amount: number; swap_transaction: string }> {
+  if (amount <= 0n || amount > BigInt(Number.MAX_SAFE_INTEGER)) {
+    throw new Error("swap amount out of safe integer range")
+  }
+  if (
+    !Number.isInteger(slippageBps) ||
+    slippageBps < 1 ||
+    slippageBps > 10_000
+  ) {
+    throw new Error("slippageBps must be an integer between 1 and 10000")
+  }
   let lastErr: unknown
   for (let attempt = 1; attempt <= ROUTE_RETRIES; attempt++) {
     try {
@@ -163,6 +174,7 @@ async function routeSwap(
             input_mint: inputMint,
             output_mint: outputMint,
             amount: Number(amount),
+            slippage_bps: slippageBps,
             user_public_key: freshPubkey
           })
         },
@@ -173,9 +185,22 @@ async function routeSwap(
           `swap routing failed (${res.status}): ${await res.text()}`
         )
       } else {
-        return (await res.json()) as {
-          out_amount: number
-          swap_transaction: string
+        const data = (await res.json()) as {
+          out_amount?: unknown
+          swap_transaction?: unknown
+        }
+        if (
+          typeof data?.swap_transaction !== "string" ||
+          data.swap_transaction.trim().length === 0 ||
+          typeof data?.out_amount !== "number" ||
+          !Number.isFinite(data.out_amount) ||
+          data.out_amount <= 0
+        ) {
+          throw new Error("swap router returned an invalid quote or transaction")
+        }
+        return {
+          out_amount: data.out_amount,
+          swap_transaction: data.swap_transaction
         }
       }
     } catch (e) {
@@ -194,12 +219,16 @@ async function executeSwapLeg(
   connection: Connection,
   fresh: Keypair,
   outputMint: string,
-  swapLamports: bigint
+  swapLamports: bigint,
+  reshield = false,
+  slippageBps = 100
 ): Promise<{ swapSignature: string; outAmount: number }> {
   const { out_amount, swap_transaction } = await routeSwap(
     fresh.publicKey.toBase58(),
     outputMint,
-    swapLamports
+    swapLamports,
+    "SOL",
+    slippageBps
   )
   const tx = VersionedTransaction.deserialize(
     Uint8Array.from(Buffer.from(swap_transaction, "base64"))
@@ -207,6 +236,15 @@ async function executeSwapLeg(
   tx.sign([fresh])
   const swapSignature = await connection.sendRawTransaction(tx.serialize(), {
     maxRetries: 5
+  })
+  await saveSwapOutput({
+    freshAddress: fresh.publicKey.toBase58(),
+    freshSecretKeyHex: Buffer.from(fresh.secretKey).toString("hex"),
+    outputMint,
+    outAmount: out_amount,
+    swapSignature,
+    reshield,
+    createdAt: Date.now()
   })
   await waitForSwapConfirmation(connection, swapSignature)
   return { swapSignature, outAmount: out_amount }
@@ -368,7 +406,9 @@ export async function privateSwap(
   const { out_amount, swap_transaction } = await routeSwap(
     fresh.publicKey.toBase58(),
     params.outputMint,
-    swapLamports
+    swapLamports,
+    "SOL",
+    params.slippageBps ?? 100
   )
 
   // 6. Sign the swap with the fresh key locally and submit it.
@@ -391,6 +431,7 @@ export async function privateSwap(
     outputMint: params.outputMint,
     outAmount: out_amount,
     swapSignature,
+    reshield: params.reshield ?? false,
     createdAt: Date.now()
   })
 
@@ -581,7 +622,8 @@ export async function privateSwapFromToken(
     fresh.publicKey.toBase58(),
     params.outputMint,
     tokenLanded,
-    params.inputMint
+    params.inputMint,
+    params.slippageBps ?? 100
   )
   const tx = VersionedTransaction.deserialize(
     Uint8Array.from(Buffer.from(swap_transaction, "base64"))
@@ -597,6 +639,7 @@ export async function privateSwapFromToken(
     outputMint: params.outputMint,
     outAmount: out_amount,
     swapSignature,
+    reshield: params.reshield ?? false,
     createdAt: Date.now()
   })
   await waitForSwapConfirmation(connection, swapSignature)
@@ -609,15 +652,33 @@ export async function privateSwapFromToken(
   if (params.reshield && isNativeSolOutput(params.outputMint)) {
     try {
       const solBal = BigInt(await connection.getBalance(fresh.publicKey))
-      const reshieldLamports = solBal - RESHIELD_FEE_RESERVE
+      const reshieldLamports =
+        solBal > RESHIELD_FEE_RESERVE ? solBal - RESHIELD_FEE_RESERVE : 0n
       if (reshieldLamports > 0n) {
-        await depositV3(
+        const dep = await depositV3(
           connection,
           { secretKey: fresh.secretKey },
           shieldedAddress,
           spendPrivkeyHex,
           reshieldLamports
         )
+        reshielded = {
+          assetId: NATIVE_ASSET_HEX,
+          mint: "SOL",
+          amount: reshieldLamports.toString(),
+          blindingHex: "",
+          depositSignature: dep.signature
+        }
+        await saveSwapOutput({
+          freshAddress: fresh.publicKey.toBase58(),
+          freshSecretKeyHex: Buffer.from(fresh.secretKey).toString("hex"),
+          outputMint: params.outputMint,
+          outAmount: out_amount,
+          swapSignature,
+          reshield: true,
+          reshieldRecovered: true,
+          createdAt: Date.now()
+        })
       }
     } catch {
       // leave the swapped SOL as a private buy at the fresh address
@@ -680,11 +741,12 @@ export async function resumeSwapAtFreshAddress(
     connection,
     fresh,
     outputMint,
-    swapLamports
+    swapLamports,
+    reshield
   )
 
   let reshielded: ReshieldedNote | undefined
-  if (reshield && outputMint !== "SOL") {
+  if (reshield && !isNativeSolOutput(outputMint)) {
     reshielded = await reshieldToken(
       connection,
       fresh,

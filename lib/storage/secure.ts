@@ -120,10 +120,17 @@ export async function setLockState(locked: boolean): Promise<void> {
 export async function getAutoLockMinutes(): Promise<number> {
   const result = await chrome.storage.local.get(STORAGE_KEY)
   const storage = result[STORAGE_KEY] as WalletStorage | undefined
-  return storage?.autoLockMinutes ?? 60
+  const m = storage?.autoLockMinutes
+  if (typeof m !== "number" || !Number.isFinite(m) || m <= 0) {
+    return 60
+  }
+  return m
 }
 
 export async function setAutoLockMinutes(minutes: number): Promise<void> {
+  if (typeof minutes !== "number" || !Number.isFinite(minutes) || minutes <= 0) {
+    throw new Error("autoLockMinutes must be a finite positive number")
+  }
   const result = await chrome.storage.local.get(STORAGE_KEY)
   const storage = result[STORAGE_KEY] as WalletStorage
 
@@ -153,10 +160,14 @@ export async function getNetwork(): Promise<"mainnet-beta" | "devnet"> {
   // a previously stored choice (e.g. devnet for testing) is honoured.
   const result = await chrome.storage.local.get(STORAGE_KEY)
   const storage = result[STORAGE_KEY] as WalletStorage | undefined
-  return storage?.network ?? "mainnet-beta"
+  const n = storage?.network
+  return n === "mainnet-beta" || n === "devnet" ? n : "mainnet-beta"
 }
 
 export async function setNetwork(network: "mainnet-beta" | "devnet"): Promise<void> {
+  if (network !== "mainnet-beta" && network !== "devnet") {
+    throw new Error(`Invalid network: ${String(network)}`)
+  }
   const result = await chrome.storage.local.get(STORAGE_KEY)
   const storage = result[STORAGE_KEY] as WalletStorage
 

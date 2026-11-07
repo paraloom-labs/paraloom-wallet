@@ -13,34 +13,50 @@ export interface TokenPrice {
   priceChange24h: number // percent, e.g. -0.19
 }
 
+const BASE58_MINT_RE = /^[1-9A-HJ-NP-Za-km-z]{32,44}$/
+
 export async function fetchPrices(
   mints: string[]
 ): Promise<Record<string, TokenPrice>> {
-  const ids = Array.from(new Set([SOL_MINT, ...mints])).filter(Boolean)
+  const normalized = mints
+    .map((m) => (m === "SOL" ? SOL_MINT : m?.trim()))
+    .filter((m): m is string => Boolean(m) && BASE58_MINT_RE.test(m))
+  const ids = Array.from(new Set([SOL_MINT, ...normalized]))
   if (ids.length === 0) return {}
+  const ctrl = new AbortController()
+  const t = setTimeout(() => ctrl.abort(), 8000)
   try {
-    const ctrl = new AbortController()
-    const t = setTimeout(() => ctrl.abort(), 8000)
-    const res = await fetch(`${JUP_PRICE_URL}?ids=${ids.join(",")}`, {
+    const query = ids.map(encodeURIComponent).join(",")
+    const res = await fetch(`${JUP_PRICE_URL}?ids=${query}`, {
       signal: ctrl.signal
     })
-    clearTimeout(t)
     if (!res.ok) return {}
     const data = (await res.json()) as Record<
       string,
       { usdPrice?: number; priceChange24h?: number } | null
-    >
+    > | null
+    if (!data || typeof data !== "object" || Array.isArray(data)) return {}
     const out: Record<string, TokenPrice> = {}
     for (const [mint, v] of Object.entries(data)) {
-      if (v && typeof v.usdPrice === "number") {
+      if (
+        v &&
+        typeof v.usdPrice === "number" &&
+        Number.isFinite(v.usdPrice) &&
+        v.usdPrice >= 0
+      ) {
         out[mint] = {
           usdPrice: v.usdPrice,
-          priceChange24h: typeof v.priceChange24h === "number" ? v.priceChange24h : 0
+          priceChange24h:
+            typeof v.priceChange24h === "number" && Number.isFinite(v.priceChange24h)
+              ? v.priceChange24h
+              : 0
         }
       }
     }
     return out
   } catch {
     return {}
+  } finally {
+    clearTimeout(t)
   }
 }

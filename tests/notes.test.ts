@@ -7,7 +7,20 @@ import {
   shieldedTokenBalances,
   type ShieldedNote
 } from "~lib/paraloom/notes"
-import { beforeEach, describe, expect, it } from "vitest"
+import { fetchPrices, SOL_MINT } from "~lib/paraloom/prices"
+import {
+  addApprovedOrigin,
+  getApprovedOrigins,
+  isOriginApproved,
+  removeApprovedOrigin
+} from "~lib/storage/connections"
+import {
+  getAutoLockMinutes,
+  getNetwork,
+  setAutoLockMinutes,
+  setNetwork
+} from "~lib/storage/secure"
+import { beforeEach, describe, expect, it, vi } from "vitest"
 import { installFakeChrome } from "./support/chromeStorage"
 
 const ACCOUNT = "paraloom1" + "11".repeat(64)
@@ -198,5 +211,49 @@ describe("note storage", () => {
     await addNote(ACCOUNT, deposit({ signature: "s1" }))
     await addNote(ACCOUNT, deposit({ signature: "s2", spent: true }))
     expect(await shieldedBalance(ACCOUNT)).toBe(1000n)
+  })
+})
+
+describe("connections, secure settings, and prices hardening (#248)", () => {
+  it("rejects opaque 'null' origins and canonicalizes HTTP(S) origins in connections.ts", async () => {
+    await addApprovedOrigin("null")
+    await addApprovedOrigin("data:text/html,<script></script>")
+    expect(await isOriginApproved("null")).toBe(false)
+    expect(await getApprovedOrigins()).toEqual([])
+
+    await addApprovedOrigin("https://App.Paraloom.io/swap?x=1")
+    expect(await isOriginApproved("https://app.paraloom.io")).toBe(true)
+    await removeApprovedOrigin("https://APP.PARALOOM.IO/")
+    expect(await isOriginApproved("https://app.paraloom.io")).toBe(false)
+  })
+
+  it("validates autoLockMinutes and network bounds in secure.ts", async () => {
+    await expect(setAutoLockMinutes(NaN)).rejects.toThrow(/finite positive/)
+    await expect(setAutoLockMinutes(0)).rejects.toThrow(/finite positive/)
+    await expect(setAutoLockMinutes(-10)).rejects.toThrow(/finite positive/)
+    await expect(setNetwork("testnet" as never)).rejects.toThrow(/Invalid network/)
+
+    await chrome.storage.local.set({
+      paraloom_wallet: { locked: false, autoLockMinutes: NaN, network: "invalid-net" }
+    })
+    expect(await getAutoLockMinutes()).toBe(60)
+    expect(await getNetwork()).toBe("mainnet-beta")
+  })
+
+  it("filters invalid mints and negative/non-finite prices in fetchPrices", async () => {
+    const fetchMock = vi.fn(async () => ({
+      ok: true,
+      json: async () => ({
+        [SOL_MINT]: { usdPrice: 185.5, priceChange24h: Number.NaN },
+        badNeg: { usdPrice: -10, priceChange24h: 1 }
+      })
+    }))
+    vi.stubGlobal("fetch", fetchMock)
+
+    const prices = await fetchPrices(["SOL", "not-a-valid-mint?foo=bar"])
+    expect(fetchMock).toHaveBeenCalledOnce()
+    expect(prices).toEqual({
+      [SOL_MINT]: { usdPrice: 185.5, priceChange24h: 0 }
+    })
   })
 })

@@ -1,4 +1,4 @@
-import { useState } from "react"
+import { useRef, useState } from "react"
 import logoImg from "data-base64:~/../assets/icon.png"
 
 interface SwapParams {
@@ -19,13 +19,14 @@ interface SwapApproveProps {
 type Status = "idle" | "approved" | "rejected"
 
 const USDC_MINT = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"
+const WSOL_MINT = "So11111111111111111111111111111111111111112"
 
 function sendMessage(message: Record<string, unknown>): Promise<unknown> {
   return new Promise((resolve) => chrome.runtime.sendMessage(message, resolve))
 }
 
 function tokenLabel(mint: string): string {
-  if (mint === "SOL") return "SOL"
+  if (mint === "SOL" || mint === WSOL_MINT) return "SOL"
   if (mint === USDC_MINT) return "USDC"
   return `${mint.slice(0, 4)}…${mint.slice(-4)}`
 }
@@ -33,15 +34,26 @@ function tokenLabel(mint: string): string {
 // Decimals + symbol for the input side. Only native SOL and USDC are spendable
 // inputs today; an unknown mint falls back to showing raw base units.
 function inputInfo(inputMint?: string): { decimals: number; symbol: string } {
-  if (!inputMint || inputMint === "SOL") return { decimals: 9, symbol: "SOL" }
+  if (!inputMint || inputMint === "SOL" || inputMint === WSOL_MINT) {
+    return { decimals: 9, symbol: "SOL" }
+  }
   if (inputMint === USDC_MINT) return { decimals: 6, symbol: "USDC" }
   return { decimals: 0, symbol: tokenLabel(inputMint) }
 }
 
-function formatAmount(amount: string, decimals: number): string {
+export function formatAmount(amount: string, decimals: number): string {
   try {
-    const n = decimals === 0 ? Number(BigInt(amount)) : Number(BigInt(amount)) / 10 ** decimals
-    return n.toLocaleString(undefined, { maximumFractionDigits: 6 })
+    const trimmed = amount.trim()
+    if (!/^\d+$/.test(trimmed)) return amount
+    const raw = BigInt(trimmed)
+    if (decimals <= 0) return raw.toString()
+    const base = 10n ** BigInt(decimals)
+    const whole = raw / base
+    const frac = raw % base
+    const wholeFormatted = whole.toString().replace(/\B(?=(\d{3})+(?!\d))/g, ",")
+    if (frac === 0n) return wholeFormatted
+    const fracStr = frac.toString().padStart(decimals, "0").replace(/0+$/, "")
+    return `${wholeFormatted}.${fracStr}`
   } catch {
     return amount
   }
@@ -49,6 +61,7 @@ function formatAmount(amount: string, decimals: number): string {
 
 export function SwapApprove({ id, origin, params, onResolved }: SwapApproveProps) {
   const [status, setStatus] = useState<Status>("idle")
+  const decidingRef = useRef(false)
 
   let host = origin
   try {
@@ -56,7 +69,8 @@ export function SwapApprove({ id, origin, params, onResolved }: SwapApproveProps
   } catch {}
 
   async function decide(approved: boolean) {
-    if (status !== "idle") return
+    if (status !== "idle" || decidingRef.current) return
+    decidingRef.current = true
     setStatus(approved ? "approved" : "rejected")
     await sendMessage({ type: approved ? "APPROVE_SWAP" : "REJECT_SWAP", id })
     // The swap runs in the background after approval; the window just closes.

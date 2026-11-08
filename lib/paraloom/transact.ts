@@ -209,6 +209,12 @@ export async function fetchV3Leaves(connection: Connection): Promise<V3Leaf[]> {
       )
     }
     const logs = tx.meta?.logMessages ?? []
+    if (logs.some((l) => l.includes("Log truncated"))) {
+      throw new Error(
+        `getTransaction logs for ${sig.signature} were truncated by the runtime ("Log truncated"); ` +
+          `the leaf history may be incomplete and the tree cannot be rebuilt safely`
+      )
+    }
     for (const payload of eventPayloads(logs, PROGRAM_ID)) {
       if (startsWith(payload, DEPOSIT_NOTE_EVENT_DISCRIMINATOR)) {
         const body = payload.slice(8)

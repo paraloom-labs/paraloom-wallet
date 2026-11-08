@@ -362,4 +362,19 @@ describe("refusing an unsafe tree", () => {
     ])
     await expect(fetchV3Leaves(connection)).rejects.toThrow(/leaf history may be incomplete/)
   })
+
+  it("throws when transaction logs were truncated by the runtime", async () => {
+    // When Solana runtime logs hit the 10KB cap, subsequent event logs are dropped.
+    // fetchV3Leaves must fail closed rather than building an incomplete tree.
+    const { connection } = fakeConnection([
+      { logs: emittedBy(PROGRAM_ID, depositEvent(0xa0, 0)) },
+      {
+        logs: [
+          `Program ${PROGRAM_ID} invoke [1]`,
+          "Log truncated"
+        ]
+      }
+    ])
+    await expect(fetchV3Leaves(connection)).rejects.toThrow(/leaf history may be incomplete/)
+  })
 })

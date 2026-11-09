@@ -89,6 +89,36 @@ describe("classifyStrand", () => {
       })
     ).toBe("unresolved")
   })
+
+  it("skips when ageMs is NaN (#264)", () => {
+    expect(
+      classifyStrand({
+        hasSignature: false,
+        ageMs: Number.NaN,
+        solLamports: RESUME_MIN_LAMPORTS + 1_000_000n,
+        tokenAmount: 1_000_000n
+      })
+    ).toBe("skip")
+  })
+
+  it("skips when ageMs is non-finite (Infinity or -Infinity)", () => {
+    expect(
+      classifyStrand({
+        hasSignature: false,
+        ageMs: Number.POSITIVE_INFINITY,
+        solLamports: RESUME_MIN_LAMPORTS + 1_000_000n,
+        tokenAmount: 0n
+      })
+    ).toBe("skip")
+    expect(
+      classifyStrand({
+        hasSignature: false,
+        ageMs: Number.NEGATIVE_INFINITY,
+        solLamports: RESUME_MIN_LAMPORTS + 1_000_000n,
+        tokenAmount: 0n
+      })
+    ).toBe("skip")
+  })
 })
 
 describe("isNativeSolOutput", () => {
@@ -100,7 +130,19 @@ describe("isNativeSolOutput", () => {
     expect(isNativeSolOutput("SOL")).toBe(true)
   })
 
+  it("handles whitespace-padded SOL and WSOL mint strings (#264)", () => {
+    expect(isNativeSolOutput("  SOL  ")).toBe(true)
+    expect(isNativeSolOutput(` \t${WSOL_MINT}\n `)).toBe(true)
+  })
+
   it("treats USDC (any SPL mint) as NOT native SOL", () => {
     expect(isNativeSolOutput("EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v")).toBe(false)
+  })
+
+  it("returns false for non-string or empty values", () => {
+    expect(isNativeSolOutput("" as any)).toBe(false)
+    expect(isNativeSolOutput("   " as any)).toBe(false)
+    expect(isNativeSolOutput(null as any)).toBe(false)
+    expect(isNativeSolOutput(undefined as any)).toBe(false)
   })
 })

@@ -19,7 +19,9 @@ export const WSOL_MINT = "So11111111111111111111111111111111111111112"
 /** True when `outputMint` denotes native SOL (the literal "SOL" or the wrapped
  *  mint). Kept here (no heavy imports) so it is unit-testable. */
 export function isNativeSolOutput(mint: string): boolean {
-  return mint === "SOL" || mint === WSOL_MINT
+  if (typeof mint !== "string") return false
+  const trimmed = mint.trim()
+  return trimmed === "SOL" || trimmed === WSOL_MINT
 }
 
 export type StrandAction = "skip" | "resume" | "landed" | "unresolved"
@@ -36,7 +38,7 @@ export function classifyStrand(args: {
   tokenAmount: bigint
 }): StrandAction {
   if (args.hasSignature) return "skip"
-  if (args.ageMs < RESUME_GRACE_MS) return "skip"
+  if (!Number.isFinite(args.ageMs) || args.ageMs < RESUME_GRACE_MS) return "skip"
   if (args.solLamports > RESUME_MIN_LAMPORTS) return "resume"
   if (args.tokenAmount > 0n) return "landed"
   return "unresolved"

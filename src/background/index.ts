@@ -88,7 +88,12 @@ void maybeAutoLock()
 // A connection request awaiting the user's explicit approval in the popup
 // (Phantom-style). At most one is outstanding at a time.
 let pendingConnection:
-  | { id: number; origin: string; resolve: (approved: boolean) => void }
+  | {
+      id: number
+      origin: string
+      timer: ReturnType<typeof setTimeout>
+      resolve: (approved: boolean) => void
+    }
   | null = null
 let connectionIdCounter = 0
 
@@ -116,6 +121,7 @@ let pendingSwap:
       id: number
       origin: string
       params: SwapRequestParams
+      timer: ReturnType<typeof setTimeout>
       resolve: (approved: boolean) => void
     }
   | null = null
@@ -159,6 +165,10 @@ function isFromPopup(sender: chrome.runtime.MessageSender): boolean {
 }
 
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
+  if (!message || typeof message !== "object") {
+    return false
+  }
+
   // Popup-only messages are refused outright when they arrive from a page.
   // Without this the approval screen is decorative: a script on any injected
   // origin approves its own connection and reads the visitor's shielded
@@ -436,8 +446,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 async function handleConnect(sender: chrome.runtime.MessageSender) {
   // sender.origin is the origin of the page that called window.paraloom.connect
   // (set for content-script senders without needing the "tabs" permission).
-  const origin =
-    sender.origin ?? (sender.tab?.url ? new URL(sender.tab.url).origin : null)
+  const origin = senderOrigin(sender)
   if (!origin) {
     throw new Error("Unable to determine the requesting site's origin")
   }
@@ -494,6 +503,13 @@ async function handleConnect(sender: chrome.runtime.MessageSender) {
 // Register a pending connection request and resolve once the user approves or
 // rejects it in the popup (or the timeout elapses → treated as a rejection).
 function requestApproval(origin: string, timeoutMs: number): Promise<boolean> {
+  if (pendingConnection) {
+    clearTimeout(pendingConnection.timer)
+    const prev = pendingConnection
+    pendingConnection = null
+    prev.resolve(false)
+  }
+
   return new Promise((resolve) => {
     const id = ++connectionIdCounter
     const clearPersisted = () =>
@@ -508,10 +524,13 @@ function requestApproval(origin: string, timeoutMs: number): Promise<boolean> {
     pendingConnection = {
       id,
       origin,
+      timer,
       resolve: (approved: boolean) => {
         clearTimeout(timer)
-        pendingConnection = null
-        clearPersisted()
+        if (pendingConnection?.id === id) {
+          pendingConnection = null
+          clearPersisted()
+        }
         resolve(approved)
       }
     }
@@ -610,7 +629,24 @@ async function handleGetAddress(sender: chrome.runtime.MessageSender) {
 // The requesting page's origin, resolved without the "tabs" permission. A popup
 // (extension context) has no tab; a content-script relay always does.
 function senderOrigin(sender: chrome.runtime.MessageSender): string | null {
-  return sender.origin ?? (sender.tab?.url ? new URL(sender.tab.url).origin : null)
+  if (!sender) return null
+  if (sender.origin === "null") return null
+
+  const raw = sender.origin ?? sender.tab?.url
+  if (!raw || raw === "null") return null
+
+  try {
+    const url = new URL(raw)
+    if (url.protocol !== "http:" && url.protocol !== "https:") {
+      return null
+    }
+    if (url.origin === "null") {
+      return null
+    }
+    return url.origin
+  } catch {
+    return null
+  }
 }
 
 async function isAuthorizedSender(
@@ -710,6 +746,13 @@ function requestSwapApproval(
   params: SwapRequestParams,
   timeoutMs: number
 ): Promise<boolean> {
+  if (pendingSwap) {
+    clearTimeout(pendingSwap.timer)
+    const prev = pendingSwap
+    pendingSwap = null
+    prev.resolve(false)
+  }
+
   return new Promise((resolve) => {
     const id = ++swapIdCounter
     const timer = setTimeout(() => {
@@ -722,9 +765,12 @@ function requestSwapApproval(
       id,
       origin,
       params,
+      timer,
       resolve: (approved: boolean) => {
         clearTimeout(timer)
-        pendingSwap = null
+        if (pendingSwap?.id === id) {
+          pendingSwap = null
+        }
         resolve(approved)
       }
     }
@@ -991,4 +1037,9 @@ function selectNotes(notes: ShieldedNote[], amount: bigint): ShieldedNote[] {
   throw new Error("insufficient shielded balance for this amount (max 2 notes per swap)")
 }
 
-export {}
+export {
+  senderOrigin,
+  requestApproval,
+  requestSwapApproval,
+  handleConnect
+}

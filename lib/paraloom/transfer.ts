@@ -15,12 +15,7 @@ import {
   markNoteSpentByCommitment,
   type ShieldedNote
 } from "./notes"
-
-interface MerklePathResponse {
-  root: string
-  path: string[]
-  indices: boolean[]
-}
+import { validateMerklePathResponse, type MerklePathResponse } from "./withdraw"
 
 export interface TransferResult {
   requestId: string
@@ -43,7 +38,8 @@ async function fetchPath(commitment: string): Promise<MerklePathResponse> {
   if (!res.ok) {
     throw new Error(`Path server error (${res.status})`)
   }
-  return (await res.json()) as MerklePathResponse
+  const rawPath = await res.json()
+  return validateMerklePathResponse(rawPath)
 }
 
 // Send `amount` lamports from two owned input notes to `recipientShieldedAddress`,
@@ -58,6 +54,40 @@ export async function transfer(
   inputs: [ShieldedNote, ShieldedNote],
   spendPrivkeyHex: string
 ): Promise<TransferResult> {
+  if (typeof amount !== "bigint" || amount <= 0n) {
+    throw new Error("transfer amount must be positive")
+  }
+  if (!Array.isArray(inputs) || inputs.length !== 2) {
+    throw new Error("Transfer requires exactly two input notes")
+  }
+
+  const [n0, n1] = inputs
+  if (
+    (n0.blinding && n1.blinding && n0.blinding.toLowerCase() === n1.blinding.toLowerCase()) ||
+    (n0.commitment && n1.commitment && n0.commitment.toLowerCase() === n1.commitment.toLowerCase())
+  ) {
+    throw new Error("cannot use duplicate input notes in transfer")
+  }
+
+  for (const note of inputs) {
+    if (note.spent) {
+      throw new Error("cannot transfer already spent note")
+    }
+    let noteAmount: bigint
+    try {
+      noteAmount = BigInt(note.amount)
+    } catch {
+      throw new Error(`invalid note amount: ${note.amount}`)
+    }
+    if (noteAmount <= 0n) {
+      throw new Error("input note amount must be positive")
+    }
+    const assetId = note.assetId || NATIVE_ASSET_HEX
+    if (assetId !== NATIVE_ASSET_HEX) {
+      throw new Error("v2 transfer only supports native SOL notes")
+    }
+  }
+
   const inputTotal = inputs.reduce((sum, n) => sum + BigInt(n.amount), 0n)
   if (inputTotal < amount) {
     throw new Error("Selected notes do not cover the transfer amount")
@@ -66,21 +96,24 @@ export async function transfer(
 
   // v2 (#293): an output binds the recipient's spend pubkey (so only they can
   // spend it) and is encrypted to their box pubkey (so only they can read it).
-  const recipientSpendPub = addressSpendPubHex(recipientShieldedAddress)
-  const recipientBoxPub = addressBoxPubHex(recipientShieldedAddress)
-  const ownSpendPub = addressSpendPubHex(ownShieldedAddress)
-  const ownBoxPub = addressBoxPubHex(ownShieldedAddress)
+  const trimmedRecipient = typeof recipientShieldedAddress === "string" ? recipientShieldedAddress.trim() : ""
+  const trimmedOwn = typeof ownShieldedAddress === "string" ? ownShieldedAddress.trim() : ""
+  const recipientSpendPub = addressSpendPubHex(trimmedRecipient)
+  const recipientBoxPub = addressBoxPubHex(trimmedRecipient)
+  const ownSpendPub = addressSpendPubHex(trimmedOwn)
+  const ownBoxPub = addressBoxPubHex(trimmedOwn)
 
   // Pull each input's Merkle path. Both must prove against the same root; the
   // tree is stable between these two quick reads on devnet, so use the latest.
   let root = ""
   const proofInputs = []
   for (const note of inputs) {
+    const assetId = note.assetId || NATIVE_ASSET_HEX
     const commitment = await noteCommitmentV2(
       BigInt(note.amount),
       spendPrivkeyHex,
       note.blinding,
-      note.assetId
+      assetId
     )
     const pathRes = await fetchPath(commitment)
     root = pathRes.root

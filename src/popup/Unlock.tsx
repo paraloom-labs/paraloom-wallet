@@ -1,4 +1,4 @@
-import { useState } from "react"
+import { useEffect, useState } from "react"
 import {
   decryptWallet,
   decryptSeedPhrase,
@@ -29,31 +29,81 @@ export function Unlock({ onUnlock }: UnlockProps) {
   const [loading, setLoading] = useState(false)
   const [attempts, setAttempts] = useState(0)
   const [lockedUntil, setLockedUntil] = useState(0)
+  const [remainingSeconds, setRemainingSeconds] = useState(0)
   const { unlock, setSeedPhrase, addAccount } = useWalletStore()
 
   const isLockedOut = Date.now() < lockedUntil
-  const remainingSeconds = isLockedOut
-    ? Math.ceil((lockedUntil - Date.now()) / 1000)
-    : 0
+
+  useEffect(() => {
+    if (lockedUntil <= Date.now()) {
+      setRemainingSeconds(0)
+      return
+    }
+    setRemainingSeconds(Math.ceil((lockedUntil - Date.now()) / 1000))
+    const interval = setInterval(() => {
+      const remaining = Math.ceil((lockedUntil - Date.now()) / 1000)
+      if (remaining <= 0) {
+        setLockedUntil(0)
+        setRemainingSeconds(0)
+        setError("")
+        clearInterval(interval)
+      } else {
+        setRemainingSeconds(remaining)
+      }
+    }, 1000)
+    return () => clearInterval(interval)
+  }, [lockedUntil])
 
   async function handleUnlock() {
     if (isLockedOut) return
     setError("")
     setLoading(true)
 
+    let stored
     try {
-      const stored = await getStoredWallet()
-      if (!stored) {
-        setError("No wallet found")
-        setLoading(false)
-        return
+      stored = await getStoredWallet()
+    } catch {
+      setError("Failed to read wallet storage")
+      setLoading(false)
+      return
+    }
+
+    if (!stored) {
+      setError("No wallet found")
+      setLoading(false)
+      return
+    }
+
+    // Vaults written before the scrypt migration have no kdfVersion and
+    // must be decrypted with the legacy SHA-256 KDF.
+    const isLegacy = (stored.kdfVersion ?? 0) < KDF_VERSION_SCRYPT
+
+    // Step 1: Authenticate password via decryptWallet.
+    // ONLY failures in decryptWallet count as invalid password attempts.
+    let wallet
+    try {
+      wallet = await decryptWallet(stored.encryptedData, password, isLegacy)
+    } catch {
+      const newAttempts = attempts + 1
+      setAttempts(newAttempts)
+
+      if (newAttempts >= MAX_ATTEMPTS) {
+        setLockedUntil(Date.now() + LOCKOUT_SECONDS * 1000)
+        setError(`Too many attempts. Try again in ${LOCKOUT_SECONDS}s`)
+        setAttempts(0)
+      } else {
+        setError(`Invalid password (${MAX_ATTEMPTS - newAttempts} attempts remaining)`)
       }
 
-      // Vaults written before the scrypt migration have no kdfVersion and
-      // must be decrypted with the legacy SHA-256 KDF.
-      const isLegacy = (stored.kdfVersion ?? 0) < KDF_VERSION_SCRYPT
-      const wallet = await decryptWallet(stored.encryptedData, password, isLegacy)
+      setPassword("")
+      setLoading(false)
+      return
+    }
 
+    // Step 2: Password is confirmed correct! Now restore seed phrase and accounts safely.
+    // Post-decrypt exceptions (e.g. malformed balance in stored.accounts) must
+    // NEVER be conflated with "Invalid password" or increment lockout attempts.
+    try {
       let seedPhrase: string | undefined
       if (stored.encryptedSeedPhrase) {
         try {
@@ -72,14 +122,22 @@ export function Unlock({ onUnlock }: UnlockProps) {
 
       if (stored.accounts && stored.accounts.length > 0 && seedPhrase) {
         for (const storedAccount of stored.accounts) {
-          const keypair = await deriveKeypairFromSeed(seedPhrase, storedAccount.index)
-          const account: Account = {
-            index: storedAccount.index,
-            name: storedAccount.name,
-            keypair,
-            balance: BigInt(storedAccount.balance)
-          }
-          addAccount(account)
+          try {
+            const keypair = await deriveKeypairFromSeed(seedPhrase, storedAccount.index)
+            let bal = 0n
+            try {
+              bal = BigInt(storedAccount.balance)
+            } catch {
+              bal = 0n
+            }
+            const account: Account = {
+              index: storedAccount.index,
+              name: storedAccount.name,
+              keypair,
+              balance: bal
+            }
+            addAccount(account)
+          } catch {}
         }
       }
 
@@ -100,23 +158,8 @@ export function Unlock({ onUnlock }: UnlockProps) {
       chrome.runtime.sendMessage({ type: "ACTIVITY" })
       onUnlock()
     } catch {
-      const newAttempts = attempts + 1
-      setAttempts(newAttempts)
-
-      if (newAttempts >= MAX_ATTEMPTS) {
-        setLockedUntil(Date.now() + LOCKOUT_SECONDS * 1000)
-        setError(`Too many attempts. Try again in ${LOCKOUT_SECONDS}s`)
-        setAttempts(0)
-
-        setTimeout(() => {
-          setLockedUntil(0)
-          setError("")
-        }, LOCKOUT_SECONDS * 1000)
-      } else {
-        setError(`Invalid password (${MAX_ATTEMPTS - newAttempts} attempts remaining)`)
-      }
-
-      setPassword("")
+      setError("Failed to restore wallet session")
+    } finally {
       setLoading(false)
     }
   }

@@ -62,6 +62,8 @@ function Popup() {
             store.switchAccount(session.currentAccountIndex)
           }
         } else {
+          const store = useWalletStore.getState()
+          store.lock()
           await setLockState(true)
         }
       }

@@ -61,7 +61,13 @@ export const useWalletStore = create<WalletState>()((set, get) => ({
       seedPhrase: seedPhrase || get().seedPhrase
     }),
 
-  setBalance: (balance) => set({ balance }),
+  setBalance: (balance) => {
+    const state = get()
+    const accounts = state.accounts.map((a) =>
+      a.index === state.currentAccountIndex ? { ...a, balance } : a
+    )
+    set({ balance, accounts })
+  },
 
   updateActivity: () => set({ lastActivity: Date.now() }),
 
@@ -78,9 +84,21 @@ export const useWalletStore = create<WalletState>()((set, get) => ({
 
   addAccount: (account) => {
     const state = get()
-    // Check if account already exists to avoid duplicates
-    const exists = state.accounts.some(a => a.index === account.index)
-    if (!exists) {
+    const i = state.accounts.findIndex((a) => a.index === account.index)
+    if (i >= 0) {
+      const next = [...state.accounts]
+      next[i] = { ...next[i], ...account }
+      const syncActive = account.index === state.currentAccountIndex
+      set({
+        accounts: next,
+        ...(syncActive
+          ? {
+              wallet: next[i].keypair ?? state.wallet,
+              balance: next[i].balance ?? state.balance
+            }
+          : {})
+      })
+    } else {
       set({
         accounts: [...state.accounts, account]
       })

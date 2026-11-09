@@ -408,6 +408,50 @@ export function solanaAddress(publicKey: Uint8Array): string {
   return new PublicKey(publicKey).toBase58()
 }
 
+/**
+ * Convert a user-entered decimal SOL string into integer lamports using exact fixed-point
+ * arithmetic, avoiding IEEE-754 floating-point drift and overflow.
+ *
+ * Rejects non-decimal strings, negative/zero amounts, sub-lamport fractions (>9 decimal places),
+ * Infinity/NaN, and amounts exceeding 64-bit integer range.
+ */
+export function parseSolInputToLamports(input: string): bigint | null {
+  if (typeof input !== "string") return null
+  const trimmed = input.trim()
+  if (!trimmed) return null
+
+  // Must match a non-negative decimal number without signs or exponents
+  if (!/^(?:\d+(?:\.\d*)?|\.\d+)$/.test(trimmed)) {
+    return null
+  }
+
+  const parts = trimmed.split(".")
+  const wholeStr = parts[0] || "0"
+  let fracStr = parts[1] || ""
+
+  // Strip trailing zeros from fractional part
+  fracStr = fracStr.replace(/0+$/, "")
+
+  // Sub-lamports (> 9 decimal places) cannot be represented on Solana
+  if (fracStr.length > 9) {
+    return null
+  }
+
+  const paddedFrac = fracStr.padEnd(9, "0")
+
+  try {
+    const whole = BigInt(wholeStr)
+    const frac = BigInt(paddedFrac)
+    const lamports = whole * 1_000_000_000n + frac
+    if (lamports <= 0n) return null
+    // Guard against u64 overflow (18,446,744,073,709,551,615n)
+    if (lamports > 18_446_744_073_709_551_615n) return null
+    return lamports
+  } catch {
+    return null
+  }
+}
+
 // ── Re-shield note recovery ──────────────────────────────────────────────────
 // A re-shield whose deposit landed on-chain but whose note was never persisted
 // (a confirmation timeout or worker eviction before the on-submit persist)

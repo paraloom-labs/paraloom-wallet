@@ -7,7 +7,8 @@ import { useWalletStore } from "~lib/store/walletStore"
 import { deriveKeypairFromSeed, decryptWallet, decryptSeedPhrase, deriveBoxKeypair, KDF_VERSION_SCRYPT } from "~lib/crypto/keyManagement"
 import { getStoredWallet } from "~lib/storage/secure"
 import type { Account } from "~lib/store/walletStore"
-import { getConnection, deposit, getSolBalance, solanaAddress, solanaAddressToBytes } from "~lib/paraloom/bridge"
+import { getConnection, deposit, getSolBalance, solanaAddress, solanaAddressToBytes, parseSolInputToLamports } from "~lib/paraloom/bridge"
+export { parseSolInputToLamports }
 import { addNote, getNotes, markNoteSpent, shieldedBalance, shieldedTokenBalances, type ShieldedNote } from "~lib/paraloom/notes"
 
 // Known shielded SPL tokens for display; unknown mints fall back to a truncated
@@ -366,14 +367,14 @@ export function Home({ onLock }: HomeProps) {
 
   async function handleDeposit() {
     if (!wallet) return
-    const sol = Number(depositAmount)
-    if (!sol || sol <= 0) {
+    const lamports = parseSolInputToLamports(depositAmount)
+    if (!lamports) {
       showToast("Enter a valid amount", "error")
       return
     }
-    const lamports = BigInt(Math.round(sol * 1e9))
-    if (lamports > solBalance) {
-      showToast("Amount exceeds your SOL balance", "error")
+    const SOL_FEE_RESERVE = 5_000n
+    if (solBalance < SOL_FEE_RESERVE || lamports > solBalance - SOL_FEE_RESERVE) {
+      showToast("Amount exceeds your SOL balance (reserving 0.000005 SOL fee)", "error")
       return
     }
     setDepositing(true)
@@ -408,12 +409,11 @@ export function Home({ onLock }: HomeProps) {
       showToast("Invalid Solana address", "error")
       return
     }
-    const amt = Number(withdrawAmount)
-    if (!amt || amt <= 0) {
+    const lamports = parseSolInputToLamports(withdrawAmount)
+    if (!lamports) {
       showToast("Enter an amount to withdraw", "error")
       return
     }
-    const lamports = BigInt(Math.round(amt * 1e9))
     // Pick up to 2 spendable notes covering the amount; the wallet returns the
     // change as a new note, so the user withdraws a chosen amount instead of one
     // whole note. A single withdraw settles at most 2 notes.
@@ -456,7 +456,7 @@ export function Home({ onLock }: HomeProps) {
         }
       )
       if (settled) {
-        showToast(`Withdrew ${amt.toFixed(4)} SOL to Solana`, "success")
+        showToast(`Withdrew ${(Number(lamports) / 1e9).toFixed(4)} SOL to Solana`, "success")
         setShowWithdrawModal(false)
         setWithdrawAddress("")
         setWithdrawAmount("")
@@ -487,12 +487,11 @@ export function Home({ onLock }: HomeProps) {
       showToast("Cannot transfer to your own address", "error")
       return
     }
-    const sol = parseFloat(transferAmount)
-    if (!Number.isFinite(sol) || sol <= 0) {
+    const amount = parseSolInputToLamports(transferAmount)
+    if (!amount) {
       showToast("Enter a valid amount", "error")
       return
     }
-    const amount = BigInt(Math.round(sol * 1e9))
 
     // Circuit v3 (#350): spend 1 or 2 notes; change comes back as a new note
     // (audit #16), so partial amounts work from a single note.

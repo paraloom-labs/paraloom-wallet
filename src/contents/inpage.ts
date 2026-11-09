@@ -23,26 +23,45 @@ export const config: PlasmoCSConfig = {
 const REQ = "paraloom:request"
 const RES = "paraloom:response"
 
+const RELAY_TIMEOUT_MS = 60_000
+
 let counter = 0
 
 function relay(type: string, payload?: Record<string, unknown>): Promise<any> {
   return new Promise((resolve, reject) => {
     const id = ++counter
+    let timer: ReturnType<typeof setTimeout> | null = null
+
+    const cleanup = () => {
+      if (timer !== null) {
+        clearTimeout(timer)
+        timer = null
+      }
+      window.removeEventListener("message", onMessage)
+    }
+
     const onMessage = (event: MessageEvent) => {
       if (event.source !== window) return
+      if (event.origin !== window.location.origin) return
       const data = event.data
-      if (!data || data.channel !== RES || data.id !== id) return
-      window.removeEventListener("message", onMessage)
+      if (!data || data.channel !== RES || !Number.isSafeInteger(data.id) || data.id !== id) return
+      cleanup()
       if (data.error) reject(new Error(data.error))
       else resolve(data.result)
     }
+
+    timer = setTimeout(() => {
+      cleanup()
+      reject(new Error(`Relay request timed out after ${RELAY_TIMEOUT_MS}ms`))
+    }, RELAY_TIMEOUT_MS)
+
     window.addEventListener("message", onMessage)
     window.postMessage({ channel: REQ, id, type, payload }, window.location.origin)
   })
 }
 
 if (!(window as any).paraloom) {
-  ;(window as any).paraloom = {
+  const provider = {
     // Version marker so we can confirm from the page console which build is
     // actually injected (two extensions or a stale one caused confusion).
     __version: "1.5.6",
@@ -156,6 +175,7 @@ if (!(window as any).paraloom) {
       return r?.recovered ?? 0
     }
   }
+  ;(window as any).paraloom = Object.freeze(provider)
   console.log("[paraloom] wallet bridge ready (main world)")
 }
 

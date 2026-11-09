@@ -83,6 +83,17 @@ export function Unlock({ onUnlock }: UnlockProps) {
         }
       }
 
+      // Ensure Account 0 (primary wallet) is always seeded in accounts
+      const currentAccounts = useWalletStore.getState().accounts
+      if (!currentAccounts.some((a) => a.index === 0)) {
+        addAccount({
+          index: 0,
+          name: "Account 1",
+          keypair: wallet,
+          balance: 0n
+        })
+      }
+
       unlock(wallet, seedPhrase)
       await setLockState(false)
       setAttempts(0)

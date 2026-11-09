@@ -198,6 +198,16 @@ export function Home({ onLock }: HomeProps) {
     return () => document.removeEventListener("mousedown", onClick)
   }, [autoLockOpen])
 
+  // Clear revealed secrets and active modal amounts/addresses when switching accounts
+  useEffect(() => {
+    resetSettingsModals()
+    setWithdrawAddress("")
+    setWithdrawAmount("")
+    setTransferAddress("")
+    setTransferAmount("")
+    setDepositAmount("")
+  }, [currentAccountIndex])
+
   const tokens: Token[] = [
     {
       symbol: "SOL",
@@ -553,7 +563,19 @@ export function Home({ onLock }: HomeProps) {
     }
 
     try {
-      const newIndex = accounts.length
+      let currentAccounts = [...accounts]
+      if (currentAccounts.length === 0 && wallet) {
+        const acc0: Account = {
+          index: 0,
+          name: "Account 1",
+          keypair: wallet,
+          balance: 0n
+        }
+        addAccount(acc0)
+        currentAccounts = [acc0]
+      }
+
+      const newIndex = Math.max(-1, ...currentAccounts.map((a) => a.index)) + 1
       const keypair = await deriveKeypairFromSeed(seedPhrase, newIndex)
 
       const newAccount: Account = {
@@ -565,10 +587,16 @@ export function Home({ onLock }: HomeProps) {
 
       addAccount(newAccount)
 
-      const updatedAccounts = [...accounts, newAccount]
+      const updatedAccounts = [...currentAccounts, newAccount]
       await updateAccounts(updatedAccounts)
 
       switchAccount(newIndex)
+      resetSettingsModals()
+      setWithdrawAddress("")
+      setWithdrawAmount("")
+      setTransferAddress("")
+      setTransferAmount("")
+      setDepositAmount("")
 
       setShowAddAccount(false)
       setAddAccountMethod(null)
@@ -722,6 +750,12 @@ export function Home({ onLock }: HomeProps) {
                   onClick={() => {
                     if (account.index !== currentAccountIndex) {
                       switchAccount(account.index)
+                      resetSettingsModals()
+                      setWithdrawAddress("")
+                      setWithdrawAmount("")
+                      setTransferAddress("")
+                      setTransferAmount("")
+                      setDepositAmount("")
                     }
                     setShowAccountSwitcher(false)
                   }}

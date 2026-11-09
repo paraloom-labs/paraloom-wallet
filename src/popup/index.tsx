@@ -9,7 +9,7 @@ import { Onboarding } from "~src/popup/Onboarding"
 import { SwapApprove } from "~src/popup/SwapApprove"
 import { Unlock } from "~src/popup/Unlock"
 
-interface PendingSwap {
+export interface PendingSwap {
   id: number
   origin: string
   params: {
@@ -18,6 +18,52 @@ interface PendingSwap {
     amountLamports: string
     slippageBps?: number
     reshield?: boolean
+  }
+}
+
+export function parsePendingConnection(
+  raw: unknown
+): { id: number; origin: string } | null {
+  if (!raw || typeof raw !== "object") return null
+  const { id, origin } = raw as { id?: unknown; origin?: unknown }
+  if (typeof id !== "number" || !Number.isFinite(id)) return null
+  if (typeof origin !== "string" || !origin.trim()) return null
+  return { id, origin: origin.trim() }
+}
+
+export function parsePendingSwap(raw: unknown): PendingSwap | null {
+  if (!raw || typeof raw !== "object") return null
+  const { id, origin, params } = raw as {
+    id?: unknown
+    origin?: unknown
+    params?: unknown
+  }
+  if (typeof id !== "number" || !Number.isFinite(id)) return null
+  if (typeof origin !== "string" || !origin.trim()) return null
+  if (!params || typeof params !== "object") return null
+  const p = params as {
+    outputMint?: unknown
+    amountLamports?: unknown
+    inputMint?: unknown
+    slippageBps?: unknown
+    reshield?: unknown
+  }
+  if (typeof p.outputMint !== "string" || !p.outputMint.trim()) return null
+  if (typeof p.amountLamports !== "string" || !p.amountLamports.trim()) return null
+  return {
+    id,
+    origin: origin.trim(),
+    params: {
+      outputMint: p.outputMint.trim(),
+      amountLamports: p.amountLamports.trim(),
+      ...(typeof p.inputMint === "string" && p.inputMint.trim()
+        ? { inputMint: p.inputMint.trim() }
+        : {}),
+      ...(typeof p.slippageBps === "number" && Number.isFinite(p.slippageBps)
+        ? { slippageBps: p.slippageBps }
+        : {}),
+      ...(typeof p.reshield === "boolean" ? { reshield: p.reshield } : {})
+    }
   }
 }
 
@@ -58,7 +104,7 @@ function Popup() {
           const store = useWalletStore.getState()
           store.unlock(session.wallet, session.seedPhrase ?? undefined)
           session.accounts.forEach((a) => store.addAccount(a))
-          if (session.currentAccountIndex) {
+          if (typeof session.currentAccountIndex === "number") {
             store.switchAccount(session.currentAccountIndex)
           }
         } else {
@@ -81,21 +127,12 @@ function Popup() {
     let p: { id: number; origin: string } | null = null
     let ps: PendingSwap | null = null
     if (wallet && !isLocked) {
-      const pRaw = (await sendMessage({ type: "GET_PENDING_CONNECTION" })) as unknown
-      // Only a real pending request (with a numeric id) counts — never an error
-      // object like { success:false, error:"not permitted" }, which would render
-      // the approval screen with an undefined id.
-      p =
-        pRaw && typeof (pRaw as { id?: unknown }).id === "number"
-          ? (pRaw as { id: number; origin: string })
-          : null
+      const pRaw = await sendMessage({ type: "GET_PENDING_CONNECTION" })
+      p = parsePendingConnection(pRaw)
       // A pending swap only matters when there's no connection to approve first.
       if (!p) {
-        const psRaw = (await sendMessage({ type: "GET_PENDING_SWAP" })) as unknown
-        ps =
-          psRaw && typeof (psRaw as { id?: unknown }).id === "number"
-            ? (psRaw as PendingSwap)
-            : null
+        const psRaw = await sendMessage({ type: "GET_PENDING_SWAP" })
+        ps = parsePendingSwap(psRaw)
       }
     }
 
@@ -136,7 +173,10 @@ function Popup() {
         <ConnectApprove
           id={pending.id}
           origin={pending.origin}
-          onResolved={() => setPending(null)}
+          onResolved={() => {
+            setPending(null)
+            void checkWalletState()
+          }}
         />
       </div>
     )
@@ -149,7 +189,10 @@ function Popup() {
           id={pendingSwap.id}
           origin={pendingSwap.origin}
           params={pendingSwap.params}
-          onResolved={() => setPendingSwap(null)}
+          onResolved={() => {
+            setPendingSwap(null)
+            void checkWalletState()
+          }}
         />
       </div>
     )
@@ -157,10 +200,22 @@ function Popup() {
 
   return (
     <div className="app">
-      <Home onLock={() => setLocked(true)} />
+      <Home
+        onLock={() => {
+          setPending(null)
+          setPendingSwap(null)
+          setLocked(true)
+        }}
+      />
     </div>
   )
 }
 
-const root = createRoot(document.getElementById("root")!)
-root.render(<Popup />)
+const rootEl =
+  typeof document !== "undefined" ? document.getElementById("root") : null
+if (rootEl) {
+  const root = createRoot(rootEl)
+  root.render(<Popup />)
+}
+
+export { Popup }

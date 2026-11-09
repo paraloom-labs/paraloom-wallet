@@ -82,12 +82,30 @@ export function shieldedAddressToBytes(shieldedAddress: string): Uint8Array {
   return Uint8Array.from(Buffer.from(hex, "hex"))
 }
 
+const MAX_U64 = 0xffffffffffffffffn
+
+function validateDepositU64(amount: bigint): void {
+  if (typeof amount !== "bigint" || amount <= 0n || amount > MAX_U64) {
+    throw new Error("Invalid amount: must be an unsigned 64-bit integer greater than 0")
+  }
+}
+
+function validate32Bytes(buf: Uint8Array, name: string): void {
+  if (!(buf instanceof Uint8Array) || buf.length !== 32) {
+    throw new Error(`Invalid ${name}: must be exactly 32 bytes`)
+  }
+}
+
 // Layout: DEPOSIT discriminator (8) | amount u64 LE (8) | recipient (32) | randomness (32).
-function depositInstructionData(
+export function depositInstructionData(
   amountLamports: bigint,
   recipient: Uint8Array,
   randomness: Uint8Array
 ): Buffer {
+  validateDepositU64(amountLamports)
+  validate32Bytes(recipient, "recipient")
+  validate32Bytes(randomness, "randomness")
+
   const data = new Uint8Array(8 + 8 + 32 + 32)
   data.set(DEPOSIT_DISCRIMINATOR, 0)
   new DataView(data.buffer).setBigUint64(8, amountLamports, true)
@@ -157,11 +175,15 @@ export function associatedTokenAddress(
 
 // Layout: DEPOSIT_NOTE_SPL discriminator (8) | amount u64 LE (8) | pubkey (32) |
 // blinding (32) — identical arg shape to deposit_note, just the SPL variant.
-function depositSplInstructionData(
+export function depositSplInstructionData(
   amount: bigint,
   pubkey: Uint8Array,
   blinding: Uint8Array
 ): Buffer {
+  validateDepositU64(amount)
+  validate32Bytes(pubkey, "pubkey")
+  validate32Bytes(blinding, "blinding")
+
   const data = new Uint8Array(8 + 8 + 32 + 32)
   data.set(DEPOSIT_NOTE_SPL_DISCRIMINATOR, 0)
   new DataView(data.buffer).setBigUint64(8, amount, true)

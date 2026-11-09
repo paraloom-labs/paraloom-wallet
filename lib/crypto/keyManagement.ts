@@ -35,12 +35,30 @@ export interface WalletKeyPair {
   spendPrivkey: Uint8Array
 }
 
+function isHex(
+  str: unknown,
+  expectedByteLength?: number,
+  minByteLength?: number
+): str is string {
+  if (typeof str !== "string") return false
+  if (expectedByteLength !== undefined && str.length !== expectedByteLength * 2) return false
+  if (minByteLength !== undefined && str.length < minByteLength * 2) return false
+  if (str.length % 2 !== 0) return false
+  return /^[0-9a-fA-F]+$/.test(str)
+}
+
 /**
  * Derive the X25519 (NaCl box) keypair from an ed25519 secret key. The first
  * 32 bytes of a tweetnacl sign secret key are the account seed; box keys are
  * derived from it so the seed phrase alone recovers everything (#196).
  */
 export function deriveBoxKeypair(ed25519SecretKey: Uint8Array): nacl.BoxKeyPair {
+  if (
+    !(ed25519SecretKey instanceof Uint8Array) ||
+    (ed25519SecretKey.length !== 32 && ed25519SecretKey.length !== 64)
+  ) {
+    throw new Error("Invalid ed25519 secret key length: expected 32 or 64 bytes")
+  }
   return nacl.box.keyPair.fromSecretKey(ed25519SecretKey.slice(0, 32))
 }
 
@@ -51,6 +69,12 @@ export function deriveBoxKeypair(ed25519SecretKey: Uint8Array): nacl.BoxKeyPair 
  * recovers it.
  */
 export function deriveSpendPrivkey(ed25519SecretKey: Uint8Array): Uint8Array {
+  if (
+    !(ed25519SecretKey instanceof Uint8Array) ||
+    (ed25519SecretKey.length !== 32 && ed25519SecretKey.length !== 64)
+  ) {
+    throw new Error("Invalid ed25519 secret key length: expected 32 or 64 bytes")
+  }
   const accountSeed = ed25519SecretKey.slice(0, 32)
   const tag = new TextEncoder().encode("paraloom-spend-v2")
   const input = new Uint8Array(tag.length + accountSeed.length)
@@ -130,6 +154,17 @@ export async function deriveKeypairFromSeed(
 ): Promise<WalletKeyPair> {
   if (!validateSeedPhrase(seedPhrase)) {
     throw new Error("Invalid seed phrase")
+  }
+
+  if (
+    typeof accountIndex !== "number" ||
+    !Number.isInteger(accountIndex) ||
+    accountIndex < 0 ||
+    accountIndex > 0xffffffff
+  ) {
+    throw new Error(
+      `Invalid account index: expected integer in range 0..4294967295, got ${accountIndex}`
+    )
   }
 
   // Convert seed to bytes
@@ -241,6 +276,17 @@ export async function decryptWallet(
   password: string,
   legacy: boolean = false
 ): Promise<WalletKeyPair> {
+  // Validate envelope before running expensive KDF
+  if (
+    !encryptedWallet ||
+    typeof encryptedWallet !== "object" ||
+    !isHex(encryptedWallet.salt, 32) ||
+    !isHex(encryptedWallet.nonce, nacl.secretbox.nonceLength) ||
+    !isHex(encryptedWallet.encrypted, undefined, nacl.secretbox.overheadLength)
+  ) {
+    throw new Error("Invalid encrypted wallet envelope")
+  }
+
   // Parse hex strings
   const encrypted = Buffer.from(encryptedWallet.encrypted, "hex")
   const nonce = Buffer.from(encryptedWallet.nonce, "hex")
@@ -257,18 +303,42 @@ export async function decryptWallet(
   }
 
   // Parse wallet data
-  const walletData = JSON.parse(new TextDecoder().decode(decrypted))
+  let walletData: any
+  try {
+    walletData = JSON.parse(new TextDecoder().decode(decrypted))
+  } catch {
+    throw new Error("Invalid wallet data payload: JSON parse failed")
+  }
+
+  if (
+    !walletData ||
+    typeof walletData !== "object" ||
+    !isHex(walletData.secretKey, nacl.sign.secretKeyLength) ||
+    !isHex(walletData.publicKey, nacl.sign.publicKeyLength)
+  ) {
+    throw new Error("Invalid wallet keypair data: missing or malformed keys")
+  }
+
+  const secretKey = Buffer.from(walletData.secretKey, "hex")
+  const publicKey = Buffer.from(walletData.publicKey, "hex")
+
+  // Verify keypair consistency (public key matches secret key's embedded public key)
+  const expectedKeypair = nacl.sign.keyPair.fromSecretKey(secretKey)
+  for (let i = 0; i < nacl.sign.publicKeyLength; i++) {
+    if (publicKey[i] !== expectedKeypair.publicKey[i]) {
+      throw new Error("Invalid wallet keypair data: secretKey and publicKey mismatch")
+    }
+  }
 
   // Derive the box keypair from the stored ed25519 secret and recompute the
   // shielded address from the box public key (#196). This overrides any
   // address stored by a pre-#196 vault (which used sha256(pubkey)), migrating
   // existing wallets to the box-pubkey address with no re-onboarding.
-  const secretKey = Buffer.from(walletData.secretKey, "hex")
   const box = deriveBoxKeypair(secretKey)
   const spendPrivkey = deriveSpendPrivkey(secretKey)
 
   return {
-    publicKey: Buffer.from(walletData.publicKey, "hex"),
+    publicKey,
     secretKey,
     shieldedAddress: await deriveShieldedAddress(box.publicKey, spendPrivkey),
     boxPublicKey: box.publicKey,
@@ -322,6 +392,11 @@ export function decryptSeedPhrase(
   password: string,
   legacy: boolean = false
 ): string {
+  const minByteLength = 32 + nacl.secretbox.nonceLength + nacl.secretbox.overheadLength
+  if (!isHex(encryptedData, undefined, minByteLength)) {
+    throw new Error("Invalid encrypted seed phrase envelope")
+  }
+
   const combined = Buffer.from(encryptedData, "hex")
 
   // Extract salt, nonce, and encrypted data
@@ -336,5 +411,10 @@ export function decryptSeedPhrase(
     throw new Error("Invalid password")
   }
 
-  return new TextDecoder().decode(decrypted)
+  const seedPhrase = new TextDecoder().decode(decrypted)
+  if (!validateSeedPhrase(seedPhrase)) {
+    throw new Error("Decrypted seed phrase is invalid")
+  }
+
+  return seedPhrase
 }

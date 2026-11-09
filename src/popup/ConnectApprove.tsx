@@ -1,4 +1,4 @@
-import { useState } from "react"
+import { useRef, useState } from "react"
 import logoImg from "data-base64:~/../assets/icon.png"
 
 interface ConnectApproveProps {
@@ -15,6 +15,7 @@ function sendMessage(message: Record<string, unknown>): Promise<unknown> {
 
 export function ConnectApprove({ id, origin, onResolved }: ConnectApproveProps) {
   const [status, setStatus] = useState<Status>("idle")
+  const decidingRef = useRef(false)
 
   let host = origin
   try {
@@ -22,13 +23,16 @@ export function ConnectApprove({ id, origin, onResolved }: ConnectApproveProps) 
   } catch {}
 
   async function decide(approved: boolean) {
-    if (status !== "idle") return
+    if (decidingRef.current || status !== "idle") return
+    decidingRef.current = true
     setStatus(approved ? "connected" : "rejected")
 
-    await sendMessage({
-      type: approved ? "APPROVE_CONNECTION" : "REJECT_CONNECTION",
-      id
-    })
+    try {
+      await sendMessage({
+        type: approved ? "APPROVE_CONNECTION" : "REJECT_CONNECTION",
+        id
+      })
+    } catch {}
 
     // Hold the confirmation screen briefly so the transition reads as
     // intentional, then close the request window. We deliberately do NOT flip

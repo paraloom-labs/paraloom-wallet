@@ -25,18 +25,46 @@ export async function confirmCommitmentInTree(
   pollMs: number,
   deps: ConfirmDeps = {}
 ): Promise<boolean> {
+  const targetHex = typeof commitmentHex === "string" ? commitmentHex.trim().toLowerCase() : ""
+  if (!/^[0-9a-f]{64}$/.test(targetHex)) {
+    throw new Error(`invalid commitmentHex: expected 64-character hex string, got "${commitmentHex}"`)
+  }
+  if (typeof timeoutMs !== "number" || !Number.isFinite(timeoutMs) || timeoutMs <= 0) {
+    throw new Error("timeoutMs must be a positive finite number")
+  }
+  if (typeof pollMs !== "number" || !Number.isFinite(pollMs) || pollMs <= 0) {
+    throw new Error("pollMs must be a positive finite number")
+  }
+
   const sleep = deps.sleep ?? ((ms: number) => new Promise((r) => setTimeout(r, ms)))
   const now = deps.now ?? (() => Date.now())
   const deadline = now() + timeoutMs
+
   for (;;) {
     try {
       const leaves = await fetchLeaves()
-      if (leaves.some((l) => l.commitmentHex === commitmentHex)) return true
+      if (
+        Array.isArray(leaves) &&
+        leaves.some(
+          (l) => typeof l?.commitmentHex === "string" && l.commitmentHex.trim().toLowerCase() === targetHex
+        )
+      ) {
+        return true
+      }
     } catch {
       // A transient RPC error mid-rebuild is not a settlement failure — keep
       // polling until the deadline rather than declaring the spend unsettled.
     }
-    if (now() >= deadline) return false
-    await sleep(pollMs)
+
+    const currentTime = now()
+    if (currentTime >= deadline) {
+      return false
+    }
+
+    const sleepMs = Math.min(pollMs, deadline - currentTime)
+    if (sleepMs <= 0) {
+      return false
+    }
+    await sleep(sleepMs)
   }
 }

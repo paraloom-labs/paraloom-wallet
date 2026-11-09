@@ -1,4 +1,5 @@
-import { useState, useMemo } from "react"
+import { useState, useMemo, useRef, useEffect, useCallback } from "react"
+import * as bip39 from "bip39"
 import {
   deriveKeypairFromSeed,
   encryptWallet,
@@ -24,14 +25,39 @@ function pickRandom(count: number, max: number): number[] {
   return indices.slice(0, count).sort((a, b) => a - b)
 }
 
-// Pick N decoy words that are NOT in the correct answers
-function pickDecoys(correctWord: string, allWords: string[], count: number): string[] {
-  const others = allWords.filter(w => w !== correctWord)
-  for (let i = others.length - 1; i > 0; i--) {
-    const j = Math.floor(Math.random() * (i + 1));
-    [others[i], others[j]] = [others[j], others[i]]
+// Pick N decoy words that are NOT in the correct answers, deduplicated and topped up from BIP-39 if needed
+export function pickDecoys(correctWord: string, allWords: string[], count: number): string[] {
+  const seen = new Set<string>([correctWord])
+  const pool: string[] = []
+  for (const w of allWords) {
+    if (w && !seen.has(w)) {
+      seen.add(w)
+      pool.push(w)
+    }
   }
-  return others.slice(0, count)
+
+  // Shuffle pool
+  for (let i = pool.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [pool[i], pool[j]] = [pool[j], pool[i]]
+  }
+
+  const result = pool.slice(0, count)
+
+  // Top up from BIP-39 wordlist if fewer than `count` distinct decoys available
+  if (result.length < count && bip39.wordlists?.english) {
+    const wordlist = bip39.wordlists.english
+    const startIdx = Math.floor(Math.random() * wordlist.length)
+    for (let i = 0; i < wordlist.length && result.length < count; i++) {
+      const candidate = wordlist[(startIdx + i) % wordlist.length]
+      if (candidate && !seen.has(candidate)) {
+        seen.add(candidate)
+        result.push(candidate)
+      }
+    }
+  }
+
+  return result
 }
 
 export function Onboarding({ onComplete }: OnboardingProps) {
@@ -47,6 +73,23 @@ export function Onboarding({ onComplete }: OnboardingProps) {
   const [verifyError, setVerifyError] = useState("")
   const [activeQuestionIdx, setActiveQuestionIdx] = useState(0)
   const { unlock, addAccount, setSeedPhrase: setSeedPhraseStore } = useWalletStore()
+
+  const timersRef = useRef<ReturnType<typeof setTimeout>[]>([])
+  const isTransitioningRef = useRef(false)
+
+  const clearAllTimers = useCallback(() => {
+    for (const t of timersRef.current) {
+      clearTimeout(t)
+    }
+    timersRef.current = []
+    isTransitioningRef.current = false
+  }, [])
+
+  useEffect(() => {
+    return () => {
+      clearAllTimers()
+    }
+  }, [clearAllTimers])
 
   const words = seedPhrase ? seedPhrase.split(" ") : []
 
@@ -75,6 +118,7 @@ export function Onboarding({ onComplete }: OnboardingProps) {
   }, [seedPhrase, hiddenIndices])
 
   function handleCreateWallet() {
+    clearAllTimers()
     try {
       const seed = generateSeedPhrase()
       setSeedPhrase(seed)
@@ -85,6 +129,9 @@ export function Onboarding({ onComplete }: OnboardingProps) {
   }
 
   function handleSelectWord(wordIdx: number, selected: string) {
+    if (isTransitioningRef.current) return
+    if (verifyAnswers[wordIdx]) return
+
     const correct = words[wordIdx]
     if (selected === correct) {
       // Correct — save and auto-advance
@@ -96,18 +143,29 @@ export function Onboarding({ onComplete }: OnboardingProps) {
       const answeredCount = Object.keys(newAnswers).length
       if (answeredCount >= hiddenIndices.length) {
         // All correct — auto-advance to password after brief delay
-        setTimeout(() => setCreateStep(3), 600)
+        isTransitioningRef.current = true
+        const timer = setTimeout(() => {
+          isTransitioningRef.current = false
+          setCreateStep(3)
+        }, 600)
+        timersRef.current.push(timer)
       } else {
         // Move to next unanswered question
         const nextIdx = hiddenIndices.findIndex(
           (idx) => !newAnswers[idx]
         )
         if (nextIdx !== -1) {
-          setTimeout(() => setActiveQuestionIdx(nextIdx), 300)
+          isTransitioningRef.current = true
+          const timer = setTimeout(() => {
+            isTransitioningRef.current = false
+            setActiveQuestionIdx(nextIdx)
+          }, 300)
+          timersRef.current.push(timer)
         }
       }
     } else {
       // Wrong — shake + reset all
+      clearAllTimers()
       setVerifyError("Wrong word! Try again from the beginning.")
       setVerifyAnswers({})
       setActiveQuestionIdx(0)
@@ -384,6 +442,7 @@ export function Onboarding({ onComplete }: OnboardingProps) {
                 <button
                   className="button button-ghost"
                   onClick={() => {
+                    clearAllTimers()
                     setCreateStep(1)
                     setVerifyAnswers({})
                     setVerifyError("")

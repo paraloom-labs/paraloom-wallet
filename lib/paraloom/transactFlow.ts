@@ -61,6 +61,8 @@ function confirmSettledByTree(
   )
 }
 
+export const U64_MAX = 0xffff_ffff_ffff_ffffn
+
 /// Deposit lamports as a v3 note: the program computes the commitment and
 /// appends it on-chain; the leaf index comes back in the DepositNoteEvent.
 export async function depositV3(
@@ -70,6 +72,11 @@ export async function depositV3(
   spendPrivkeyHex: string,
   lamports: bigint
 ): Promise<{ signature: string; leafIndex: number }> {
+  if (typeof lamports !== "bigint" || lamports <= 0n || lamports > U64_MAX) {
+    throw new Error(
+      `deposit amount must be a positive u64 (0 < lamports <= 2^64-1), got ${lamports}`
+    )
+  }
   const blindingHex = randomHex32()
   const pubkeyHex = await v3NotePubkey(spendPrivkeyHex)
   const payer = Keypair.fromSecretKey(wallet.secretKey)
@@ -202,8 +209,37 @@ export async function spendV3(
   if (inputs.length < 1 || inputs.length > 2) {
     throw new Error("transact spends 1 or 2 notes")
   }
+  for (const n of inputs) {
+    if (n.spent) {
+      throw new Error("cannot spend already spent note")
+    }
+    let amt: bigint
+    try {
+      amt = BigInt(n.amount)
+    } catch {
+      throw new Error(`invalid note amount: ${n.amount}`)
+    }
+    if (amt <= 0n || amt > U64_MAX) {
+      throw new Error(`input note amount must be positive u64, got ${amt}`)
+    }
+  }
+
+  if (inputs.length === 2) {
+    const [a, b] = inputs
+    const sameCommitment = Boolean(
+      a.commitment && b.commitment && a.commitment.toLowerCase() === b.commitment.toLowerCase()
+    )
+    const sameSig = Boolean(a.signature && b.signature && a.signature === b.signature)
+    const sameBlinding = Boolean(
+      a.blinding && b.blinding && a.blinding.toLowerCase() === b.blinding.toLowerCase()
+    )
+    if (sameCommitment || sameSig || sameBlinding) {
+      throw new Error("duplicate input notes cannot be spent in the same transact")
+    }
+  }
+
   const sumIn = inputs.reduce((acc, n) => acc + BigInt(n.amount), 0n)
-  if (payLamports <= 0n || payLamports > sumIn) {
+  if (payLamports <= 0n || payLamports > U64_MAX || payLamports > sumIn) {
     throw new Error("amount exceeds the selected notes")
   }
   const change = sumIn - payLamports
@@ -250,6 +286,9 @@ export async function spendV3(
       leafIndex,
       pathHex: path
     })
+  }
+  if (inputSpecs.length === 2 && inputSpecs[0].leafIndex === inputSpecs[1].leafIndex) {
+    throw new Error("duplicate input notes share the same leaf index")
   }
   // Pad a single-note spend with a zero-value dummy (membership is skipped
   // in-circuit for zero notes; the path just needs the right shape).
@@ -356,18 +395,8 @@ export async function spendV3(
     : await confirmSettledByTree(connection, settleCommitmentHex)
 
   if (settled) {
-    // Mark inputs spent and record the change note locally. Deliberately WITHOUT
-    // a leaf index: the index can only be predicted from a pre-settlement tree
-    // snapshot, and any deposit or transact that lands in the prove+ingress
-    // window shifts the real slot. A wrong index was persisted and then trusted
-    // forever by ensureLeafIndex, so the change output built a membership path to
-    // the wrong slot and became permanently unspendable. Storing only the
-    // commitment forces ensureLeafIndex to locate the note by commitment against
-    // a fresh rebuild at spend time, which is authoritative. (Deposit notes keep
-    // their index because it comes from the on-chain event and never moves.)
-    for (const note of inputs) {
-      await markNoteSpentByIdentity(shieldedAddress, note)
-    }
+    // Record the change note locally before marking inputs spent so the new
+    // balance is never lost if execution is interrupted between writes.
     if (change > 0n) {
       await addNote(shieldedAddress, {
         amount: change.toString(),
@@ -380,6 +409,9 @@ export async function spendV3(
         source: "transfer",
         commitment: await noteCommitment(change, ownPubHex, changeBlind)
       })
+    }
+    for (const note of inputs) {
+      await markNoteSpentByIdentity(shieldedAddress, note)
     }
   }
 

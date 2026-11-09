@@ -94,6 +94,25 @@ interface HomeProps {
   onLock: () => void
 }
 
+export function formatExactUnits(balance: bigint, decimals: number): string {
+  if (balance <= 0n) return "0"
+  const safeDecimals =
+    typeof decimals === "number" && Number.isFinite(decimals) && decimals > 0
+      ? Math.floor(decimals)
+      : 0
+  if (safeDecimals === 0) {
+    return balance.toString()
+  }
+  const divisor = 10n ** BigInt(safeDecimals)
+  const whole = balance / divisor
+  const frac = balance % divisor
+  if (frac === 0n) {
+    return whole.toString()
+  }
+  const fracStr = frac.toString().padStart(safeDecimals, "0").replace(/0+$/, "")
+  return `${whole.toString()}.${fracStr}`
+}
+
 // ─── Toast helper ───
 function Toast({ message, type, onClose }: { message: string; type: "success" | "error" | "info"; onClose: () => void }) {
   return <div className={`toast ${type}`} onClick={onClose}>{message}</div>
@@ -124,6 +143,8 @@ export function Home({ onLock }: HomeProps) {
   const [depositing, setDepositing] = useState(false)
   const [notes, setNotes] = useState<ShieldedNote[]>([])
   const [swapOutputs, setSwapOutputs] = useState<SwapOutput[]>([])
+  const [settingsAttempts, setSettingsAttempts] = useState(0)
+  const loadIdRef = useRef(0)
   // The activity row the user tapped, shown in an in-app detail sheet.
   const [activityDetail, setActivityDetail] = useState<{
     kind: "buy" | "deposit"
@@ -286,8 +307,13 @@ export function Home({ onLock }: HomeProps) {
 
   async function loadBalances() {
     if (!wallet) return
+    const currentLoadId = ++loadIdRef.current
+    const targetAddress = wallet.shieldedAddress
+    const targetNetwork = network
+
     try {
-      const sol = await getSolBalance(getConnection(network), wallet.publicKey)
+      const sol = await getSolBalance(getConnection(targetNetwork), wallet.publicKey)
+      if (currentLoadId !== loadIdRef.current) return
       setSolBalance(sol)
     } catch {
       // RPC unreachable — leave the last known balance in place
@@ -298,23 +324,27 @@ export function Home({ onLock }: HomeProps) {
     try {
       const boxSecret = deriveBoxKeypair(wallet.secretKey).secretKey
       await scanForNotes(
-        wallet.shieldedAddress,
+        targetAddress,
         boxSecret,
         Buffer.from(wallet.spendPrivkey).toString("hex")
       )
     } catch {
       // transfer node down / no scan endpoint — ignore
     }
+    if (currentLoadId !== loadIdRef.current) return
+
     // Recover any re-shield whose deposit landed on-chain but whose note was
     // never persisted (or whose deposit never ran but the token is still at the
     // fresh address). Runs directly in the popup — no service-worker relay — so
     // it always fires when the wallet is opened, and the reads below then reflect
     // the recovered shielded balance.
     try {
-      await recoverReshields(getConnection(network), wallet.shieldedAddress)
+      await recoverReshields(getConnection(targetNetwork), targetAddress)
     } catch {
       // best-effort — the reads below still show whatever is already local
     }
+    if (currentLoadId !== loadIdRef.current) return
+
     // Resolve stranded swap rows so Activity stops showing settled swaps as
     // "Pending" forever. Private swaps are mainnet-only, so this always runs
     // against the mainnet archival RPC regardless of the selected network. It
@@ -323,27 +353,47 @@ export function Home({ onLock }: HomeProps) {
     try {
       const resolved = await reconcileSwapOutputs(
         getConnection("mainnet-beta"),
-        wallet.shieldedAddress
+        targetAddress
       )
+      if (currentLoadId !== loadIdRef.current) return
       if (resolved > 0) {
-        listSwapOutputs().then(setSwapOutputs).catch(() => {})
+        listSwapOutputs()
+          .then((outputs) => {
+            if (currentLoadId === loadIdRef.current) {
+              setSwapOutputs(outputs)
+            }
+          })
+          .catch(() => {})
       }
     } catch {
       // best-effort
     }
+    if (currentLoadId !== loadIdRef.current) return
+
     try {
-      setShieldedLamports(await shieldedBalance(wallet.shieldedAddress))
-      setShieldedTokens(await shieldedTokenBalances(wallet.shieldedAddress))
-      setNotes((await getNotes(wallet.shieldedAddress)).slice().reverse())
+      const lamports = await shieldedBalance(targetAddress)
+      const tokens = await shieldedTokenBalances(targetAddress)
+      const noteList = (await getNotes(targetAddress)).slice().reverse()
+      if (currentLoadId !== loadIdRef.current) return
+      setShieldedLamports(lamports)
+      setShieldedTokens(tokens)
+      setNotes(noteList)
     } catch {
       // storage read failed — ignore
     }
   }
 
   useEffect(() => {
+    // Reset balances and notes immediately on account or network switch so
+    // stale balances from the previous account or network are never leaked or
+    // displayed while the async load is in flight.
+    setSolBalance(0n)
+    setShieldedLamports(0n)
+    setShieldedTokens({})
+    setNotes([])
     loadBalances()
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [wallet, network])
+  }, [wallet?.shieldedAddress, network])
 
   // Clear a stale "pending" swap row the reconciler could not account for. The
   // funds are already safe (re-shielded into the pool, or the input note was
@@ -599,13 +649,21 @@ export function Home({ onLock }: HomeProps) {
       const isLegacy = (stored.kdfVersion ?? 0) < KDF_VERSION_SCRYPT
       await decryptWallet(stored.encryptedData, settingsPassword, isLegacy)
       // Password correct — show the secret key as hex
+      setSettingsAttempts(0)
       const hexKey = Buffer.from(wallet!.secretKey).toString("hex")
       setRevealedPK(hexKey)
       setPkVisible(false)
       setShowPKModal(false)
       setSettingsPassword("")
     } catch {
-      setSettingsPasswordError("Incorrect password")
+      const next = settingsAttempts + 1
+      setSettingsAttempts(next)
+      if (next >= 5) {
+        resetSettingsModals()
+        await handleLock()
+      } else {
+        setSettingsPasswordError(`Incorrect password (${5 - next} attempts remaining)`)
+      }
     }
   }
 
@@ -613,14 +671,25 @@ export function Home({ onLock }: HomeProps) {
     setSettingsPasswordError("")
     try {
       const stored = await getStoredWallet()
-      if (!stored?.encryptedSeedPhrase) throw new Error("No seed phrase stored")
+      if (!stored?.encryptedSeedPhrase) {
+        setSettingsPasswordError("No seed phrase stored")
+        return
+      }
       const isLegacy = (stored.kdfVersion ?? 0) < KDF_VERSION_SCRYPT
       const phrase = decryptSeedPhrase(stored.encryptedSeedPhrase, settingsPassword, isLegacy)
+      setSettingsAttempts(0)
       setRevealedSeed(phrase)
       setShowSeedModal(false)
       setSettingsPassword("")
     } catch {
-      setSettingsPasswordError("Incorrect password")
+      const next = settingsAttempts + 1
+      setSettingsAttempts(next)
+      if (next >= 5) {
+        resetSettingsModals()
+        await handleLock()
+      } else {
+        setSettingsPasswordError(`Incorrect password (${5 - next} attempts remaining)`)
+      }
     }
   }
 
@@ -892,18 +961,21 @@ export function Home({ onLock }: HomeProps) {
         ) : bottomTab === "activity" ? (
           <div className="activity-content">
             {(() => {
-              // Only real deposits belong in the feed. The zero-value change/
-              // filler notes a transact emits carry an empty signature, so
-              // rendering them all under key="" collided React keys.
-              const deposits = notes.filter(
-                (n) => n.source === "deposit" && Number(n.amount) > 0
-              )
+              // Real deposits and received transfer notes belong in the feed.
+              const activityNotes = notes.filter((n) => {
+                if (n.source !== "deposit" && n.source !== "transfer") return false
+                try {
+                  return BigInt(n.amount) > 0n
+                } catch {
+                  return false
+                }
+              })
               const USDC_MINT = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"
               // Wrapped-SOL mint: the swaps app sends this as the outputMint for a
               // SOL output, so a token->SOL buy must be shown (and scaled) as SOL.
               const WSOL_MINT = "So11111111111111111111111111111111111111112"
 
-              if (deposits.length === 0 && swapOutputs.length === 0) {
+              if (activityNotes.length === 0 && swapOutputs.length === 0) {
                 return (
                   <div className="empty-state">
                     <svg width="64" height="64" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" opacity="0.2">
@@ -919,14 +991,14 @@ export function Home({ onLock }: HomeProps) {
                 )
               }
 
-              // Unify buys + deposits into one time-ordered feed, then bucket by
+              // Unify buys + deposits/transfers into one time-ordered feed, then bucket by
               // day so the list reads like a real transaction history.
               type Entry =
                 | { kind: "buy"; ts: number; s: SwapOutput }
                 | { kind: "deposit"; ts: number; n: ShieldedNote }
               const entries: Entry[] = [
                 ...swapOutputs.map((s) => ({ kind: "buy" as const, ts: s.createdAt, s })),
-                ...deposits.map((n) => ({ kind: "deposit" as const, ts: n.createdAt, n }))
+                ...activityNotes.map((n) => ({ kind: "deposit" as const, ts: n.createdAt, n }))
               ].sort((a, b) => b.ts - a.ts)
 
               const groups: { label: string; items: Entry[] }[] = []
@@ -1024,6 +1096,7 @@ export function Home({ onLock }: HomeProps) {
                           // the token's decimals/symbol, not the SOL divisor.
                           const USDC_MINT_DEP =
                             "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"
+                          const isTransfer = n.source === "transfer"
                           const depSym =
                             n.mint === USDC_MINT_DEP ? "USDC" : n.mint ? "token" : "SOL"
                           const depAmount =
@@ -1045,18 +1118,29 @@ export function Home({ onLock }: HomeProps) {
                                   amount: `+${depAmount} ${depSym}`,
                                   sym: depSym,
                                   address: "",
-                                  signature: n.signature,
-                                  explorerUrl: `https://explorer.solana.com/tx/${n.signature}?cluster=${network}`,
+                                  signature: n.signature || "",
+                                  explorerUrl: n.signature
+                                    ? `https://explorer.solana.com/tx/${n.signature}?cluster=${network}`
+                                    : "",
                                   createdAt: n.createdAt
                                 })
                               }
                             >
-                              <div className="activity-avatar deposit">
-                                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2">
-                                  <path d="M12 3v13"></path>
-                                  <polyline points="6 10 12 16 18 10"></polyline>
-                                  <line x1="5" y1="21" x2="19" y2="21"></line>
-                                </svg>
+                              <div className={`activity-avatar ${isTransfer ? "buy" : "deposit"}`}>
+                                {isTransfer ? (
+                                  <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2">
+                                    <polyline points="17 1 21 5 17 9"></polyline>
+                                    <path d="M3 11V9a4 4 0 0 1 4-4h14"></path>
+                                    <polyline points="7 23 3 19 7 15"></polyline>
+                                    <path d="M21 13v2a4 4 0 0 1-4 4H3"></path>
+                                  </svg>
+                                ) : (
+                                  <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2">
+                                    <path d="M12 3v13"></path>
+                                    <polyline points="6 10 12 16 18 10"></polyline>
+                                    <line x1="5" y1="21" x2="19" y2="21"></line>
+                                  </svg>
+                                )}
                                 <span className="activity-badge ok">
                                   <svg width="9" height="9" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3.5">
                                     <polyline points="20 6 9 17 4 12"></polyline>
@@ -1065,7 +1149,7 @@ export function Home({ onLock }: HomeProps) {
                               </div>
                               <div className="activity-info">
                                 <div className="activity-row">
-                                  <span className="activity-title">Deposit</span>
+                                  <span className="activity-title">{isTransfer ? "Received" : "Deposit"}</span>
                                   <span className="activity-amount pos">
                                     +{depAmount} {depSym}
                                   </span>
@@ -1074,7 +1158,11 @@ export function Home({ onLock }: HomeProps) {
                                   <span className="activity-sub">
                                     Shielded
                                     <span className="activity-dot">·</span>
-                                    {shortSig(n.signature)}
+                                    {n.signature
+                                      ? shortSig(n.signature)
+                                      : n.commitment
+                                        ? `${n.commitment.slice(0, 4)}…${n.commitment.slice(-4)}`
+                                        : "confirmed"}
                                   </span>
                                   <span className="activity-time">{timeAgo(n.createdAt)}</span>
                                 </div>
@@ -1185,14 +1273,16 @@ export function Home({ onLock }: HomeProps) {
                   )}
 
                   <div className="detail-actions">
-                    <a
-                      className="detail-btn ghost"
-                      href={activityDetail.explorerUrl}
-                      target="_blank"
-                      rel="noreferrer"
-                    >
-                      View on {activityDetail.kind === "buy" ? "Solscan" : "Explorer"}
-                    </a>
+                    {activityDetail.explorerUrl && (
+                      <a
+                        className="detail-btn ghost"
+                        href={activityDetail.explorerUrl}
+                        target="_blank"
+                        rel="noreferrer"
+                      >
+                        View on {activityDetail.kind === "buy" ? "Solscan" : "Explorer"}
+                      </a>
+                    )}
                     {activityDetail.kind === "buy" && activityDetail.pending ? (
                       <button className="detail-btn danger" onClick={dismissActivity}>
                         Dismiss
@@ -1736,7 +1826,7 @@ export function Home({ onLock }: HomeProps) {
                         <button
                           type="button"
                           className="label-max"
-                          onClick={() => setWithdrawAmount(String(Number(maxOne) / 1e9))}
+                          onClick={() => setWithdrawAmount(formatExactUnits(maxOne, 9))}
                         >
                           Max {(Number(maxOne) / 1e9).toFixed(4)} SOL
                         </button>
@@ -1949,7 +2039,7 @@ export function Home({ onLock }: HomeProps) {
                   <button
                     type="button"
                     className="max-button"
-                    onClick={() => setAmount(formatBalance(currentToken.balance, currentToken.decimals))}
+                    onClick={() => setAmount(formatExactUnits(currentToken.balance, currentToken.decimals))}
                   >
                     Max
                   </button>

@@ -8,13 +8,42 @@ import {
 } from "../lib/crypto/addressChecksum"
 
 // A representative 128-hex body: box pubkey (64) + spend pubkey (64).
-const BODY128 = "0123456789abcdef".repeat(8)
+const BODY128 = "0123456789abcdef".repeat(4) + "fedcba9876543210".repeat(4)
 const ADDR = `paraloom1${withChecksum(BODY128)}`
 
 describe("shielded address checksum (#781)", () => {
   it("accepts a correctly checksummed address and returns its body", () => {
     expect(isValidShieldedAddress(ADDR)).toBe(true)
     expect(parseShieldedAddress(ADDR)).toBe(BODY128)
+  })
+
+  it("normalizes uppercase hex to lowercase (#256)", () => {
+    const upper = `paraloom1${withChecksum(BODY128).toUpperCase()}`
+    expect(isValidShieldedAddress(upper)).toBe(true)
+    expect(parseShieldedAddress(upper)).toBe(BODY128.toLowerCase())
+  })
+
+  it("rejects all-zero box pubkey, all-zero spend pubkey, and identical halves (#256)", () => {
+    const zero64 = "0".repeat(64)
+    const valid64 = "1".repeat(64)
+
+    // All-zero box pubkey
+    expect(isValidShieldedAddress(`paraloom1${zero64}${valid64}00000000`)).toBe(false)
+
+    // All-zero spend pubkey
+    expect(isValidShieldedAddress(`paraloom1${valid64}${zero64}00000000`)).toBe(false)
+
+    // Identical halves (cross-primitive key reuse)
+    const identical128 = "0123456789abcdef".repeat(8)
+    expect(parseShieldedAddress(`paraloom1${identical128}00000000`)).toBeNull()
+    expect(() => withChecksum(identical128)).toThrow("must be distinct")
+    expect(() => shieldedChecksum(identical128)).toThrow("must be distinct")
+  })
+
+  it("rejects invalid bodyHex in shieldedChecksum and withChecksum (#256)", () => {
+    expect(() => shieldedChecksum("tooshort")).toThrow("must be a 128-character hex string")
+    expect(() => shieldedChecksum("z".repeat(128))).toThrow("must be a 128-character hex string")
+    expect(() => withChecksum("tooshort")).toThrow("must be a 128-character hex string")
   })
 
   it("rejects a one-character substitution in the body (the core #781 case)", () => {

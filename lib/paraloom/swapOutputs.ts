@@ -31,17 +31,76 @@ const KEY = "paraloom_swap_outputs"
 // signature once the swap lands. Keyed on the address so the two writes collapse
 // to one row.
 export async function saveSwapOutput(output: SwapOutput): Promise<void> {
+  if (!output || typeof output !== "object") {
+    throw new Error("Invalid swap output")
+  }
+  const freshAddress =
+    typeof output.freshAddress === "string" ? output.freshAddress.trim() : ""
+  if (!freshAddress) {
+    throw new Error("Invalid freshAddress")
+  }
+  if (
+    typeof output.outAmount !== "number" ||
+    !Number.isFinite(output.outAmount) ||
+    output.outAmount < 0
+  ) {
+    throw new Error("Invalid outAmount")
+  }
+
   const stored = await chrome.storage.local.get(KEY)
-  const current = (stored[KEY] as SwapOutput[]) ?? []
-  const i = current.findIndex((o) => o.freshAddress === output.freshAddress)
-  if (i >= 0) current[i] = { ...current[i], ...output }
-  else current.push(output)
+  const current = Array.isArray(stored[KEY]) ? (stored[KEY] as SwapOutput[]) : []
+  const i = current.findIndex((o) => o.freshAddress === freshAddress)
+
+  if (i >= 0) {
+    const existing = current[i]
+    const freshSecretKeyHex =
+      typeof output.freshSecretKeyHex === "string" && output.freshSecretKeyHex.trim()
+        ? output.freshSecretKeyHex.trim()
+        : existing.freshSecretKeyHex
+    if (!freshSecretKeyHex) {
+      throw new Error("Invalid freshSecretKeyHex")
+    }
+
+    current[i] = {
+      ...existing,
+      ...output,
+      freshAddress,
+      freshSecretKeyHex,
+      createdAt:
+        existing.createdAt ??
+        (Number.isFinite(output.createdAt) ? output.createdAt : Date.now()),
+      reshield:
+        output.reshield !== undefined ? output.reshield : existing.reshield,
+      reshieldRecovered:
+        output.reshieldRecovered !== undefined
+          ? output.reshieldRecovered
+          : existing.reshieldRecovered
+    }
+  } else {
+    const freshSecretKeyHex =
+      typeof output.freshSecretKeyHex === "string"
+        ? output.freshSecretKeyHex.trim()
+        : ""
+    if (!freshSecretKeyHex) {
+      throw new Error("Invalid freshSecretKeyHex")
+    }
+    const createdAt = Number.isFinite(output.createdAt)
+      ? output.createdAt
+      : Date.now()
+    current.push({
+      ...output,
+      freshAddress,
+      freshSecretKeyHex,
+      createdAt
+    })
+  }
+
   await chrome.storage.local.set({ [KEY]: current })
 }
 
 export async function listSwapOutputs(): Promise<SwapOutput[]> {
   const stored = await chrome.storage.local.get(KEY)
-  return (stored[KEY] as SwapOutput[]) ?? []
+  return Array.isArray(stored[KEY]) ? (stored[KEY] as SwapOutput[]) : []
 }
 
 // Drop a swap row by its fresh address. Used to clear a stale "pending" row the
@@ -50,7 +109,7 @@ export async function listSwapOutputs(): Promise<SwapOutput[]> {
 // this only removes the misleading Activity entry, never any money.
 export async function dismissSwapOutput(freshAddress: string): Promise<void> {
   const stored = await chrome.storage.local.get(KEY)
-  const current = (stored[KEY] as SwapOutput[]) ?? []
+  const current = Array.isArray(stored[KEY]) ? (stored[KEY] as SwapOutput[]) : []
   const next = current.filter((o) => o.freshAddress !== freshAddress)
   await chrome.storage.local.set({ [KEY]: next })
 }

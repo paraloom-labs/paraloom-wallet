@@ -55,11 +55,64 @@ function makeArea(): FakeArea {
 
 export interface FakeChrome {
   storage: { local: FakeArea; session: FakeArea }
+  alarms: {
+    create: (name: string, alarmInfo: unknown) => void
+    onAlarm: { addListener: (listener: (alarm: { name: string }) => void) => void }
+  }
+  runtime: {
+    onMessage: {
+      addListener: (
+        listener: (
+          message: any,
+          sender: chrome.runtime.MessageSender,
+          sendResponse: (response?: any) => void
+        ) => boolean | void
+      ) => void
+      listeners: Array<
+        (
+          message: any,
+          sender: chrome.runtime.MessageSender,
+          sendResponse: (response?: any) => void
+        ) => boolean | void
+      >
+    }
+    getURL: (path?: string) => string
+    getPlatformInfo: () => Promise<unknown>
+  }
 }
+
+const sharedOnMessageListeners: Array<
+  (
+    message: any,
+    sender: chrome.runtime.MessageSender,
+    sendResponse: (response?: any) => void
+  ) => boolean | void
+> = []
 
 /** Install a fresh `globalThis.chrome`. Call in `beforeEach`. */
 export function installFakeChrome(): FakeChrome {
-  const chrome: FakeChrome = { storage: { local: makeArea(), session: makeArea() } }
+  const chrome: FakeChrome = {
+    storage: { local: makeArea(), session: makeArea() },
+    alarms: {
+      create: () => {},
+      onAlarm: { addListener: () => {} }
+    },
+    runtime: {
+      onMessage: {
+        addListener: (listener) => {
+          if (!sharedOnMessageListeners.includes(listener)) {
+            sharedOnMessageListeners.push(listener)
+          }
+        },
+        listeners: sharedOnMessageListeners
+      },
+      getURL: (path = "") => `chrome-extension://mock-id/${path}`,
+      getPlatformInfo: async () => ({ os: "linux" })
+    }
+  }
   ;(globalThis as unknown as { chrome: FakeChrome }).chrome = chrome
   return chrome
 }
+
+// Ensure a default fake chrome is installed immediately on import
+installFakeChrome()

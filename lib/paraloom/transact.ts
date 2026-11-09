@@ -36,13 +36,31 @@ function pda(seed: string): PublicKey {
   return PublicKey.findProgramAddressSync([Buffer.from(seed)], programId)[0]
 }
 
+const MAX_U64 = 0xffffffffffffffffn
+
+function validateDepositU64(amount: bigint): void {
+  if (typeof amount !== "bigint" || amount <= 0n || amount > MAX_U64) {
+    throw new Error("Invalid amount: must be an unsigned 64-bit integer greater than 0")
+  }
+}
+
+function validate32Bytes(buf: Uint8Array, name: string): void {
+  if (!(buf instanceof Uint8Array) || buf.length !== 32) {
+    throw new Error(`Invalid ${name}: must be exactly 32 bytes`)
+  }
+}
+
 // Layout: DEPOSIT_NOTE discriminator (8) | amount u64 LE (8) | pubkey (32) |
 // blinding (32) — matching the on-chain `deposit_note(amount, pubkey, blinding)`.
-function depositNoteInstructionData(
+export function depositNoteInstructionData(
   amountLamports: bigint,
   pubkey: Uint8Array,
   blinding: Uint8Array
 ): Buffer {
+  validateDepositU64(amountLamports)
+  validate32Bytes(pubkey, "pubkey")
+  validate32Bytes(blinding, "blinding")
+
   const data = new Uint8Array(8 + 8 + 32 + 32)
   data.set(DEPOSIT_NOTE_DISCRIMINATOR, 0)
   new DataView(data.buffer).setBigUint64(8, amountLamports, true)
@@ -289,7 +307,92 @@ export async function submitTransact(
   // `recipientHex` is the recipient token account.
   mintHex?: string
 ): Promise<TransactSubmission> {
-  const bundle = JSON.parse(proofBundleJson)
+  if (typeof rootHex !== "string" || !/^[0-9a-fA-F]{64}$/.test(rootHex)) {
+    throw new Error("Invalid rootHex: must be a 64-character hex string")
+  }
+  if (typeof recipientHex !== "string" || !/^[0-9a-fA-F]{64}$/.test(recipientHex)) {
+    throw new Error("Invalid recipientHex: must be a 64-character hex string")
+  }
+  if (typeof extAmount !== "bigint" || extAmount > 0n) {
+    throw new Error("Invalid extAmount: must be a bigint <= 0n")
+  }
+  if (
+    mintHex !== undefined &&
+    (typeof mintHex !== "string" || !/^[0-9a-fA-F]{64}$/.test(mintHex))
+  ) {
+    throw new Error("Invalid mintHex: must be a 64-character hex string")
+  }
+  if (
+    !Array.isArray(ciphertexts) ||
+    ciphertexts.length !== 2 ||
+    typeof ciphertexts[0] !== "string" ||
+    !ciphertexts[0] ||
+    !/^[0-9a-fA-F]+$/.test(ciphertexts[0]) ||
+    typeof ciphertexts[1] !== "string" ||
+    !ciphertexts[1] ||
+    !/^[0-9a-fA-F]+$/.test(ciphertexts[1])
+  ) {
+    throw new Error(
+      "Invalid ciphertexts: must be a 2-element tuple of non-empty hex strings"
+    )
+  }
+
+  if (typeof proofBundleJson !== "string") {
+    throw new Error("Invalid proofBundleJson: must be a JSON string")
+  }
+  let bundle: any
+  try {
+    bundle = JSON.parse(proofBundleJson)
+  } catch {
+    throw new Error("Invalid proofBundleJson: malformed JSON")
+  }
+  if (!bundle || typeof bundle !== "object") {
+    throw new Error("Invalid proofBundleJson: must be an object")
+  }
+
+  if (
+    !Array.isArray(bundle.nullifiers) ||
+    bundle.nullifiers.length !== 2 ||
+    typeof bundle.nullifiers[0] !== "string" ||
+    !/^[0-9a-fA-F]{64}$/.test(bundle.nullifiers[0]) ||
+    typeof bundle.nullifiers[1] !== "string" ||
+    !/^[0-9a-fA-F]{64}$/.test(bundle.nullifiers[1])
+  ) {
+    throw new Error(
+      "Invalid nullifiers: must be a 2-element array of 64-character hex strings"
+    )
+  }
+  if (bundle.nullifiers[0].toLowerCase() === bundle.nullifiers[1].toLowerCase()) {
+    throw new Error("Invalid nullifiers: nullifiers must be distinct")
+  }
+
+  if (
+    !Array.isArray(bundle.output_commitments) ||
+    bundle.output_commitments.length !== 2 ||
+    typeof bundle.output_commitments[0] !== "string" ||
+    !/^[0-9a-fA-F]{64}$/.test(bundle.output_commitments[0]) ||
+    typeof bundle.output_commitments[1] !== "string" ||
+    !/^[0-9a-fA-F]{64}$/.test(bundle.output_commitments[1])
+  ) {
+    throw new Error(
+      "Invalid output_commitments: must be a 2-element array of 64-character hex strings"
+    )
+  }
+  if (
+    bundle.output_commitments[0].toLowerCase() ===
+    bundle.output_commitments[1].toLowerCase()
+  ) {
+    throw new Error("Invalid output_commitments: commitments must be distinct")
+  }
+
+  if (
+    typeof bundle.proof !== "string" ||
+    !bundle.proof ||
+    !/^[0-9a-fA-F]+$/.test(bundle.proof)
+  ) {
+    throw new Error("Invalid proof: must be a non-empty hex string")
+  }
+
   const body: Record<string, unknown> = {
     recipient: recipientHex,
     nullifiers: bundle.nullifiers,
@@ -311,5 +414,9 @@ export async function submitTransact(
     throw new Error(`transact ingress rejected: ${res.status} ${await res.text()}`)
   }
   const json = await res.json()
-  return { requestId: json.request_id ?? json.requestId }
+  const rawId = json.request_id ?? json.requestId
+  if (typeof rawId !== "string" || !rawId.trim()) {
+    throw new Error("Invalid ingress response: missing or empty requestId")
+  }
+  return { requestId: rawId.trim() }
 }

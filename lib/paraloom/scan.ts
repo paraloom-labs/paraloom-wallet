@@ -103,17 +103,20 @@ export async function scanForNotes(
   const delivered = (await res.json()) as DeliveredNote[]
 
   const known = new Set(
-    (await getNotes(account)).map((n) => n.commitment).filter(Boolean) as string[]
+    (await getNotes(account))
+      .map((n) => n.commitment?.toLowerCase())
+      .filter(Boolean) as string[]
   )
   const spendPubHex = await v3NotePubkey(spendPrivkeyHex)
 
   let found = 0
   for (const d of delivered) {
-    if (known.has(d.output_commitment)) {
+    const outputCommitment = d.output_commitment?.toLowerCase()
+    if (!outputCommitment || known.has(outputCommitment)) {
       continue
     }
     const note = tryDecryptNote(boxSecretKey, d.ciphertext)
-    if (!note) {
+    if (!note || note.amount <= 0n) {
       continue
     }
     // The commitment must bind the decrypted amount, blinding and asset under
@@ -126,7 +129,7 @@ export async function scanForNotes(
     const expected = isNative
       ? await v3NoteCommitment(note.amount, spendPubHex, note.blindingHex)
       : await v3NoteCommitmentAsset(note.amount, spendPubHex, note.blindingHex, note.assetIdHex)
-    if (expected !== d.output_commitment) {
+    if (expected.toLowerCase() !== outputCommitment) {
       continue
     }
     // Bind the node-supplied mint to the assetId the commitment already
@@ -145,13 +148,13 @@ export async function scanForNotes(
       signature: "",
       createdAt: Date.now(),
       spent: false,
-      commitment: d.output_commitment,
+      commitment: outputCommitment,
       source: "transfer"
     })
     // Track it here too: the same commitment can appear twice in one response,
     // and `known` is otherwise only a snapshot from before the loop, so the
     // note would be stored once but counted twice.
-    known.add(d.output_commitment)
+    known.add(outputCommitment)
     found++
   }
   return found

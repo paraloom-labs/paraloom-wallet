@@ -47,23 +47,35 @@ export async function getNotes(account: string): Promise<ShieldedNote[]> {
   return all[account] ?? []
 }
 
+function isSameNote(a: ShieldedNote, b: ShieldedNote): boolean {
+  const commA = a.commitment?.toLowerCase()
+  const commB = b.commitment?.toLowerCase()
+  if (commA && commB) {
+    return commA === commB
+  }
+  if (a.signature && b.signature && a.signature === b.signature) {
+    return true
+  }
+  return false
+}
+
 export async function addNote(account: string, note: ShieldedNote): Promise<void> {
   const all = await readAll()
   const existing = all[account] ?? []
-  // Idempotent by (non-empty) deposit signature: the same shielded note can be
-  // persisted more than once — the early on-submit persist AND the end-of-flow
-  // persist AND the recovery scan all target the same deposit — so dedupe here
-  // rather than double-counting the balance.
-  if (note.signature && existing.some((n) => n.signature === note.signature)) {
+  if (existing.some((n) => isSameNote(n, note))) {
     return
   }
-  all[account] = [...existing, note]
+  const toStore = note.commitment
+    ? { ...note, commitment: note.commitment.toLowerCase() }
+    : note
+  all[account] = [...existing, toStore]
   await writeAll(all)
 }
 
 // Mark the note with this deposit signature as spent (after a withdrawal
 // settles), so it no longer counts toward the shielded balance.
 export async function markNoteSpent(account: string, signature: string): Promise<void> {
+  if (!signature) return
   const all = await readAll()
   const notes = all[account] ?? []
   all[account] = notes.map((n) => (n.signature === signature ? { ...n, spent: true } : n))
@@ -75,10 +87,13 @@ export async function markNoteSpent(account: string, signature: string): Promise
 export async function addDiscoveredNote(account: string, note: ShieldedNote): Promise<void> {
   const all = await readAll()
   const notes = all[account] ?? []
-  if (notes.some((n) => n.commitment && n.commitment === note.commitment)) {
+  if (notes.some((n) => isSameNote(n, note))) {
     return
   }
-  all[account] = [...notes, note]
+  const toStore = note.commitment
+    ? { ...note, commitment: note.commitment.toLowerCase() }
+    : note
+  all[account] = [...notes, toStore]
   await writeAll(all)
 }
 
@@ -91,11 +106,12 @@ export async function setNoteLeafIndex(
   commitment: string,
   leafIndex: number
 ): Promise<void> {
+  const norm = commitment.toLowerCase()
   const all = await readAll()
   const notes = all[account] ?? []
   let changed = false
   all[account] = notes.map((n) => {
-    if (n.commitment === commitment && n.leafIndex !== leafIndex) {
+    if (n.commitment && n.commitment.toLowerCase() === norm && n.leafIndex !== leafIndex) {
       changed = true
       return { ...n, leafIndex }
     }
@@ -107,9 +123,12 @@ export async function setNoteLeafIndex(
 // Mark a note spent by its commitment (used for transfer inputs/outputs, which
 // are identified by commitment rather than a deposit signature).
 export async function markNoteSpentByCommitment(account: string, commitment: string): Promise<void> {
+  const norm = commitment.toLowerCase()
   const all = await readAll()
   const notes = all[account] ?? []
-  all[account] = notes.map((n) => (n.commitment === commitment ? { ...n, spent: true } : n))
+  all[account] = notes.map((n) =>
+    n.commitment && n.commitment.toLowerCase() === norm ? { ...n, spent: true } : n
+  )
   await writeAll(all)
 }
 

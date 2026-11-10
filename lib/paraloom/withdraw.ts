@@ -64,7 +64,7 @@ export async function withdraw(
     nullifier,
     recipient: destRecipientHex,
     proof,
-    amount: Number(amount),
+    amount: amount.toString(),
     fee: 0
   }
 

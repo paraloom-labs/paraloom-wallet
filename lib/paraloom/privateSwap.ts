@@ -684,7 +684,13 @@ export async function resumeSwapAtFreshAddress(
   )
 
   let reshielded: ReshieldedNote | undefined
-  if (reshield && outputMint !== "SOL") {
+  // Use isNativeSolOutput (not a bare `!== "SOL"`) so that a WSOL output mint
+  // (So111…112, which Jupiter unwraps to native SOL) is treated as native SOL,
+  // matching the primary flow in privateSwapSolToToken. Without this, a resumed
+  // swap with WSOL output fell into reshieldToken() — which fails because
+  // Jupiter already unwrapped the WSOL to native SOL, leaving no token account
+  // to re-shield from.
+  if (reshield && !isNativeSolOutput(outputMint)) {
     reshielded = await reshieldToken(
       connection,
       fresh,

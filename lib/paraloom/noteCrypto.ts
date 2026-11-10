@@ -19,6 +19,7 @@
 // v1 envelope tag: `crypto_box` (X25519 + XSalsa20-Poly1305). The remainder is
 // byte-identical to the pre-tag encoding.
 const ENVELOPE_TAG_V1 = 0x01
+const MAX_U64 = 0xffff_ffff_ffff_ffffn
 
 import { randomBytes } from "@noble/hashes/utils"
 import * as nacl from "tweetnacl"
@@ -32,8 +33,29 @@ export interface NotePlaintext {
   assetIdHex: string
 }
 
-function hexToBytes(hex: string): Uint8Array {
+function parseHex32(hex: string, fieldName: string): Uint8Array {
+  if (typeof hex !== "string") {
+    throw new Error(`Invalid ${fieldName}: expected hex string`)
+  }
   const clean = hex.startsWith("0x") ? hex.slice(2) : hex
+  if (clean.length !== 64 || !/^[0-9a-fA-F]{64}$/.test(clean)) {
+    throw new Error(`Invalid ${fieldName}: must be a 32-byte hex string (64 hex characters)`)
+  }
+  const out = new Uint8Array(32)
+  for (let i = 0; i < 32; i++) {
+    out[i] = parseInt(clean.slice(i * 2, i * 2 + 2), 16)
+  }
+  return out
+}
+
+function hexToBytes(hex: string): Uint8Array {
+  if (typeof hex !== "string") {
+    throw new Error("Invalid hex string: input must be a string")
+  }
+  const clean = hex.startsWith("0x") ? hex.slice(2) : hex
+  if (clean.length % 2 !== 0 || !/^[0-9a-fA-F]*$/.test(clean)) {
+    throw new Error("Invalid hex string: must contain valid hexadecimal characters with even length")
+  }
   const out = new Uint8Array(clean.length / 2)
   for (let i = 0; i < out.length; i++) {
     out[i] = parseInt(clean.slice(i * 2, i * 2 + 2), 16)
@@ -45,11 +67,20 @@ function bytesToHex(bytes: Uint8Array): string {
   return Array.from(bytes, (b) => b.toString(16).padStart(2, "0")).join("")
 }
 
-function encodePlaintext(note: NotePlaintext): Uint8Array {
+export function encodePlaintext(note: NotePlaintext): Uint8Array {
+  if (!note || typeof note !== "object") {
+    throw new Error("Invalid note: expected object")
+  }
+  if (typeof note.amount !== "bigint" || note.amount < 0n || note.amount > MAX_U64) {
+    throw new Error("Invalid note amount: must be an unsigned 64-bit integer (0 <= amount <= 2^64 - 1)")
+  }
+  const blinding = parseHex32(note.blindingHex, "blindingHex")
+  const assetId = parseHex32(note.assetIdHex, "assetIdHex")
+
   const pt = new Uint8Array(72)
   new DataView(pt.buffer).setBigUint64(0, note.amount, true) // amount, little-endian
-  pt.set(hexToBytes(note.blindingHex), 8)
-  pt.set(hexToBytes(note.assetIdHex), 40)
+  pt.set(blinding, 8)
+  pt.set(assetId, 40)
   return pt
 }
 
@@ -59,10 +90,11 @@ function encodePlaintext(note: NotePlaintext): Uint8Array {
  * hex bundle to carry in the transfer's `ciphertexts`.
  */
 export function encryptNote(recipientBoxPubHex: string, note: NotePlaintext): string {
-  const recipientPub = hexToBytes(recipientBoxPubHex)
+  const recipientPub = parseHex32(recipientBoxPubHex, "recipientBoxPubHex")
+  const pt = encodePlaintext(note)
   const ephemeral = nacl.box.keyPair()
   const nonce = randomBytes(nacl.box.nonceLength) // 24
-  const ct = nacl.box(encodePlaintext(note), nonce, recipientPub, ephemeral.secretKey)
+  const ct = nacl.box(pt, nonce, recipientPub, ephemeral.secretKey)
 
   const bundle = new Uint8Array(1 + 32 + 24 + ct.length)
   bundle[0] = ENVELOPE_TAG_V1
@@ -78,7 +110,14 @@ export function encryptNote(recipientBoxPubHex: string, note: NotePlaintext): st
  * every delivered note and silently skip the ones not for them).
  */
 export function tryDecryptNote(boxSecretKey: Uint8Array, bundleHex: string): NotePlaintext | null {
-  const bundle = hexToBytes(bundleHex)
+  if (typeof bundleHex !== "string" || !boxSecretKey || boxSecretKey.length !== 32) {
+    return null
+  }
+  const clean = bundleHex.startsWith("0x") ? bundleHex.slice(2) : bundleHex
+  if (clean.length === 0 || clean.length % 2 !== 0 || !/^[0-9a-fA-F]+$/.test(clean)) {
+    return null
+  }
+  const bundle = hexToBytes(clean)
 
   // Parse the v1-tagged envelope (epk at offset 1) and, for notes delivered
   // before the tag was added, the legacy untagged one (epk at offset 0). When
@@ -87,7 +126,7 @@ export function tryDecryptNote(boxSecretKey: Uint8Array, bundleHex: string): Not
   // correct parse decrypts. Otherwise it can only be legacy.
   const offsets = bundle[0] === ENVELOPE_TAG_V1 ? [1, 0] : [0]
   for (const off of offsets) {
-    if (bundle.length < off + 56 + 16) continue
+    if (bundle.length !== off + 56 + 16 + 72) continue
     const epk = bundle.slice(off, off + 32)
     const nonce = bundle.slice(off + 32, off + 56)
     const ct = bundle.slice(off + 56)

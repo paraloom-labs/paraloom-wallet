@@ -19,9 +19,9 @@
 //   2. The offsets must match core's, which is checked below against core's
 //      own vector file rather than against `encryptNote`.
 
-import { encryptNote, tryDecryptNote, type NotePlaintext } from "~lib/paraloom/noteCrypto"
+import { encodePlaintext, encryptNote, tryDecryptNote, type NotePlaintext } from "~lib/paraloom/noteCrypto"
 import * as nacl from "tweetnacl"
-import { describe, expect, it } from "vitest"
+import { describe, expect, it, vi } from "vitest"
 import vectors from "./vectors/note_envelope_v1.json"
 
 const hex = (b: Uint8Array) => Buffer.from(b).toString("hex")
@@ -247,5 +247,164 @@ describe("trial decryption", () => {
     bundle.set(nonce, 33)
     bundle.set(ct, 57)
     expect(tryDecryptNote(RECIPIENT_SECRET, hex(bundle))).toBeNull()
+  })
+})
+
+describe("tryDecryptNote defensive bounds and performance (#232)", () => {
+  it("executes exactly 1 nacl.box.open on a 145-byte v1 note addressed to someone else (no 2x amplification)", () => {
+    const spy = vi.spyOn(nacl.box, "open")
+    try {
+      spy.mockClear()
+      const stranger = nacl.box.keyPair()
+      const v1Bundle = encryptNote(hex(stranger.publicKey), NOTE)
+      expect(bytes(v1Bundle)).toHaveLength(145)
+
+      const result = tryDecryptNote(RECIPIENT_SECRET, v1Bundle)
+      expect(result).toBeNull()
+      // off=1 was tried, off=0 was skipped because bundle.length !== 0 + 144
+      expect(spy).toHaveBeenCalledTimes(1)
+    } finally {
+      spy.mockRestore()
+    }
+  })
+
+  it("skips nacl.box.open entirely on oversized ciphertexts (DoS protection)", () => {
+    const spy = vi.spyOn(nacl.box, "open")
+    try {
+      spy.mockClear()
+      const oversized = "01" + "aa".repeat(145) // 146 bytes
+      expect(tryDecryptNote(RECIPIENT_SECRET, oversized)).toBeNull()
+      const multiKb = "01" + "bb".repeat(4096)
+      expect(tryDecryptNote(RECIPIENT_SECRET, multiKb)).toBeNull()
+      expect(spy).not.toHaveBeenCalled()
+    } finally {
+      spy.mockRestore()
+    }
+  })
+
+  it("skips nacl.box.open entirely on invalid hex or odd-length strings", () => {
+    const spy = vi.spyOn(nacl.box, "open")
+    try {
+      spy.mockClear()
+      expect(tryDecryptNote(RECIPIENT_SECRET, "invalid_non_hex")).toBeNull()
+      expect(tryDecryptNote(RECIPIENT_SECRET, "012345")).toBeNull() // odd length
+      expect(tryDecryptNote(RECIPIENT_SECRET, "01zz".repeat(50))).toBeNull()
+      expect(spy).not.toHaveBeenCalled()
+    } finally {
+      spy.mockRestore()
+    }
+  })
+
+  it("rejects invalid secret key lengths without throwing", () => {
+    expect(tryDecryptNote(new Uint8Array(31), V1_BUNDLE_HEX)).toBeNull()
+    expect(tryDecryptNote(new Uint8Array(33), V1_BUNDLE_HEX)).toBeNull()
+    expect(tryDecryptNote(null as unknown as Uint8Array, V1_BUNDLE_HEX)).toBeNull()
+  })
+})
+
+describe("encodePlaintext and encryptNote field validation (#232)", () => {
+  it("encodes valid plaintexts with boundary amounts and hex prefixes", () => {
+    const ptZero = encodePlaintext({
+      amount: 0n,
+      blindingHex: "0x" + BLINDING_HEX,
+      assetIdHex: "0x" + NATIVE_ASSET_HEX
+    })
+    expect(ptZero).toHaveLength(72)
+    expect(new DataView(ptZero.buffer).getBigUint64(0, true)).toBe(0n)
+
+    const maxU64 = 0xffff_ffff_ffff_ffffn
+    const ptMax = encodePlaintext({
+      amount: maxU64,
+      blindingHex: BLINDING_HEX,
+      assetIdHex: NATIVE_ASSET_HEX
+    })
+    expect(new DataView(ptMax.buffer).getBigUint64(0, true)).toBe(maxU64)
+  })
+
+  it("throws on negative or overflow u64 amount", () => {
+    expect(() =>
+      encodePlaintext({
+        amount: -1n,
+        blindingHex: BLINDING_HEX,
+        assetIdHex: NATIVE_ASSET_HEX
+      })
+    ).toThrow(/amount/i)
+
+    expect(() =>
+      encodePlaintext({
+        amount: 0x1_0000_0000_0000_0000n,
+        blindingHex: BLINDING_HEX,
+        assetIdHex: NATIVE_ASSET_HEX
+      })
+    ).toThrow(/amount/i)
+
+    expect(() =>
+      encryptNote(RECIPIENT_PUB_HEX, {
+        amount: -5n,
+        blindingHex: BLINDING_HEX,
+        assetIdHex: NATIVE_ASSET_HEX
+      })
+    ).toThrow(/amount/i)
+  })
+
+  it("throws on invalid blindingHex length or characters", () => {
+    // 31 bytes (62 hex chars)
+    expect(() =>
+      encodePlaintext({
+        amount: 100n,
+        blindingHex: "aa".repeat(31),
+        assetIdHex: NATIVE_ASSET_HEX
+      })
+    ).toThrow(/blindingHex/i)
+
+    // 33 bytes (66 hex chars)
+    expect(() =>
+      encodePlaintext({
+        amount: 100n,
+        blindingHex: "aa".repeat(33),
+        assetIdHex: NATIVE_ASSET_HEX
+      })
+    ).toThrow(/blindingHex/i)
+
+    // Non-hex
+    expect(() =>
+      encodePlaintext({
+        amount: 100n,
+        blindingHex: "zz".repeat(32),
+        assetIdHex: NATIVE_ASSET_HEX
+      })
+    ).toThrow(/blindingHex/i)
+  })
+
+  it("throws on invalid assetIdHex length or characters", () => {
+    expect(() =>
+      encodePlaintext({
+        amount: 100n,
+        blindingHex: BLINDING_HEX,
+        assetIdHex: "00".repeat(31)
+      })
+    ).toThrow(/assetIdHex/i)
+
+    expect(() =>
+      encodePlaintext({
+        amount: 100n,
+        blindingHex: BLINDING_HEX,
+        assetIdHex: "00".repeat(33)
+      })
+    ).toThrow(/assetIdHex/i)
+
+    expect(() =>
+      encodePlaintext({
+        amount: 100n,
+        blindingHex: BLINDING_HEX,
+        assetIdHex: "gg".repeat(32)
+      })
+    ).toThrow(/assetIdHex/i)
+  })
+
+  it("throws on invalid recipientBoxPubHex in encryptNote", () => {
+    expect(() => encryptNote("00".repeat(31), NOTE)).toThrow(/recipientBoxPubHex/i)
+    expect(() => encryptNote("00".repeat(33), NOTE)).toThrow(/recipientBoxPubHex/i)
+    expect(() => encryptNote("not-hex-at-all", NOTE)).toThrow(/recipientBoxPubHex/i)
   })
 })

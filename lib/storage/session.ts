@@ -20,17 +20,28 @@ const ACTIVITY_KEY = "paraloom_last_activity"
 
 // Portable hex helpers (no Buffer) so this module works in both the popup and
 // the background service worker, where Buffer may be unavailable.
-const toHex = (u: Uint8Array): string =>
+export const toHex = (u: Uint8Array): string =>
   Array.from(u, (b) => b.toString(16).padStart(2, "0")).join("")
-const fromHex = (h: string): Uint8Array => {
-  const out = new Uint8Array(h.length / 2)
+
+export const fromHex = (h: string, expectedLen?: number): Uint8Array => {
+  if (typeof h !== "string") {
+    throw new Error("Invalid hex string: input must be a string")
+  }
+  const clean = h.startsWith("0x") ? h.slice(2) : h
+  if (clean.length % 2 !== 0 || !/^[0-9a-fA-F]*$/.test(clean)) {
+    throw new Error("Invalid hex string: must contain valid hexadecimal characters with even length")
+  }
+  const out = new Uint8Array(clean.length / 2)
   for (let i = 0; i < out.length; i++) {
-    out[i] = parseInt(h.slice(i * 2, i * 2 + 2), 16)
+    out[i] = parseInt(clean.slice(i * 2, i * 2 + 2), 16)
+  }
+  if (expectedLen !== undefined && out.length !== expectedLen) {
+    throw new Error(`Invalid key length: expected ${expectedLen} bytes, got ${out.length}`)
   }
   return out
 }
 
-interface SerKeyPair {
+export interface SerKeyPair {
   publicKey: string
   secretKey: string
   shieldedAddress: string
@@ -39,14 +50,14 @@ interface SerKeyPair {
   spendPrivkey: string
 }
 
-interface SerAccount {
+export interface SerAccount {
   index: number
   name: string
   keypair: SerKeyPair
   balance: string
 }
 
-interface SerSession {
+export interface SerSession {
   wallet: SerKeyPair
   accounts: SerAccount[]
   currentAccountIndex: number
@@ -60,23 +71,48 @@ export interface WalletSession {
   seedPhrase: string | null
 }
 
-const serKp = (k: WalletKeyPair): SerKeyPair => ({
-  publicKey: toHex(k.publicKey),
-  secretKey: toHex(k.secretKey),
-  shieldedAddress: k.shieldedAddress,
-  boxPublicKey: toHex(k.boxPublicKey),
-  boxSecretKey: toHex(k.boxSecretKey),
-  spendPrivkey: toHex(k.spendPrivkey)
-})
+export const serKp = (k: WalletKeyPair): SerKeyPair => {
+  if (!k || typeof k !== "object") {
+    throw new Error("Invalid WalletKeyPair")
+  }
+  if (
+    !k.publicKey || k.publicKey.length !== 32 ||
+    !k.secretKey || k.secretKey.length !== 64 ||
+    !k.boxPublicKey || k.boxPublicKey.length !== 32 ||
+    !k.boxSecretKey || k.boxSecretKey.length !== 32 ||
+    !k.spendPrivkey || k.spendPrivkey.length !== 32
+  ) {
+    throw new Error("Invalid key length in WalletKeyPair")
+  }
+  if (typeof k.shieldedAddress !== "string" || !k.shieldedAddress) {
+    throw new Error("Invalid shieldedAddress: expected non-empty string")
+  }
+  return {
+    publicKey: toHex(k.publicKey),
+    secretKey: toHex(k.secretKey),
+    shieldedAddress: k.shieldedAddress,
+    boxPublicKey: toHex(k.boxPublicKey),
+    boxSecretKey: toHex(k.boxSecretKey),
+    spendPrivkey: toHex(k.spendPrivkey)
+  }
+}
 
-const deKp = (s: SerKeyPair): WalletKeyPair => ({
-  publicKey: fromHex(s.publicKey),
-  secretKey: fromHex(s.secretKey),
-  shieldedAddress: s.shieldedAddress,
-  boxPublicKey: fromHex(s.boxPublicKey),
-  boxSecretKey: fromHex(s.boxSecretKey),
-  spendPrivkey: fromHex(s.spendPrivkey)
-})
+export const deKp = (s: SerKeyPair): WalletKeyPair => {
+  if (!s || typeof s !== "object") {
+    throw new Error("Invalid keypair: expected object")
+  }
+  if (typeof s.shieldedAddress !== "string" || !s.shieldedAddress) {
+    throw new Error("Invalid shieldedAddress: expected non-empty string")
+  }
+  return {
+    publicKey: fromHex(s.publicKey, 32),
+    secretKey: fromHex(s.secretKey, 64),
+    shieldedAddress: s.shieldedAddress,
+    boxPublicKey: fromHex(s.boxPublicKey, 32),
+    boxSecretKey: fromHex(s.boxSecretKey, 32),
+    spendPrivkey: fromHex(s.spendPrivkey, 32)
+  }
+}
 
 export async function saveSession(session: WalletSession): Promise<void> {
   const ser: SerSession = {
@@ -97,19 +133,39 @@ export async function saveSession(session: WalletSession): Promise<void> {
 }
 
 export async function loadSession(): Promise<WalletSession | null> {
-  const result = await chrome.storage.session.get(SESSION_KEY)
-  const ser = result[SESSION_KEY] as SerSession | undefined
-  if (!ser) return null
-  return {
-    wallet: deKp(ser.wallet),
-    accounts: ser.accounts.map((a) => ({
-      index: a.index,
-      name: a.name,
-      keypair: deKp(a.keypair),
-      balance: BigInt(a.balance)
-    })),
-    currentAccountIndex: ser.currentAccountIndex,
-    seedPhrase: ser.seedPhrase
+  try {
+    const result = await chrome.storage.session.get(SESSION_KEY)
+    const ser = result?.[SESSION_KEY] as SerSession | undefined
+    if (!ser) return null
+    if (typeof ser !== "object" || !ser.wallet || !Array.isArray(ser.accounts)) {
+      await clearSession()
+      return null
+    }
+    const wallet = deKp(ser.wallet)
+    const accounts: Account[] = ser.accounts.map((a) => {
+      if (!a || typeof a !== "object" || !a.keypair || typeof a.balance !== "string") {
+        throw new Error("Invalid account entry in session")
+      }
+      return {
+        index: a.index,
+        name: a.name,
+        keypair: deKp(a.keypair),
+        balance: BigInt(a.balance)
+      }
+    })
+    return {
+      wallet,
+      accounts,
+      currentAccountIndex: typeof ser.currentAccountIndex === "number" ? ser.currentAccountIndex : 0,
+      seedPhrase: typeof ser.seedPhrase === "string" ? ser.seedPhrase : null
+    }
+  } catch (_err) {
+    try {
+      await clearSession()
+    } catch {
+      // ignore secondary errors during clear
+    }
+    return null
   }
 }
 

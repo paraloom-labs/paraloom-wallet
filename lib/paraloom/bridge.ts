@@ -9,6 +9,7 @@ import {
 } from "@solana/web3.js"
 
 import { addressSpendPubHex, type WalletKeyPair } from "~lib/crypto/keyManagement"
+import { parseShieldedAddress } from "~lib/crypto/addressChecksum"
 import { NATIVE_ASSET_HEX } from "~lib/prover"
 
 import {
@@ -75,11 +76,29 @@ function bridgeVaultPda(): PublicKey {
 
 // The 32-byte shielded-pool recipient carried by a `paraloom1<hex>` address.
 export function shieldedAddressToBytes(shieldedAddress: string): Uint8Array {
-  const hex = shieldedAddress.replace(/^paraloom1/, "")
-  if (hex.length !== 64) {
-    throw new Error("invalid shielded address")
+  if (typeof shieldedAddress !== "string" || !shieldedAddress.startsWith("paraloom1")) {
+    throw new Error("invalid shielded address: missing paraloom1 prefix")
   }
-  return Uint8Array.from(Buffer.from(hex, "hex"))
+  const rest = shieldedAddress.slice("paraloom1".length)
+
+  let recipientHex: string
+  if (rest.length === 64) {
+    if (!/^[0-9a-fA-F]{64}$/.test(rest)) {
+      throw new Error("invalid shielded address: non-hex characters in legacy address")
+    }
+    recipientHex = rest.toLowerCase()
+  } else {
+    const body = parseShieldedAddress(shieldedAddress)
+    if (!body) {
+      throw new Error("invalid shielded address")
+    }
+    recipientHex = body.slice(64, 128)
+  }
+
+  if (recipientHex === "0".repeat(64)) {
+    throw new Error("invalid shielded address: recipient cannot be all-zero")
+  }
+  return Uint8Array.from(Buffer.from(recipientHex, "hex"))
 }
 
 // Layout: DEPOSIT discriminator (8) | amount u64 LE (8) | recipient (32) | randomness (32).

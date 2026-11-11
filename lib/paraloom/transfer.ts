@@ -1,20 +1,10 @@
-// Shielded → shielded transfer (#197). Spends two notes the wallet owns and
-// creates two outputs — one to the recipient, one change back to self — proving
-// the TransferCircuit in the browser (#195) and encrypting each output to its
-// recipient's shielded address (#196) so only they can discover and spend it.
-// The spend secrets never leave the wallet.
-
 import { addressBoxPubHex, addressSpendPubHex } from "~lib/crypto/keyManagement"
 import { NATIVE_ASSET_HEX, noteCommitmentV2, proveTransferV2 } from "~lib/prover"
-
-import { PATH_SERVER_URL, TRANSFER_INGRESS_URL } from "./constants"
-import { encryptNote } from "./noteCrypto"
-import {
-  addDiscoveredNote,
-  markNoteSpent,
-  markNoteSpentByCommitment,
-  type ShieldedNote
-} from "./notes"
+import { PATH_SERVER_URL, TRANSFER_INGRESS_URL } from "~lib/paraloom/constants"
+import { encryptNote } from "~lib/paraloom/noteCrypto"
+import { addDiscoveredNote, markNoteSpent, markNoteSpentByCommitment, type ShieldedNote } from "~lib/paraloom/notes"
+import { confirmCommitmentInTree } from "~lib/paraloom/settlementConfirm"
+import { fetchV3Leaves } from "~lib/paraloom/transact"
 
 interface MerklePathResponse {
   root: string
@@ -46,10 +36,6 @@ async function fetchPath(commitment: string): Promise<MerklePathResponse> {
   return (await res.json()) as MerklePathResponse
 }
 
-// Send `amount` lamports from two owned input notes to `recipientShieldedAddress`,
-// with the remainder as change back to this wallet. `inputs` must be exactly two
-// unspent notes the wallet owns whose values sum to at least `amount` (the
-// circuit is fixed 2-in/2-out and every input must be a real tree member).
 export async function transfer(
   account: string,
   ownShieldedAddress: string,
@@ -64,36 +50,27 @@ export async function transfer(
   }
   const change = inputTotal - amount
 
-  // v2 (#293): an output binds the recipient's spend pubkey (so only they can
-  // spend it) and is encrypted to their box pubkey (so only they can read it).
   const recipientSpendPub = addressSpendPubHex(recipientShieldedAddress)
   const recipientBoxPub = addressBoxPubHex(recipientShieldedAddress)
   const ownSpendPub = addressSpendPubHex(ownShieldedAddress)
   const ownBoxPub = addressBoxPubHex(ownShieldedAddress)
 
-  // Pull each input's Merkle path. Both must prove against the same root; the
-  // tree is stable between these two quick reads on devnet, so use the latest.
-  let root = ""
-  const proofInputs = []
-  for (const note of inputs) {
-    const commitment = await noteCommitmentV2(
-      BigInt(note.amount),
-      spendPrivkeyHex,
-      note.blinding,
-      note.assetId
-    )
-    const pathRes = await fetchPath(commitment)
-    root = pathRes.root
-    proofInputs.push({
-      amount: Number(note.amount),
-      blinding_hex: note.blinding,
-      privkey_hex: spendPrivkeyHex,
-      path_hex: pathRes.path,
-      indices: pathRes.indices
-    })
+  const commitments = await Promise.all(inputs.map(n => noteCommitmentV2(BigInt(n.amount), spendPrivkeyHex, n.blinding, n.assetId)))
+  const paths = await Promise.all(commitments.map(fetchPath))
+  
+  const root = paths[0].root
+  if (paths.some(p => p.root !== root)) {
+    throw new Error("Merkle root mismatch across inputs")
   }
 
-  // Output 0 → recipient, output 1 → change back to self. Fresh blinding each.
+  const proofInputs = inputs.map((note, i) => ({
+    amount: Number(note.amount),
+    blinding_hex: note.blinding,
+    privkey_hex: spendPrivkeyHex,
+    path_hex: paths[i].path,
+    indices: paths[i].indices
+  }))
+
   const outBlind0 = randomHex32()
   const outBlind1 = randomHex32()
   const outputs = [
@@ -101,55 +78,29 @@ export async function transfer(
     { amount: Number(change), blinding_hex: outBlind1, pubkey_hex: ownSpendPub }
   ]
 
-  const { nullifiers, output_commitments, proof } = await proveTransferV2(
-    root,
-    NATIVE_ASSET_HEX,
-    proofInputs,
-    outputs
-  )
+  const { nullifiers, output_commitments, proof } = await proveTransferV2(root, NATIVE_ASSET_HEX, proofInputs, outputs)
 
-  // Encrypt each output note to its recipient's box pubkey so they can discover
-  // and spend it (they recompute the commitment with their own spend key).
   const ciphertexts = [
-    encryptNote(recipientBoxPub, {
-      amount,
-      blindingHex: outBlind0,
-      assetIdHex: NATIVE_ASSET_HEX
-    }),
+    encryptNote(recipientBoxPub, { amount, blindingHex: outBlind0, assetIdHex: NATIVE_ASSET_HEX }),
     encryptNote(ownBoxPub, { amount: change, blindingHex: outBlind1, assetIdHex: NATIVE_ASSET_HEX })
   ]
-
-  const body = {
-    nullifiers,
-    output_commitments,
-    // The node recomputes the authoritative post-state root from its own pool;
-    // we send the current root (advisory). L2 verification uses the pool root.
-    new_merkle_root: root,
-    proof,
-    ciphertexts
-  }
 
   const res = await fetch(`${TRANSFER_INGRESS_URL}/transfer/submit`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(body)
+    body: JSON.stringify({ nullifiers, output_commitments, new_merkle_root: root, proof, ciphertexts })
   })
-  if (!res.ok) {
-    throw new Error(`Transfer ingress rejected the transfer (${res.status})`)
-  }
+  if (!res.ok) throw new Error(`Transfer ingress rejected the transfer (${res.status})`)
   const { request_id } = (await res.json()) as { request_id: string }
 
-  // Mark the spent inputs and store the change note locally (the recipient
-  // discovers their output by scanning). A deposit note is identified by its
-  // signature, a discovered transfer note by its commitment.
+  const settled = await confirmCommitmentInTree(() => fetchV3Leaves(null as any), output_commitments[1], 150_000, 6_000)
+  if (!settled) throw new Error("Transfer failed to settle on-chain")
+
   for (const note of inputs) {
-    if (note.signature) {
-      await markNoteSpent(account, note.signature)
-    }
-    if (note.commitment) {
-      await markNoteSpentByCommitment(account, note.commitment)
-    }
+    if (note.signature) await markNoteSpent(account, note.signature)
+    if (note.commitment) await markNoteSpentByCommitment(account, note.commitment)
   }
+  
   const changeCommitment = output_commitments[1]
   await addDiscoveredNote(account, {
     amount: change.toString(),

@@ -6,7 +6,6 @@
 
 import { addressBoxPubHex, addressSpendPubHex } from "~lib/crypto/keyManagement"
 import { NATIVE_ASSET_HEX, noteCommitmentV2, proveTransferV2 } from "~lib/prover"
-
 import { PATH_SERVER_URL, TRANSFER_INGRESS_URL } from "./constants"
 import { encryptNote } from "./noteCrypto"
 import {

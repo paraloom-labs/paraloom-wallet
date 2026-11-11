@@ -1,0 +1,9 @@
+allowBuilds:
+  '@parcel/watcher': true
+  '@swc/core': true
+  bufferutil: true
+  esbuild: true
+  lmdb: true
+  msgpackr-extract: true
+  sharp: true
+  utf-8-validate: true

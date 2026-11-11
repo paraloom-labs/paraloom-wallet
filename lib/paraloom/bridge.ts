@@ -2,15 +2,13 @@ import {
   Connection,
   Keypair,
   PublicKey,
+  sendAndConfirmTransaction,
   SystemProgram,
   Transaction,
-  TransactionInstruction,
-  sendAndConfirmTransaction
+  TransactionInstruction
 } from "@solana/web3.js"
-
 import { addressSpendPubHex, type WalletKeyPair } from "~lib/crypto/keyManagement"
 import { NATIVE_ASSET_HEX } from "~lib/prover"
-
 import {
   ASSET_CONFIG_SEED,
   ASSET_VAULT_SEED,
@@ -33,10 +31,7 @@ export type Network = "mainnet-beta" | "devnet"
 // JSON-RPC reads are idempotent, and sendTransaction is deduped by signature, so
 // re-issuing the same request is safe. 4xx is returned as-is (a real client
 // error, not worth retrying).
-async function retryingFetch(
-  input: RequestInfo | URL,
-  init?: RequestInit
-): Promise<Response> {
+async function retryingFetch(input: RequestInfo | URL, init?: RequestInit): Promise<Response> {
   let lastErr: unknown
   for (let attempt = 0; attempt < 4; attempt++) {
     try {
@@ -339,12 +334,7 @@ export async function createTokenAccount(
   for (let attempt = 0; attempt < 3; attempt++) {
     if (await connection.getAccountInfo(ata, "confirmed")) return ata
     try {
-      const ix = buildCreateAtaIdempotentInstruction(
-        payer.publicKey,
-        owner,
-        mint,
-        tokenProgram
-      )
+      const ix = buildCreateAtaIdempotentInstruction(payer.publicKey, owner, mint, tokenProgram)
       const tx = new Transaction().add(ix)
       const { blockhash } = await connection.getLatestBlockhash("confirmed")
       tx.recentBlockhash = blockhash
@@ -415,8 +405,7 @@ export function solanaAddress(publicKey: Uint8Array): string {
 // random and lives only in the deposit instruction data, so recover it by
 // reading that instruction back from the fresh address's own deposit tx.
 
-const B58_ALPHABET =
-  "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz"
+const B58_ALPHABET = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz"
 
 function base58Decode(s: string): Uint8Array {
   const bytes: number[] = [0]

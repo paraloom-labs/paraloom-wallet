@@ -358,10 +358,18 @@ export function Home({ onLock }: HomeProps) {
 
   // USD prices for the held assets (SOL is always priced). Refetch when the set
   // of shielded tokens changes; a failed fetch just leaves amounts un-valued.
+  // Note: fetchPrices restricts third-party queries to canonical public mints by default
+  // to prevent leaking the user's private shielded holdings to Jupiter (#1577).
   useEffect(() => {
+    let isMounted = true
     fetchPrices(Object.keys(shieldedTokens))
-      .then(setPrices)
+      .then((p) => {
+        if (isMounted) setPrices(p)
+      })
       .catch(() => {})
+    return () => {
+      isMounted = false
+    }
   }, [shieldedTokens])
 
   async function handleDeposit() {

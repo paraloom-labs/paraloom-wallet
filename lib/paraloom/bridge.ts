@@ -17,7 +17,7 @@ import {
   ASSOCIATED_TOKEN_PROGRAM_ID,
   BRIDGE_STATE_SEED,
   BRIDGE_VAULT_SEED,
-  DEPOSIT_DISCRIMINATOR,
+  DEPOSIT_NOTE_DISCRIMINATOR,
   DEPOSIT_NOTE_SPL_DISCRIMINATOR,
   MERKLE_TREE_SEED,
   PROGRAM_ID,
@@ -82,14 +82,14 @@ export function shieldedAddressToBytes(shieldedAddress: string): Uint8Array {
   return Uint8Array.from(Buffer.from(hex, "hex"))
 }
 
-// Layout: DEPOSIT discriminator (8) | amount u64 LE (8) | recipient (32) | randomness (32).
+// Layout: DEPOSIT_NOTE discriminator (8) | amount u64 LE (8) | recipient (32) | randomness (32).
 function depositInstructionData(
   amountLamports: bigint,
   recipient: Uint8Array,
   randomness: Uint8Array
 ): Buffer {
   const data = new Uint8Array(8 + 8 + 32 + 32)
-  data.set(DEPOSIT_DISCRIMINATOR, 0)
+  data.set(DEPOSIT_NOTE_DISCRIMINATOR, 0)
   new DataView(data.buffer).setBigUint64(8, amountLamports, true)
   data.set(recipient, 16)
   data.set(randomness, 48)
@@ -107,6 +107,7 @@ export function buildDepositInstruction(
     keys: [
       { pubkey: bridgeStatePda(), isSigner: false, isWritable: true },
       { pubkey: bridgeVaultPda(), isSigner: false, isWritable: true },
+      { pubkey: merkleTreePda(), isSigner: false, isWritable: true },
       { pubkey: depositor, isSigner: true, isWritable: true },
       { pubkey: SystemProgram.programId, isSigner: false, isWritable: false }
     ],

@@ -2,6 +2,19 @@
 // extension can scan the pool for its own notes (a viewing-key feature), the
 // shielded balance is tracked here: the sum of unspent deposits. Each note
 // keeps the randomness needed to spend it in a later withdrawal.
+//
+// #1646: the note map used to sit in `chrome.storage.local` as plain JSON —
+// amount + blinding for every note, readable by anything that can read the
+// extension's on-disk profile. It is now stored as a secretbox envelope
+// (same primitive as the seed vault) under a key derived from the vault key
+// material the unlocked session already holds in memory (see
+// `notesEncryptionKey`). Plaintext notes exist only in memory /
+// `chrome.storage.session`, never on disk.
+
+import { sha256 } from "@noble/hashes/sha256"
+import * as nacl from "tweetnacl"
+
+import { loadSession } from "~lib/storage/session"
 
 // Spend-key note (circuit v2, #293). The note is bound to the account's spend
 // public key (derived from the account seed, not stored here); to spend it the
@@ -33,13 +46,96 @@ const NOTES_KEY = "paraloom_notes"
 
 type NotesByAccount = Record<string, ShieldedNote[]>
 
+// Portable hex helpers (no Buffer) so this module works in both the popup and
+// the background service worker, where Buffer may be unavailable.
+const toHex = (u: Uint8Array): string =>
+  Array.from(u, (b) => b.toString(16).padStart(2, "0")).join("")
+const fromHex = (h: string): Uint8Array => {
+  const out = new Uint8Array(h.length / 2)
+  for (let i = 0; i < out.length; i++) {
+    out[i] = parseInt(h.slice(i * 2, i * 2 + 2), 16)
+  }
+  return out
+}
+
+// The notes encryption key, derived from the vault key material the unlocked
+// session holds in memory: the primary wallet's spend privkey. The privkey
+// itself is never the encryption key — it is hashed under a domain tag, so a
+// notes ciphertext never exposes key material usable elsewhere — and it lives
+// only in the encrypted vault on disk and in `chrome.storage.session`
+// (memory-only, cleared on browser close / lock) while unlocked. Returns
+// null while locked, when there is no key material to derive from.
+const NOTES_KEY_DOMAIN = "paraloom-notes-v1"
+
+async function notesEncryptionKey(): Promise<Uint8Array | null> {
+  const session = await loadSession()
+  if (!session) return null
+  const tag = new TextEncoder().encode(NOTES_KEY_DOMAIN)
+  const input = new Uint8Array(tag.length + session.wallet.spendPrivkey.length)
+  input.set(tag)
+  input.set(session.wallet.spendPrivkey, tag.length)
+  return sha256(input)
+}
+
+// The on-disk shape of the note store (#1646): one secretbox envelope over
+// the whole JSON map, with a fresh random nonce per write.
+interface EncryptedNotesEnvelope {
+  v: 1
+  nonce: string // hex
+  ciphertext: string // hex
+}
+
+function isEnvelope(value: unknown): value is EncryptedNotesEnvelope {
+  return (
+    typeof value === "object" &&
+    value !== null &&
+    (value as EncryptedNotesEnvelope).v === 1 &&
+    typeof (value as EncryptedNotesEnvelope).nonce === "string" &&
+    typeof (value as EncryptedNotesEnvelope).ciphertext === "string"
+  )
+}
+
 async function readAll(): Promise<NotesByAccount> {
   const stored = await chrome.storage.local.get(NOTES_KEY)
-  return (stored[NOTES_KEY] as NotesByAccount) ?? {}
+  const raw = stored[NOTES_KEY]
+  if (raw === undefined) return {}
+  if (isEnvelope(raw)) {
+    const key = await notesEncryptionKey()
+    if (!key) {
+      throw new Error(
+        "Wallet is locked: shielded notes are encrypted and the wallet must be unlocked to read them"
+      )
+    }
+    const decrypted = nacl.secretbox.open(fromHex(raw.ciphertext), fromHex(raw.nonce), key)
+    if (!decrypted) {
+      throw new Error("Stored shielded notes could not be decrypted (tampered or wrong wallet)")
+    }
+    return JSON.parse(new TextDecoder().decode(decrypted)) as NotesByAccount
+  }
+  // Legacy plaintext map (pre-#1646): return it in memory, but migrate it to
+  // the encrypted envelope on the spot when unlocked, so the plaintext copy
+  // does not survive on disk past the first unlocked read.
+  const legacy = (raw as NotesByAccount) ?? {}
+  if (await notesEncryptionKey()) await writeAll(legacy)
+  return legacy
 }
 
 async function writeAll(all: NotesByAccount): Promise<void> {
-  await chrome.storage.local.set({ [NOTES_KEY]: all })
+  const key = await notesEncryptionKey()
+  if (!key) {
+    // Fail closed: silently writing plaintext would re-open #1646, and every
+    // note-writing flow (deposit / scan / transfer) runs while unlocked.
+    throw new Error("Wallet is locked: shielded notes cannot be saved while locked")
+  }
+  const nonce = nacl.randomBytes(nacl.secretbox.nonceLength)
+  const message = new TextEncoder().encode(JSON.stringify(all))
+  const ciphertext = nacl.secretbox(message, nonce, key)
+  const envelope: EncryptedNotesEnvelope = {
+    v: 1,
+    nonce: toHex(nonce),
+    ciphertext: toHex(ciphertext)
+  }
+  await chrome.storage.local.set({ [NOTES_KEY]: envelope })
 }
 
 export async function getNotes(account: string): Promise<ShieldedNote[]> {

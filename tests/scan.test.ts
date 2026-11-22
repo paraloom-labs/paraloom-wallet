@@ -28,7 +28,7 @@ import {
 import { scanForNotes } from "~lib/paraloom/scan"
 import * as nacl from "tweetnacl"
 import { beforeEach, describe, expect, it, vi } from "vitest"
-import { installFakeChrome } from "./support/chromeStorage"
+import { installFakeChrome, seedUnlockedSession } from "./support/chromeStorage"
 
 // Deterministic stand-ins for the circuit hashes, in `vi.hoisted` so they exist
 // before the hoisted `vi.mock` factory runs. They depend on all of their
@@ -192,8 +192,11 @@ function respondWith(delivered: unknown[], ok = true, status = 200) {
 
 const scan = () => scanForNotes(ACCOUNT, ourBox.secretKey, SPEND_PRIVKEY)
 
-beforeEach(() => {
-  installFakeChrome()
+beforeEach(async () => {
+  const chrome = installFakeChrome()
+  // The scan persists discovered notes, and the note store is encrypted
+  // under the unlocked session's key (#1646).
+  await seedUnlockedSession(chrome, { shieldedAddress: ACCOUNT })
   ourBox = nacl.box.keyPair()
   v3NoteCommitment.mockClear()
   v3NoteCommitmentAsset.mockClear()

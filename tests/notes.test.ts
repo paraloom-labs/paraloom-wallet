@@ -8,10 +8,16 @@ import {
   type ShieldedNote
 } from "~lib/paraloom/notes"
 import { beforeEach, describe, expect, it } from "vitest"
-import { installFakeChrome } from "./support/chromeStorage"
+import {
+  installFakeChrome,
+  seedUnlockedSession,
+  type FakeChrome
+} from "./support/chromeStorage"
 
 const ACCOUNT = "paraloom1" + "11".repeat(64)
 const OTHER_ACCOUNT = "paraloom1" + "22".repeat(64)
+
+let chrome: FakeChrome
 
 function deposit(overrides: Partial<ShieldedNote> = {}): ShieldedNote {
   return {
@@ -40,8 +46,12 @@ function received(commitment: string, overrides: Partial<ShieldedNote> = {}): Sh
   }
 }
 
-beforeEach(() => {
-  installFakeChrome()
+beforeEach(async () => {
+  chrome = installFakeChrome()
+  // Deterministic unlocked session (#1646): notes.ts derives its storage key
+  // from the primary wallet's spend privkey, which lives only in
+  // chrome.storage.session while unlocked.
+  await seedUnlockedSession(chrome, { shieldedAddress: ACCOUNT })
 })
 
 describe("markNoteSpentByIdentity (#718)", () => {
@@ -198,5 +208,63 @@ describe("note storage", () => {
     await addNote(ACCOUNT, deposit({ signature: "s1" }))
     await addNote(ACCOUNT, deposit({ signature: "s2", spent: true }))
     expect(await shieldedBalance(ACCOUNT)).toBe(1000n)
+  })
+})
+
+describe("encrypted note storage (#1646)", () => {
+  it("never writes a note's amount or blinding to chrome.storage.local", async () => {
+    await addNote(ACCOUNT, deposit())
+
+    const raw = chrome.storage.local.raw["paraloom_notes"] as Record<string, unknown>
+    // One secretbox envelope, not the note map.
+    expect(raw.v).toBe(1)
+    expect(typeof raw.nonce).toBe("string")
+    expect(typeof raw.ciphertext).toBe("string")
+    expect(raw).not.toHaveProperty("amount")
+    expect(raw).not.toHaveProperty("blinding")
+    // The 32-byte blinding secret must not appear anywhere in the stored bytes.
+    expect(JSON.stringify(raw)).not.toContain("aa".repeat(32))
+  })
+
+  it("round-trips notes through the envelope", async () => {
+    await addNote(ACCOUNT, deposit())
+    await addDiscoveredNote(ACCOUNT, received("c0".repeat(32)))
+
+    const notes = await getNotes(ACCOUNT)
+    expect(notes).toHaveLength(2)
+    expect(notes.find((n) => n.signature === "sig-deposit")!.blinding).toBe("aa".repeat(32))
+    expect(await shieldedBalance(ACCOUNT)).toBe(3000n)
+  })
+
+  it("migrates a legacy plaintext map to the envelope on first unlocked read", async () => {
+    // A pre-#1646 wallet: the map sits in local storage as plain JSON.
+    await chrome.storage.local.set({ paraloom_notes: { [ACCOUNT]: [deposit()] } })
+
+    expect(await getNotes(ACCOUNT)).toHaveLength(1)
+
+    const raw = chrome.storage.local.raw["paraloom_notes"] as Record<string, unknown>
+    expect(raw.v).toBe(1)
+    expect(JSON.stringify(raw)).not.toContain("aa".repeat(32))
+    expect(await shieldedBalance(ACCOUNT)).toBe(1000n)
+  })
+
+  it("refuses to save notes while locked instead of writing plaintext", async () => {
+    // Fresh install with no session: the wallet is locked.
+    chrome = installFakeChrome()
+
+    await expect(addNote(ACCOUNT, deposit())).rejects.toThrow(/locked/i)
+    expect(chrome.storage.local.raw["paraloom_notes"]).toBeUndefined()
+  })
+
+  it("fails closed on a tampered envelope", async () => {
+    await addNote(ACCOUNT, deposit())
+
+    const raw = chrome.storage.local.raw["paraloom_notes"] as Record<string, string>
+    const tampered = raw.ciphertext.slice(0, -2) + (raw.ciphertext.slice(-2) === "00" ? "ff" : "00")
+    await chrome.storage.local.set({
+      paraloom_notes: { ...raw, ciphertext: tampered }
+    })
+
+    await expect(getNotes(ACCOUNT)).rejects.toThrow(/decrypt/i)
   })
 })

@@ -2,6 +2,14 @@ import { Connection, PublicKey } from "@solana/web3.js"
 
 import { getAutoLockMinutes, getStoredWallet, isWalletLocked, setLockState } from "~lib/storage/secure"
 import { addApprovedOrigin, isOriginApproved, removeApprovedOrigin } from "~lib/storage/connections"
+import {
+  approvePendingConnection,
+  cleanStalePendingConnection,
+  clearPendingConnection,
+  getPendingConnection,
+  recordPendingConnection,
+  rejectPendingConnection
+} from "~lib/storage/pendingConnection"
 import { clearSession, getLastActivity, loadSession, recordActivity } from "~lib/storage/session"
 import { addNote, getNotes, markNoteSpentByCommitment, shieldedBalance, shieldedTokenBalances, type ShieldedNote } from "~lib/paraloom/notes"
 import { scanForNotes } from "~lib/paraloom/scan"
@@ -81,9 +89,13 @@ async function maybeAutoLock(): Promise<void> {
 // backstop for a worker that was terminated past the lock threshold.
 chrome.alarms.create(AUTO_LOCK_ALARM, { periodInMinutes: 1 })
 chrome.alarms.onAlarm.addListener((alarm) => {
-  if (alarm.name === AUTO_LOCK_ALARM) void maybeAutoLock()
+  if (alarm.name === AUTO_LOCK_ALARM) {
+    void maybeAutoLock()
+    void cleanStalePendingConnection().catch(() => {})
+  }
 })
 void maybeAutoLock()
+void cleanStalePendingConnection().catch(() => {})
 
 // A connection request awaiting the user's explicit approval in the popup
 // (Phantom-style). At most one is outstanding at a time.
@@ -218,9 +230,14 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (message.type === "GET_PENDING_CONNECTION") {
     // Read from persisted storage so the approval screen still appears even if
     // the worker was recycled after the request was registered.
-    chrome.storage.session
-      .get("pendingConn")
-      .then((r) => sendResponse((r.pendingConn as { id: number; origin: string } | undefined) ?? null))
+    getPendingConnection()
+      .then((conn) => {
+        if (!conn && pendingConnection) {
+          pendingConnection.resolve(false)
+          pendingConnection = null
+        }
+        sendResponse(conn)
+      })
       .catch(() => sendResponse(null))
     return true
   }
@@ -231,31 +248,42 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     // in-memory pendingConnection + held response) were evicted mid-wait. The
     // page confirms the connection by polling isConnected(), which reads this
     // durable approval — no reliance on a held response surviving the wait.
-    chrome.storage.session
-      .get("pendingConn")
-      .then(async (r) => {
-        const pc = r.pendingConn as { id: number; origin: string } | undefined
-        if (pc && pc.id === message.id) {
-          connectedOrigin = pc.origin
-          await addApprovedOrigin(pc.origin)
-          await chrome.storage.session.remove("pendingConn").catch(() => {})
+    approvePendingConnection(message.id)
+      .then((res) => {
+        if (!res.success || !res.origin) {
           if (pendingConnection && pendingConnection.id === message.id) {
-            pendingConnection.resolve(true)
+            pendingConnection.resolve(false)
+            pendingConnection = null
           }
+          sendResponse({ success: false, error: res.error || "failed to approve connection" })
+          return
+        }
+        connectedOrigin = res.origin
+        if (pendingConnection && pendingConnection.id === message.id) {
+          pendingConnection.resolve(true)
+        }
+        sendResponse({ success: true })
+      })
+      .catch((err) =>
+        sendResponse({
+          success: false,
+          error: err instanceof Error ? err.message : "failed to approve connection"
+        })
+      )
+    return true
+  }
+
+  if (message.type === "REJECT_CONNECTION") {
+    rejectPendingConnection(message.id)
+      .then(() => {
+        if (pendingConnection && pendingConnection.id === message.id) {
+          pendingConnection.resolve(false)
+          pendingConnection = null
         }
         sendResponse({ success: true })
       })
       .catch(() => sendResponse({ success: true }))
     return true
-  }
-
-  if (message.type === "REJECT_CONNECTION") {
-    void chrome.storage.session.remove("pendingConn").catch(() => {})
-    if (pendingConnection && pendingConnection.id === message.id) {
-      pendingConnection.resolve(false)
-    }
-    sendResponse({ success: true })
-    return false
   }
 
   // ── Swap-approval messages (from the popup only) ──
@@ -496,8 +524,7 @@ async function handleConnect(sender: chrome.runtime.MessageSender) {
 function requestApproval(origin: string, timeoutMs: number): Promise<boolean> {
   return new Promise((resolve) => {
     const id = ++connectionIdCounter
-    const clearPersisted = () =>
-      void chrome.storage.session.remove("pendingConn").catch(() => {})
+    const clearPersisted = () => void clearPendingConnection().catch(() => {})
     const timer = setTimeout(() => {
       if (pendingConnection?.id === id) {
         pendingConnection = null
@@ -518,7 +545,7 @@ function requestApproval(origin: string, timeoutMs: number): Promise<boolean> {
     // Persist so the pending approval survives an MV3 worker eviction during the
     // wait: the popup reads it via GET_PENDING_CONNECTION and APPROVE_CONNECTION
     // records the approval from it, even in a freshly respawned worker.
-    void chrome.storage.session.set({ pendingConn: { id, origin } }).catch(() => {})
+    void recordPendingConnection(id, origin, timeoutMs).catch(() => {})
   })
 }
 

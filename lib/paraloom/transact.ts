@@ -27,6 +27,7 @@ import {
   MERKLE_TREE_SEED,
   PROGRAM_ID,
   TRANSACT_EVENT_DISCRIMINATOR,
+  TRANSACT_INGRESS_TIMEOUT_MS,
   TRANSACT_INGRESS_URL
 } from "./constants"
 
@@ -287,7 +288,11 @@ export async function submitTransact(
   // SPL settlement (#779): the mint being spent, 32-byte hex. Omitted for a
   // native-SOL spend; when present the node settles via transact_spl and
   // `recipientHex` is the recipient token account.
-  mintHex?: string
+  mintHex?: string,
+  // Hard deadline for the ingress fetch (#303). Defaults to the 30 s
+  // transact-ingress timeout; the parameter exists so tests can prove the
+  // timeout fires without waiting out the production deadline.
+  timeoutMs: number = TRANSACT_INGRESS_TIMEOUT_MS
 ): Promise<TransactSubmission> {
   const bundle = JSON.parse(proofBundleJson)
   const body: Record<string, unknown> = {
@@ -305,7 +310,8 @@ export async function submitTransact(
   const res = await fetch(`${TRANSACT_INGRESS_URL}/transact/submit`, {
     method: "POST",
     headers,
-    body: JSON.stringify(body)
+    body: JSON.stringify(body),
+    signal: AbortSignal.timeout(timeoutMs)
   })
   if (!res.ok) {
     throw new Error(`transact ingress rejected: ${res.status} ${await res.text()}`)

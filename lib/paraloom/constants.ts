@@ -63,6 +63,15 @@ export const INGRESS_URL = "https://node.paraloom.io"
 export const TRANSFER_INGRESS_URL = "https://node.paraloom.io"
 export const TRANSACT_INGRESS_URL = "https://node.paraloom.io"
 
+// Hard deadline for the transact-ingress fetches (#303), in line with the
+// 30 s routing timeout in privateSwap. A hung node must fail fast instead of
+// hanging `scanForNotes` / `submitTransact` forever: a stuck scan strands the
+// background scanner (`scanInFlight` never clears) and a stuck submit strands
+// `spendV3` after the proof was built. Both callers already degrade on error
+// (backgroundScan falls back to the local balance; spendV3 surfaces the
+// error), so a timeout is a clean failure, not a new one.
+export const TRANSACT_INGRESS_TIMEOUT_MS = 30_000
+
 // Non-custodial swap routing service (paraloom-core `swap-router`). Builds an
 // UNSIGNED Jupiter swap transaction for a fresh address; the wallet signs it
 // locally, so the service never sees a key. Same host, `/swap/*` path.

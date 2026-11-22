@@ -11,7 +11,7 @@ import {
   v3NoteCommitmentAsset,
   v3NotePubkey
 } from "~lib/prover"
-import { TRANSACT_INGRESS_URL } from "./constants"
+import { TRANSACT_INGRESS_TIMEOUT_MS, TRANSACT_INGRESS_URL } from "./constants"
 import { tryDecryptNote } from "./noteCrypto"
 import { addDiscoveredNote, getNotes } from "./notes"
 
@@ -94,9 +94,15 @@ async function verifiedMint(
 export async function scanForNotes(
   account: string,
   boxSecretKey: Uint8Array,
-  spendPrivkeyHex: string
+  spendPrivkeyHex: string,
+  // Hard deadline for the ingress fetch (#303). Defaults to the 30 s
+  // transact-ingress timeout; the parameter exists so tests can prove the
+  // timeout fires without waiting out the production deadline.
+  timeoutMs: number = TRANSACT_INGRESS_TIMEOUT_MS
 ): Promise<number> {
-  const res = await fetch(`${TRANSACT_INGRESS_URL}/transact/scan`)
+  const res = await fetch(`${TRANSACT_INGRESS_URL}/transact/scan`, {
+    signal: AbortSignal.timeout(timeoutMs)
+  })
   if (!res.ok) {
     throw new Error(`Scan failed (${res.status})`)
   }

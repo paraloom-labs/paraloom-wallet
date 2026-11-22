@@ -2,6 +2,8 @@ import { describe, expect, it } from "vitest"
 
 import {
   confirmCommitmentInTree,
+  expectedWithdrawNetAmount,
+  hasExpectedBalanceRise,
   type LeafRef
 } from "../lib/paraloom/settlementConfirm"
 
@@ -88,5 +90,33 @@ describe("confirmCommitmentInTree", () => {
     )
     expect(settled).toBe(true)
     expect(calls).toBe(2)
+  })
+})
+
+describe("hasExpectedBalanceRise (#1632)", () => {
+  it("computes the exact net payout after the 25 bps protocol withdrawal fee", () => {
+    // 1 SOL = 1_000_000_000 lamports -> fee = 2_500_000 -> net = 997_500_000
+    expect(expectedWithdrawNetAmount(1_000_000_000n)).toBe(997_500_000n)
+    // 500 lamports -> fee = floor(500 * 25 / 10_000) = 1 -> net = 499
+    expect(expectedWithdrawNetAmount(500n)).toBe(499n)
+    expect(expectedWithdrawNetAmount(0n)).toBe(0n)
+  })
+
+  it("rejects 1-lamport dust and partial balance rises below the net payout", () => {
+    const before = 100_000_000n
+    const grossWithdraw = 1_000_000_000n // net expected = 997_500_000n
+    // 1-lamport dust transfer during the poll window must NOT trigger settlement
+    expect(hasExpectedBalanceRise(before, before + 1n, grossWithdraw)).toBe(false)
+    // 1 lamport short of net payout is still rejected
+    expect(hasExpectedBalanceRise(before, before + 997_499_999n, grossWithdraw)).toBe(false)
+    // Unchanged or lower balance is rejected
+    expect(hasExpectedBalanceRise(before, before, grossWithdraw)).toBe(false)
+  })
+
+  it("accepts a balance rise equal to or greater than the net withdrawal payout", () => {
+    const before = 100_000_000n
+    const grossWithdraw = 1_000_000_000n
+    expect(hasExpectedBalanceRise(before, before + 997_500_000n, grossWithdraw)).toBe(true)
+    expect(hasExpectedBalanceRise(before, before + 1_000_000_000n, grossWithdraw)).toBe(true)
   })
 })

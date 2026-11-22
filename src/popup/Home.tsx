@@ -18,6 +18,7 @@ const SHIELDED_TOKEN_META: Record<string, { symbol: string; decimals: number }> 
 import { withdraw } from "~lib/paraloom/withdraw"
 import { transfer } from "~lib/paraloom/transfer"
 import { depositV3, spendV3 } from "~lib/paraloom/transactFlow"
+import { hasExpectedBalanceRise } from "~lib/paraloom/settlementConfirm"
 import { NATIVE_ASSET_HEX } from "~lib/prover"
 import { addressBoxPubHex } from "~lib/crypto/keyManagement"
 import { isValidShieldedAddress } from "~lib/crypto/addressChecksum"
@@ -449,7 +450,15 @@ export function Home({ onLock }: HomeProps) {
           confirmSettled: async () => {
             for (let i = 0; i < 25; i++) {
               await new Promise((r) => setTimeout(r, 2000))
-              if ((await getSolBalance(conn, targetBytes)) > before) return true
+              if (
+                hasExpectedBalanceRise(
+                  before,
+                  await getSolBalance(conn, targetBytes),
+                  lamports
+                )
+              ) {
+                return true
+              }
             }
             return false
           }

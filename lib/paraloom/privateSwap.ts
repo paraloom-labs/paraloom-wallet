@@ -30,6 +30,7 @@ import { associatedTokenAddress, createTokenAccount, depositSpl } from "./bridge
 import { SWAP_ROUTER_URL } from "./constants"
 import type { ShieldedNote } from "./notes"
 import { saveSwapOutput } from "./swapOutputs"
+import { hasExpectedBalanceRise } from "./settlementConfirm"
 import { depositV3, spendV3 } from "./transactFlow"
 
 import { WSOL_MINT, isNativeSolOutput } from "./swapReconcileClassify"
@@ -271,13 +272,14 @@ async function reshieldToken(
 
 async function waitForFunding(
   connection: Connection,
-  pubkey: Keypair["publicKey"]
+  pubkey: Keypair["publicKey"],
+  expectedGrossLamports: bigint
 ): Promise<bigint> {
   const deadline = Date.now() + SETTLE_TIMEOUT_MS
   while (Date.now() < deadline) {
     await new Promise((r) => setTimeout(r, SETTLE_POLL_MS))
     const bal = BigInt(await connection.getBalance(pubkey))
-    if (bal > 0n) return bal
+    if (hasExpectedBalanceRise(0n, bal, expectedGrossLamports)) return bal
   }
   throw new Error(
     "withdraw is still settling and has not funded the fresh address yet. Do NOT retry — the spent note is already committed and the funds will arrive at the saved address; reopen the wallet to let the swap resume once it lands."
@@ -339,7 +341,7 @@ export async function privateSwap(
       ingressToken,
       confirmSettled: async () => {
         try {
-          funded = await waitForFunding(connection, fresh.publicKey)
+          funded = await waitForFunding(connection, fresh.publicKey, params.amountLamports)
           return true
         } catch {
           return false
@@ -438,7 +440,8 @@ const RESHIELD_FEE_RESERVE = 1_000_000n
 // Poll an SPL token account until the withdrawn balance actually lands.
 async function waitForTokenFunding(
   connection: Connection,
-  ata: PublicKey
+  ata: PublicKey,
+  expectedGrossUnits: bigint
 ): Promise<bigint> {
   const deadline = Date.now() + SETTLE_TIMEOUT_MS
   while (Date.now() < deadline) {
@@ -446,7 +449,7 @@ async function waitForTokenFunding(
     try {
       const bal = await connection.getTokenAccountBalance(ata)
       const amt = BigInt(bal.value.amount)
-      if (amt > 0n) return amt
+      if (hasExpectedBalanceRise(0n, amt, expectedGrossUnits)) return amt
     } catch {
       // The ATA may not be indexed for a moment after creation — keep polling.
     }
@@ -526,7 +529,7 @@ export async function privateSwapFromToken(
       ingressToken,
       confirmSettled: async () => {
         try {
-          await waitForFunding(connection, fresh.publicKey)
+          await waitForFunding(connection, fresh.publicKey, GAS_LAMPORTS)
           return true
         } catch {
           return false
@@ -561,7 +564,7 @@ export async function privateSwapFromToken(
       ingressToken,
       confirmSettled: async () => {
         try {
-          tokenLanded = await waitForTokenFunding(connection, ata)
+          tokenLanded = await waitForTokenFunding(connection, ata, params.amountTokenUnits)
           return true
         } catch {
           return false

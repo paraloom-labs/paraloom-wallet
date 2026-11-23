@@ -23,16 +23,15 @@ import {
   PublicKey,
   VersionedTransaction
 } from "@solana/web3.js"
-
 import { assetIdForMint } from "~lib/prover"
-
 import { associatedTokenAddress, createTokenAccount, depositSpl } from "./bridge"
 import { SWAP_ROUTER_URL } from "./constants"
+import { fetchWithTimeout } from "./http"
 import type { ShieldedNote } from "./notes"
 import { saveSwapOutput } from "./swapOutputs"
+import { isNativeSolOutput, WSOL_MINT } from "./swapReconcileClassify"
 import { depositV3, spendV3 } from "./transactFlow"
 
-import { WSOL_MINT, isNativeSolOutput } from "./swapReconcileClassify"
 export { WSOL_MINT, isNativeSolOutput }
 
 /** Lamports left at the fresh address to cover the swap's own costs: the output
@@ -126,23 +125,6 @@ async function waitForSwapConfirmation(
   )
 }
 
-// fetch with a hard deadline: aborts instead of hanging forever on a stalled
-// connection. Used for the routing call so a slow router fails fast (and retries)
-// rather than stranding an already-withdrawn balance.
-async function fetchWithTimeout(
-  url: string,
-  init: RequestInit,
-  timeoutMs: number
-): Promise<Response> {
-  const ctrl = new AbortController()
-  const timer = setTimeout(() => ctrl.abort(), timeoutMs)
-  try {
-    return await fetch(url, { ...init, signal: ctrl.signal })
-  } finally {
-    clearTimeout(timer)
-  }
-}
-
 // Ask the routing service for an UNSIGNED swap tx, with a bounded timeout and a
 // few retries. The service holds no key; it only builds the tx for `freshPubkey`.
 async function routeSwap(
@@ -169,9 +151,7 @@ async function routeSwap(
         ROUTE_TIMEOUT_MS
       )
       if (!res.ok) {
-        lastErr = new Error(
-          `swap routing failed (${res.status}): ${await res.text()}`
-        )
+        lastErr = new Error(`swap routing failed (${res.status}): ${await res.text()}`)
       } else {
         return (await res.json()) as {
           out_amount: number
@@ -232,9 +212,7 @@ async function reshieldToken(
     const bal = await connection.getTokenAccountBalance(ata)
     const tokenAmount = BigInt(bal.value.amount)
     if (tokenAmount <= 0n) return undefined
-    const assetId = await assetIdForMint(
-      Buffer.from(mint.toBytes()).toString("hex")
-    )
+    const assetId = await assetIdForMint(Buffer.from(mint.toBytes()).toString("hex"))
     const mintBase58 = mint.toBase58()
     const dep = await depositSpl(
       connection,
@@ -436,10 +414,7 @@ export const GAS_LAMPORTS = 9_000_000n
 const RESHIELD_FEE_RESERVE = 1_000_000n
 
 // Poll an SPL token account until the withdrawn balance actually lands.
-async function waitForTokenFunding(
-  connection: Connection,
-  ata: PublicKey
-): Promise<bigint> {
+async function waitForTokenFunding(connection: Connection, ata: PublicKey): Promise<bigint> {
   const deadline = Date.now() + SETTLE_TIMEOUT_MS
   while (Date.now() < deadline) {
     await new Promise((r) => setTimeout(r, SETTLE_POLL_MS))
@@ -667,9 +642,7 @@ export async function resumeSwapAtFreshAddress(
   reshield: boolean,
   onReshielded?: (note: ReshieldedNote) => Promise<void>
 ): Promise<ResumeSwapResult> {
-  const fresh = Keypair.fromSecretKey(
-    Uint8Array.from(Buffer.from(freshSecretKeyHex, "hex"))
-  )
+  const fresh = Keypair.fromSecretKey(Uint8Array.from(Buffer.from(freshSecretKeyHex, "hex")))
   const funded = BigInt(await connection.getBalance(fresh.publicKey))
   const swapLamports = funded - SWAP_OVERHEAD_LAMPORTS
   if (swapLamports <= 0n) {
@@ -685,13 +658,7 @@ export async function resumeSwapAtFreshAddress(
 
   let reshielded: ReshieldedNote | undefined
   if (reshield && outputMint !== "SOL") {
-    reshielded = await reshieldToken(
-      connection,
-      fresh,
-      shieldedAddress,
-      outputMint,
-      onReshielded
-    )
+    reshielded = await reshieldToken(connection, fresh, shieldedAddress, outputMint, onReshielded)
   }
 
   return { swapSignature, outAmount, reshielded }

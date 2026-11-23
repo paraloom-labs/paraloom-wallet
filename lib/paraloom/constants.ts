@@ -67,3 +67,21 @@ export const TRANSACT_INGRESS_URL = "https://node.paraloom.io"
 // UNSIGNED Jupiter swap transaction for a fresh address; the wallet signs it
 // locally, so the service never sees a key. Same host, `/swap/*` path.
 export const SWAP_ROUTER_URL = "https://node.paraloom.io"
+
+// Timeout constants for ingress requests (issue #303)
+export const SCAN_TIMEOUT_MS = 10_000
+export const SUBMIT_TIMEOUT_MS = 30_000
+
+export async function fetchWithTimeout(
+  url: string,
+  init: RequestInit,
+  timeoutMs: number
+): Promise<Response> {
+  const ctrl = new AbortController()
+  const timer = setTimeout(() => ctrl.abort(), timeoutMs)
+  try {
+    return await fetch(url, { ...init, signal: ctrl.signal })
+  } finally {
+    clearTimeout(timer)
+  }
+}

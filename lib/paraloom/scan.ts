@@ -11,7 +11,7 @@ import {
   v3NoteCommitmentAsset,
   v3NotePubkey
 } from "~lib/prover"
-import { TRANSACT_INGRESS_URL } from "./constants"
+import { TRANSACT_INGRESS_URL, SCAN_TIMEOUT_MS, fetchWithTimeout } from "./constants"
 import { tryDecryptNote } from "./noteCrypto"
 import { addDiscoveredNote, getNotes } from "./notes"
 
@@ -96,7 +96,7 @@ export async function scanForNotes(
   boxSecretKey: Uint8Array,
   spendPrivkeyHex: string
 ): Promise<number> {
-  const res = await fetch(`${TRANSACT_INGRESS_URL}/transact/scan`)
+  const res = await fetchWithTimeout(`${TRANSACT_INGRESS_URL}/transact/scan`, {}, SCAN_TIMEOUT_MS)
   if (!res.ok) {
     throw new Error(`Scan failed (${res.status})`)
   }

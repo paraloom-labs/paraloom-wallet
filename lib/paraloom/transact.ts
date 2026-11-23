@@ -27,7 +27,9 @@ import {
   MERKLE_TREE_SEED,
   PROGRAM_ID,
   TRANSACT_EVENT_DISCRIMINATOR,
-  TRANSACT_INGRESS_URL
+  TRANSACT_INGRESS_URL,
+  SUBMIT_TIMEOUT_MS,
+  fetchWithTimeout
 } from "./constants"
 
 const programId = new PublicKey(PROGRAM_ID)
@@ -302,11 +304,15 @@ export async function submitTransact(
   if (mintHex) body.mint = mintHex
   const headers: Record<string, string> = { "Content-Type": "application/json" }
   if (ingressToken) headers["Authorization"] = `Bearer ${ingressToken}`
-  const res = await fetch(`${TRANSACT_INGRESS_URL}/transact/submit`, {
-    method: "POST",
-    headers,
-    body: JSON.stringify(body)
-  })
+  const res = await fetchWithTimeout(
+    `${TRANSACT_INGRESS_URL}/transact/submit`,
+    {
+      method: "POST",
+      headers,
+      body: JSON.stringify(body)
+    },
+    SUBMIT_TIMEOUT_MS
+  )
   if (!res.ok) {
     throw new Error(`transact ingress rejected: ${res.status} ${await res.text()}`)
   }

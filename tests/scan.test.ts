@@ -459,4 +459,38 @@ describe("ordinary scanning", () => {
     respondWith([])
     expect(await scan()).toBe(0)
   })
+
+  it("times out and throws when the ingress hangs (#303)", async () => {
+    // Stub fetch to a promise that never resolves or rejects
+    vi.stubGlobal("fetch", () => new Promise(() => {}))
+    await expect(scanForNotes(ACCOUNT, ourBox.secretKey, SPEND_PRIVKEY, 50)).rejects.toThrow(
+      /timed out/i
+    )
+  })
+
+  it("ensures a timed-out scan allows subsequent scans in background runner (#303)", async () => {
+    let scanInFlight = false
+    async function backgroundScanRunner(timeoutMs = 50) {
+      if (scanInFlight) return false
+      scanInFlight = true
+      try {
+        await scanForNotes(ACCOUNT, ourBox.secretKey, SPEND_PRIVKEY, timeoutMs)
+        return true
+      } catch {
+        return false
+      } finally {
+        scanInFlight = false
+      }
+    }
+
+    // Hung node: first scan times out
+    vi.stubGlobal("fetch", () => new Promise(() => {}))
+    expect(await backgroundScanRunner(50)).toBe(false)
+    expect(scanInFlight).toBe(false)
+
+    // Node recovers: subsequent scan succeeds without being stranded
+    respondWith([])
+    expect(await backgroundScanRunner(1000)).toBe(true)
+    expect(scanInFlight).toBe(false)
+  })
 })

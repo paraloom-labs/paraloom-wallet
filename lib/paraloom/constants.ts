@@ -12,9 +12,7 @@ export const DEPOSIT_DISCRIMINATOR = new Uint8Array([242, 35, 198, 137, 82, 225,
 export const DEPOSIT_NOTE_DISCRIMINATOR = new Uint8Array([75, 212, 96, 185, 178, 167, 29, 57])
 // #779: sha256("global:deposit_note_spl")[..8] — the SPL analogue that moves a
 // token into its per-mint asset vault and appends the note (asset = the mint).
-export const DEPOSIT_NOTE_SPL_DISCRIMINATOR = new Uint8Array([
-  244, 219, 167, 106, 7, 120, 254, 253
-])
+export const DEPOSIT_NOTE_SPL_DISCRIMINATOR = new Uint8Array([244, 219, 167, 106, 7, 120, 254, 253])
 // sha256("event:DepositNoteEvent")[..8] / sha256("event:TransactEvent")[..8] —
 // the program events the wallet scans to rebuild the v3 tree client-side.
 export const DEPOSIT_NOTE_EVENT_DISCRIMINATOR = new Uint8Array([85, 20, 187, 76, 92, 196, 249, 195])
@@ -67,3 +65,7 @@ export const TRANSACT_INGRESS_URL = "https://node.paraloom.io"
 // UNSIGNED Jupiter swap transaction for a fresh address; the wallet signs it
 // locally, so the service never sees a key. Same host, `/swap/*` path.
 export const SWAP_ROUTER_URL = "https://node.paraloom.io"
+
+// Ingress fetch timeout (#303): bounded so a hung node / stalled proxy cannot
+// hang scanForNotes or submitTransact indefinitely. Matches the 30s swap routing timeout.
+export const INGRESS_TIMEOUT_MS = 30_000

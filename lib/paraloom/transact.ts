@@ -16,7 +16,6 @@ import {
   TransactionInstruction,
   type Keypair
 } from "@solana/web3.js"
-
 import { confirmBySignatureStatus } from "./bridge"
 import {
   BRIDGE_STATE_SEED,
@@ -24,11 +23,13 @@ import {
   DEPOSIT_NOTE_DISCRIMINATOR,
   DEPOSIT_NOTE_EVENT_DISCRIMINATOR,
   DEPOSIT_NOTE_SPL_EVENT_DISCRIMINATOR,
+  INGRESS_TIMEOUT_MS,
   MERKLE_TREE_SEED,
   PROGRAM_ID,
   TRANSACT_EVENT_DISCRIMINATOR,
   TRANSACT_INGRESS_URL
 } from "./constants"
+import { fetchWithTimeout } from "./http"
 
 const programId = new PublicKey(PROGRAM_ID)
 
@@ -213,7 +214,9 @@ export async function fetchV3Leaves(connection: Connection): Promise<V3Leaf[]> {
       if (startsWith(payload, DEPOSIT_NOTE_EVENT_DISCRIMINATOR)) {
         const body = payload.slice(8)
         const commitment = body.slice(40, 72)
-        const leafIndex = Number(new DataView(body.buffer, body.byteOffset + 72, 8).getBigUint64(0, true))
+        const leafIndex = Number(
+          new DataView(body.buffer, body.byteOffset + 72, 8).getBigUint64(0, true)
+        )
         leaves.push({ index: leafIndex, commitmentHex: Buffer.from(commitment).toString("hex") })
         transactLeafCursor = Math.max(transactLeafCursor ?? 0, leafIndex + 1)
       } else if (startsWith(payload, DEPOSIT_NOTE_SPL_EVENT_DISCRIMINATOR)) {
@@ -287,7 +290,8 @@ export async function submitTransact(
   // SPL settlement (#779): the mint being spent, 32-byte hex. Omitted for a
   // native-SOL spend; when present the node settles via transact_spl and
   // `recipientHex` is the recipient token account.
-  mintHex?: string
+  mintHex?: string,
+  timeoutMs: number = INGRESS_TIMEOUT_MS
 ): Promise<TransactSubmission> {
   const bundle = JSON.parse(proofBundleJson)
   const body: Record<string, unknown> = {
@@ -302,11 +306,15 @@ export async function submitTransact(
   if (mintHex) body.mint = mintHex
   const headers: Record<string, string> = { "Content-Type": "application/json" }
   if (ingressToken) headers["Authorization"] = `Bearer ${ingressToken}`
-  const res = await fetch(`${TRANSACT_INGRESS_URL}/transact/submit`, {
-    method: "POST",
-    headers,
-    body: JSON.stringify(body)
-  })
+  const res = await fetchWithTimeout(
+    `${TRANSACT_INGRESS_URL}/transact/submit`,
+    {
+      method: "POST",
+      headers,
+      body: JSON.stringify(body)
+    },
+    timeoutMs
+  )
   if (!res.ok) {
     throw new Error(`transact ingress rejected: ${res.status} ${await res.text()}`)
   }

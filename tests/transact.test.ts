@@ -12,7 +12,7 @@ import {
   PROGRAM_ID,
   TRANSACT_EVENT_DISCRIMINATOR
 } from "~lib/paraloom/constants"
-import { fetchV3Leaves } from "~lib/paraloom/transact"
+import { fetchV3Leaves, submitTransact } from "~lib/paraloom/transact"
 import { describe, expect, it, vi } from "vitest"
 
 // transact.ts now reaches ~lib/prover through bridge.ts, and the wasm module
@@ -361,5 +361,62 @@ describe("refusing an unsafe tree", () => {
       { logs: emittedBy(PROGRAM_ID, depositEvent(0xa0, 0)), nullFor: Infinity }
     ])
     await expect(fetchV3Leaves(connection)).rejects.toThrow(/leaf history may be incomplete/)
+  })
+})
+
+describe("submitTransact (#303)", () => {
+  const dummyBundle = JSON.stringify({
+    nullifiers: ["aa".repeat(32), "bb".repeat(32)],
+    output_commitments: ["cc".repeat(32), "dd".repeat(32)],
+    proof: "ee".repeat(64)
+  })
+
+  it("submits a proven transact to the ingress and parses the request id", async () => {
+    const fetchMock = vi.fn(async (_url: string, init?: RequestInit) => {
+      const body = JSON.parse(init?.body as string)
+      expect(body.root).toBe("11".repeat(32))
+      expect(body.ext_amount).toBe(-500)
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({ request_id: "req_12345" })
+      }
+    })
+    vi.stubGlobal("fetch", fetchMock)
+
+    const res = await submitTransact("11".repeat(32), -500n, "22".repeat(32), dummyBundle, [
+      "ct0",
+      "ct1"
+    ])
+    expect(res).toEqual({ requestId: "req_12345" })
+  })
+
+  it("times out and throws when the ingress hangs (#303)", async () => {
+    vi.stubGlobal("fetch", () => new Promise(() => {}))
+
+    await expect(
+      submitTransact(
+        "11".repeat(32),
+        -500n,
+        "22".repeat(32),
+        dummyBundle,
+        ["ct0", "ct1"],
+        undefined,
+        undefined,
+        50
+      )
+    ).rejects.toThrow(/timed out/i)
+  })
+
+  it("throws when the ingress rejects with an error", async () => {
+    vi.stubGlobal("fetch", async () => ({
+      ok: false,
+      status: 400,
+      text: async () => "invalid proof"
+    }))
+
+    await expect(
+      submitTransact("11".repeat(32), -500n, "22".repeat(32), dummyBundle, ["ct0", "ct1"])
+    ).rejects.toThrow(/transact ingress rejected: 400 invalid proof/)
   })
 })

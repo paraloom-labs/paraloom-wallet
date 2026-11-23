@@ -152,13 +152,20 @@ function startsWith(buf: Uint8Array, prefix: Uint8Array): boolean {
   return true
 }
 
+// Minimum `Program data:` payload byte lengths (8-byte discriminator + fields read below)
+const DEPOSIT_EVENT_MIN_BYTES = 88
+const DEPOSIT_SPL_EVENT_MIN_BYTES = 120
+const TRANSACT_EVENT_MIN_BYTES = 136
+
 /// Rebuild the ordered v3 leaf list from the program's public event logs.
 ///
 /// DepositNoteEvent: depositor(32) amount(8) commitment(32)@40 leaf_index(8)@72.
 /// TransactEvent: nf0(32) nf1(32) oc0(32)@64 oc1(32)@96 new_root(32)
 ///   ext_amount(8) fee(8) recipient(32) ts(8) settlement_id(8) — the two
-///   output commitments land at consecutive indices; the first one's index is
-///   inferred from append order, so leaves are collected then sorted.
+///   output commitments land at consecutive indices assigned into the next
+///   unoccupied consecutive pair `(pos, pos + 1)` not claimed by an explicit
+///   deposit `leaf_index`, preventing same-slot signature reordering from
+///   shifting `transact` outputs past unoccupied slots.
 export async function fetchV3Leaves(connection: Connection): Promise<V3Leaf[]> {
   // Page through the FULL signature history, newest to oldest, following
   // `before`. `getSignaturesForAddress` caps each call at 1000, so a single
@@ -180,7 +187,8 @@ export async function fetchV3Leaves(connection: Connection): Promise<V3Leaf[]> {
   }
 
   const leaves: V3Leaf[] = []
-  let transactLeafCursor: number | null = null
+  const occupiedIndices = new Set<number>()
+  const pendingTransacts: [string, string][] = []
 
   // Oldest first so transact outputs are numbered in append order. Each page is
   // newest-first and pages go newest→oldest, so the full list is newest-first;
@@ -210,13 +218,21 @@ export async function fetchV3Leaves(connection: Connection): Promise<V3Leaf[]> {
     }
     const logs = tx.meta?.logMessages ?? []
     for (const payload of eventPayloads(logs, PROGRAM_ID)) {
-      if (startsWith(payload, DEPOSIT_NOTE_EVENT_DISCRIMINATOR)) {
+      if (
+        startsWith(payload, DEPOSIT_NOTE_EVENT_DISCRIMINATOR) &&
+        payload.length >= DEPOSIT_EVENT_MIN_BYTES
+      ) {
         const body = payload.slice(8)
         const commitment = body.slice(40, 72)
-        const leafIndex = Number(new DataView(body.buffer, body.byteOffset + 72, 8).getBigUint64(0, true))
+        const leafIndex = Number(
+          new DataView(body.buffer, body.byteOffset + 72, 8).getBigUint64(0, true)
+        )
         leaves.push({ index: leafIndex, commitmentHex: Buffer.from(commitment).toString("hex") })
-        transactLeafCursor = Math.max(transactLeafCursor ?? 0, leafIndex + 1)
-      } else if (startsWith(payload, DEPOSIT_NOTE_SPL_EVENT_DISCRIMINATOR)) {
+        occupiedIndices.add(leafIndex)
+      } else if (
+        startsWith(payload, DEPOSIT_NOTE_SPL_EVENT_DISCRIMINATOR) &&
+        payload.length >= DEPOSIT_SPL_EVENT_MIN_BYTES
+      ) {
         // SPL deposit (#779): same tree, one extra `mint` (32) field before the
         // commitment. Body: depositor(32) | mint(32) | amount(8) | commitment(32)
         // | leaf_index(8) | timestamp(8). Its leaf MUST be included or the tree
@@ -227,18 +243,34 @@ export async function fetchV3Leaves(connection: Connection): Promise<V3Leaf[]> {
           new DataView(body.buffer, body.byteOffset + 104, 8).getBigUint64(0, true)
         )
         leaves.push({ index: leafIndex, commitmentHex: Buffer.from(commitment).toString("hex") })
-        transactLeafCursor = Math.max(transactLeafCursor ?? 0, leafIndex + 1)
-      } else if (startsWith(payload, TRANSACT_EVENT_DISCRIMINATOR)) {
+        occupiedIndices.add(leafIndex)
+      } else if (
+        startsWith(payload, TRANSACT_EVENT_DISCRIMINATOR) &&
+        payload.length >= TRANSACT_EVENT_MIN_BYTES
+      ) {
         const body = payload.slice(8)
         const oc0 = body.slice(64, 96)
         const oc1 = body.slice(96, 128)
-        const base = transactLeafCursor ?? leaves.length
-        leaves.push({ index: base, commitmentHex: Buffer.from(oc0).toString("hex") })
-        leaves.push({ index: base + 1, commitmentHex: Buffer.from(oc1).toString("hex") })
-        transactLeafCursor = base + 2
+        pendingTransacts.push([
+          Buffer.from(oc0).toString("hex"),
+          Buffer.from(oc1).toString("hex")
+        ])
       }
     }
   }
+
+  let cursor = 0
+  for (const [oc0Hex, oc1Hex] of pendingTransacts) {
+    while (occupiedIndices.has(cursor) || occupiedIndices.has(cursor + 1)) {
+      cursor++
+    }
+    leaves.push({ index: cursor, commitmentHex: oc0Hex })
+    leaves.push({ index: cursor + 1, commitmentHex: oc1Hex })
+    occupiedIndices.add(cursor)
+    occupiedIndices.add(cursor + 1)
+    cursor += 2
+  }
+
   leaves.sort((a, b) => a.index - b.index)
   // The tree is append-only and gap-free: indices must be exactly 0..N-1. The
   // callers consume this list positionally (v3_merkle_path folds by array

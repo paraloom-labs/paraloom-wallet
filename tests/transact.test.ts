@@ -295,6 +295,34 @@ describe("transact outputs", () => {
     const leaves = await fetchV3Leaves(connection)
     expect(leaves.map((l) => l.commitmentHex.slice(0, 2))).toEqual(["b0", "b1", "b2", "b3"])
   })
+
+  it("assigns transact outputs into lowest unoccupied slots when same-slot DepositNoteEvent precedes TransactEvent", async () => {
+    // RPC returns deposit(leaf_index=2) as chronologically earlier than same-slot
+    // transact(leaves 0,1). Previously transactLeafCursor jumped to 3 and threw "not contiguous".
+    const { connection } = fakeConnection([
+      { logs: emittedBy(PROGRAM_ID, depositEvent(0xa2, 2)) },
+      { logs: emittedBy(PROGRAM_ID, transactEvent(0xb0, 0xb1)) }
+    ])
+    const leaves = await fetchV3Leaves(connection)
+    expect(leaves.map((l) => [l.index, l.commitmentHex.slice(0, 2)])).toEqual([
+      [0, "b0"],
+      [1, "b1"],
+      [2, "a2"]
+    ])
+  })
+
+  it("ignores truncated event payloads shorter than wire schema bounds without throwing RangeError", async () => {
+    const truncDep = payload(DEPOSIT_NOTE_EVENT_DISCRIMINATOR, new Uint8Array(40))
+    const truncSpl = payload(DEPOSIT_NOTE_SPL_EVENT_DISCRIMINATOR, new Uint8Array(60))
+    const truncTx = payload(TRANSACT_EVENT_DISCRIMINATOR, new Uint8Array(80))
+    const { connection } = fakeConnection([
+      { logs: emittedBy(PROGRAM_ID, truncDep, truncSpl, truncTx, depositEvent(0xa0, 0)) }
+    ])
+    const leaves = await fetchV3Leaves(connection)
+    expect(leaves).toHaveLength(1)
+    expect(leaves[0].index).toBe(0)
+    expect(leaves[0].commitmentHex).toBe("a0".repeat(32))
+  })
 })
 
 describe("signature history", () => {

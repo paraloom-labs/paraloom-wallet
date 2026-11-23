@@ -1,4 +1,5 @@
-import { describe, expect, it } from "vitest"
+import { describe, expect, it, vi } from "vitest"
+import { Keypair, type Connection } from "@solana/web3.js"
 
 import {
   classifyStrand,
@@ -102,5 +103,109 @@ describe("isNativeSolOutput", () => {
 
   it("treats USDC (any SPL mint) as NOT native SOL", () => {
     expect(isNativeSolOutput("EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v")).toBe(false)
+  })
+})
+
+describe("token-input strands in classifyStrand & reconcileSwapOutputs", () => {
+  const USDC_MINT = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"
+
+  it("resumes a Token -> SOL strand when withdrawn input SPL tokens still sit in the fresh ATA", () => {
+    // 0.00696 SOL remaining gas (> RESUME_MIN_LAMPORTS) + 10 USDC waiting to swap -> must resume, NOT mark landed!
+    expect(
+      classifyStrand({
+        hasSignature: false,
+        ageMs: OLD,
+        solLamports: 6_960_000n,
+        tokenAmount: 0n,
+        inputTokenAmount: 10_000_000n,
+        isNativeOutput: true
+      })
+    ).toBe("resume")
+
+    // Even when gas SOL dipped <= RESUME_MIN_LAMPORTS (e.g. 4M lamports left after rent/fees), still resume!
+    expect(
+      classifyStrand({
+        hasSignature: false,
+        ageMs: OLD,
+        solLamports: 4_000_000n,
+        tokenAmount: 0n,
+        inputTokenAmount: 10_000_000n,
+        isNativeOutput: true
+      })
+    ).toBe("resume")
+  })
+
+  it("marks Token -> SOL as landed once the input SPL tokens are gone and SOL remains", () => {
+    expect(
+      classifyStrand({
+        hasSignature: false,
+        ageMs: OLD,
+        solLamports: 25_000_000n,
+        tokenAmount: 0n,
+        inputTokenAmount: 0n,
+        isNativeOutput: true
+      })
+    ).toBe("landed")
+  })
+
+  it("resumes a Token A -> SOL stranded SwapOutput with its persisted inputMint via reconcileSwapOutputs", async () => {
+    vi.resetModules()
+    const storage: Record<string, unknown> = {}
+    ;(globalThis as { chrome?: unknown }).chrome = {
+      storage: {
+        local: {
+          get: async (k: string) => ({ [k]: storage[k] }),
+          set: async (obj: Record<string, unknown>) => Object.assign(storage, obj)
+        }
+      }
+    }
+
+    const resumeMock = vi.fn().mockResolvedValue({
+      swapSignature: "sigResumedTokenSwap",
+      outAmount: 42_000_000
+    })
+
+    vi.doMock("~lib/prover", () => ({
+      NATIVE_ASSET_HEX: "00".repeat(32),
+      assetIdForMint: async () => "aa".repeat(32)
+    }))
+    vi.doMock("../lib/paraloom/privateSwap", () => ({
+      isNativeSolOutput,
+      resumeSwapAtFreshAddress: resumeMock
+    }))
+
+    const { saveSwapOutput, listSwapOutputs } = await import("../lib/paraloom/swapOutputs")
+    const { reconcileSwapOutputs } = await import("../lib/paraloom/swapReconcile")
+
+    const fresh = Keypair.generate()
+    await saveSwapOutput({
+      freshAddress: fresh.publicKey.toBase58(),
+      freshSecretKeyHex: Buffer.from(fresh.secretKey).toString("hex"),
+      inputMint: USDC_MINT,
+      outputMint: WSOL_MINT,
+      outAmount: 0,
+      swapSignature: "",
+      reshield: true,
+      createdAt: Date.now() - OLD
+    })
+
+    const fakeConn = {
+      getBalance: async () => 6_960_000,
+      getParsedTokenAccountsByOwner: async () => ({
+        value: [{ account: { data: { parsed: { info: { tokenAmount: { amount: "5000000" } } } } } }]
+      })
+    } as unknown as Connection
+
+    const resolved = await reconcileSwapOutputs(fakeConn, "paraloom1" + "11".repeat(32))
+    expect(resolved).toBe(1)
+    expect(resumeMock).toHaveBeenCalledTimes(1)
+    expect(resumeMock.mock.calls[0][6]).toBe(USDC_MINT)
+
+    const updated = await listSwapOutputs()
+    expect(updated[0].swapSignature).toBe("sigResumedTokenSwap")
+    expect(updated[0].outAmount).toBe(42_000_000)
+
+    vi.doUnmock("../lib/paraloom/privateSwap")
+    vi.doUnmock("~lib/prover")
   })
 })

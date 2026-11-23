@@ -34,10 +34,20 @@ export function classifyStrand(args: {
   ageMs: number
   solLamports: bigint
   tokenAmount: bigint
+  /** Input SPL token balance still sitting at the fresh address for a token-input swap. */
+  inputTokenAmount?: bigint
+  /** True when the swap output itself is native SOL (e.g. token -> SOL). */
+  isNativeOutput?: boolean
 }): StrandAction {
   if (args.hasSignature) return "skip"
   if (args.ageMs < RESUME_GRACE_MS) return "skip"
-  if (args.solLamports > RESUME_MIN_LAMPORTS) return "resume"
+  // A token-input swap whose withdrawn SPL tokens are still at the fresh
+  // address (with any gas SOL left) must resume the swap leg BEFORE checking
+  // SOL reserve thresholds, so the gas reserve is never mistaken for output SOL.
+  if ((args.inputTokenAmount ?? 0n) > 0n && args.solLamports > 0n) return "resume"
+  if (args.solLamports > RESUME_MIN_LAMPORTS) {
+    return args.isNativeOutput ? "landed" : "resume"
+  }
   if (args.tokenAmount > 0n) return "landed"
   return "unresolved"
 }

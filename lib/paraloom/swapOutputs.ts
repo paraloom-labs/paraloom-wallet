@@ -8,6 +8,9 @@ export interface SwapOutput {
   freshAddress: string
   /** Secret key (hex) of the fresh address — needed to move the token later. */
   freshSecretKeyHex: string
+  /** Input token mint (base58) or "SOL" when swapping from native SOL.
+   *  Absent on legacy rows (treated as native-SOL input). */
+  inputMint?: string
   /** Output mint (base58) or "SOL". */
   outputMint: string
   /** Output amount the route reported, in the out mint's base units. */

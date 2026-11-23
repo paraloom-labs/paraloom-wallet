@@ -188,18 +188,21 @@ async function routeSwap(
   throw lastErr instanceof Error ? lastErr : new Error("swap routing failed")
 }
 
-// Route -> sign -> submit -> confirm a swap of `swapLamports` SOL at `fresh`.
-// Shared by the live swap and the resume/recovery path so both harden identically.
+// Route -> sign -> submit -> confirm a swap of `amount` units of `inputMint`
+// at `fresh`. Shared by the live swap and the resume/recovery path so both
+// harden identically.
 async function executeSwapLeg(
   connection: Connection,
   fresh: Keypair,
   outputMint: string,
-  swapLamports: bigint
+  amount: bigint,
+  inputMint = "SOL"
 ): Promise<{ swapSignature: string; outAmount: number }> {
   const { out_amount, swap_transaction } = await routeSwap(
     fresh.publicKey.toBase58(),
     outputMint,
-    swapLamports
+    amount,
+    inputMint
   )
   const tx = VersionedTransaction.deserialize(
     Uint8Array.from(Buffer.from(swap_transaction, "base64"))
@@ -388,6 +391,7 @@ export async function privateSwap(
   await saveSwapOutput({
     freshAddress: fresh.publicKey.toBase58(),
     freshSecretKeyHex: Buffer.from(fresh.secretKey).toString("hex"),
+    inputMint: "SOL",
     outputMint: params.outputMint,
     outAmount: out_amount,
     swapSignature,
@@ -504,6 +508,7 @@ export async function privateSwapFromToken(
   await saveSwapOutput({
     freshAddress: fresh.publicKey.toBase58(),
     freshSecretKeyHex: Buffer.from(fresh.secretKey).toString("hex"),
+    inputMint: params.inputMint,
     outputMint: params.outputMint,
     outAmount: 0,
     swapSignature: "",
@@ -594,6 +599,7 @@ export async function privateSwapFromToken(
   await saveSwapOutput({
     freshAddress: fresh.publicKey.toBase58(),
     freshSecretKeyHex: Buffer.from(fresh.secretKey).toString("hex"),
+    inputMint: params.inputMint,
     outputMint: params.outputMint,
     outAmount: out_amount,
     swapSignature,
@@ -665,26 +671,43 @@ export async function resumeSwapAtFreshAddress(
   freshSecretKeyHex: string,
   outputMint: string,
   reshield: boolean,
-  onReshielded?: (note: ReshieldedNote) => Promise<void>
+  onReshielded?: (note: ReshieldedNote) => Promise<void>,
+  inputMint?: string
 ): Promise<ResumeSwapResult> {
   const fresh = Keypair.fromSecretKey(
     Uint8Array.from(Buffer.from(freshSecretKeyHex, "hex"))
   )
-  const funded = BigInt(await connection.getBalance(fresh.publicKey))
-  const swapLamports = funded - SWAP_OVERHEAD_LAMPORTS
-  if (swapLamports <= 0n) {
-    throw new Error("fresh address balance is below the swap overhead reserve")
+  let swapAmount: bigint
+  const effectiveInputMint =
+    inputMint && !isNativeSolOutput(inputMint) ? inputMint : "SOL"
+  if (effectiveInputMint !== "SOL") {
+    const ata = associatedTokenAddress(
+      fresh.publicKey,
+      new PublicKey(effectiveInputMint)
+    )
+    const bal = await connection.getTokenAccountBalance(ata).catch(() => null)
+    swapAmount = bal ? BigInt(bal.value.amount) : 0n
+    if (swapAmount <= 0n) {
+      throw new Error("fresh address holds no input tokens to swap")
+    }
+  } else {
+    const funded = BigInt(await connection.getBalance(fresh.publicKey))
+    swapAmount = funded - SWAP_OVERHEAD_LAMPORTS
+    if (swapAmount <= 0n) {
+      throw new Error("fresh address balance is below the swap overhead reserve")
+    }
   }
 
   const { swapSignature, outAmount } = await executeSwapLeg(
     connection,
     fresh,
     outputMint,
-    swapLamports
+    swapAmount,
+    effectiveInputMint
   )
 
   let reshielded: ReshieldedNote | undefined
-  if (reshield && outputMint !== "SOL") {
+  if (reshield && !isNativeSolOutput(outputMint)) {
     reshielded = await reshieldToken(
       connection,
       fresh,

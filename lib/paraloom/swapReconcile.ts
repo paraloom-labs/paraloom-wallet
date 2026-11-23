@@ -34,6 +34,31 @@ export type { StrandAction } from "./swapReconcileClassify"
 
 let reconcileInFlight = false
 
+/// Sum parsed SPL token balance for `mint` held by `owner`, returning 0n when
+/// the owner holds no ATA or on a transient query error.
+async function sumMintBalance(
+  connection: Connection,
+  owner: PublicKey,
+  mint: string
+): Promise<bigint> {
+  try {
+    const accts = await connection.getParsedTokenAccountsByOwner(owner, {
+      mint: new PublicKey(mint)
+    })
+    return accts.value.reduce(
+      (s, a) =>
+        s +
+        BigInt(
+          (a.account.data as { parsed: { info: { tokenAmount: { amount: string } } } })
+            .parsed.info.tokenAmount.amount
+        ),
+      0n
+    )
+  } catch {
+    return 0n
+  }
+}
+
 /// Resolve every stranded swap row for `shieldedAddress` to its true on-chain
 /// outcome. Best-effort and idempotent: a row it cannot positively account for is
 /// left as-is. Returns the number of rows it moved out of the pending state.
@@ -59,39 +84,31 @@ export async function reconcileSwapOutputs(
         continue // RPC blip: retry on the next open rather than guess
       }
 
+      const isTokenInput = Boolean(o.inputMint && !isNativeSolOutput(o.inputMint))
+      const inputTokenAmount = isTokenInput
+        ? await sumMintBalance(connection, freshPub, o.inputMint!)
+        : 0n
+
+      const nativeOutput = isNativeSolOutput(o.outputMint)
       let tokenAmount = 0n
-      if (solLamports <= RESUME_MIN_LAMPORTS && !isNativeSolOutput(o.outputMint)) {
-        try {
-          const accts = await connection.getParsedTokenAccountsByOwner(freshPub, {
-            mint: new PublicKey(o.outputMint)
-          })
-          tokenAmount = accts.value.reduce(
-            (s, a) =>
-              s +
-              BigInt(
-                (a.account.data as { parsed: { info: { tokenAmount: { amount: string } } } })
-                  .parsed.info.tokenAmount.amount
-              ),
-            0n
-          )
-        } catch {
-          // no token account yet — leave as unresolved below
-        }
+      if (
+        inputTokenAmount === 0n &&
+        solLamports <= RESUME_MIN_LAMPORTS &&
+        !nativeOutput
+      ) {
+        tokenAmount = await sumMintBalance(connection, freshPub, o.outputMint)
       }
 
-      let action = classifyStrand({
+      const action = classifyStrand({
         hasSignature: false,
         ageMs: now - o.createdAt,
         solLamports,
-        tokenAmount
+        tokenAmount,
+        inputTokenAmount,
+        isNativeOutput: nativeOutput
       })
 
-      // A "SOL" output means this was a token -> SOL swap (or its stranded gas
-      // leg): the SOL at the fresh address is the OUTPUT, never a SOL input to
-      // swap again, so never resume it (that would route SOL -> SOL). Record the
-      // SOL as landed instead; it is real and recoverable with the saved key.
-      if (action === "resume" && isNativeSolOutput(o.outputMint)) {
-        action = "landed"
+      if (action === "landed" && nativeOutput) {
         tokenAmount = solLamports
       }
 
@@ -103,7 +120,8 @@ export async function reconcileSwapOutputs(
             o.freshSecretKeyHex,
             o.outputMint,
             o.reshield ?? false,
-            (note) => persistReshieldedNote(shieldedAddress, note)
+            (note) => persistReshieldedNote(shieldedAddress, note),
+            o.inputMint
           )
           await saveSwapOutput({
             ...o,

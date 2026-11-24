@@ -5,6 +5,10 @@ import {
   generateSeedPhrase,
   validateSeedPhrase
 } from "~lib/crypto/keyManagement"
+import {
+  buildVerifyOptions,
+  pickRandom
+} from "~lib/crypto/seedVerification"
 import { saveEncryptedWallet, setLockState } from "~lib/storage/secure"
 import { useWalletStore } from "~lib/store/walletStore"
 import type { Account } from "~lib/store/walletStore"
@@ -12,26 +16,6 @@ import logoImg from "data-base64:~/../assets/icon.png"
 
 interface OnboardingProps {
   onComplete: () => void
-}
-
-// Pick N random unique indices from 0..max-1
-function pickRandom(count: number, max: number): number[] {
-  const indices = Array.from({ length: max }, (_, i) => i)
-  for (let i = indices.length - 1; i > 0; i--) {
-    const j = Math.floor(Math.random() * (i + 1));
-    [indices[i], indices[j]] = [indices[j], indices[i]]
-  }
-  return indices.slice(0, count).sort((a, b) => a - b)
-}
-
-// Pick N decoy words that are NOT in the correct answers
-function pickDecoys(correctWord: string, allWords: string[], count: number): string[] {
-  const others = allWords.filter(w => w !== correctWord)
-  for (let i = others.length - 1; i > 0; i--) {
-    const j = Math.floor(Math.random() * (i + 1));
-    [others[i], others[j]] = [others[j], others[i]]
-  }
-  return others.slice(0, count)
 }
 
 export function Onboarding({ onComplete }: OnboardingProps) {
@@ -56,22 +40,9 @@ export function Onboarding({ onComplete }: OnboardingProps) {
     return pickRandom(3, 12)
   }, [seedPhrase])
 
-  // Generate shuffled options for each hidden word
+  // Generate shuffled options for each hidden word using full BIP-39 decoys (#306)
   const verifyOptions = useMemo(() => {
-    if (words.length !== 12 || hiddenIndices.length === 0) return {}
-    const opts: Record<number, string[]> = {}
-    for (const idx of hiddenIndices) {
-      const correct = words[idx]
-      const decoys = pickDecoys(correct, words, 3)
-      const choices = [correct, ...decoys]
-      // Shuffle
-      for (let i = choices.length - 1; i > 0; i--) {
-        const j = Math.floor(Math.random() * (i + 1));
-        [choices[i], choices[j]] = [choices[j], choices[i]]
-      }
-      opts[idx] = choices
-    }
-    return opts
+    return buildVerifyOptions(words, hiddenIndices, 3)
   }, [seedPhrase, hiddenIndices])
 
   function handleCreateWallet() {
@@ -342,7 +313,7 @@ export function Onboarding({ onComplete }: OnboardingProps) {
                       return (
                         <div key={i} className="seed-word seed-word-visible">
                           <span className="seed-index">{i + 1}</span>
-                          <span className="seed-text">{word}</span>
+                          <span className="seed-text">••••</span>
                         </div>
                       )
                     })}

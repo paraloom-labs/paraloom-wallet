@@ -413,6 +413,18 @@ export async function privateSwap(
       params.outputMint,
       onReshielded
     )
+    if (reshielded) {
+      await saveSwapOutput({
+        freshAddress: fresh.publicKey.toBase58(),
+        freshSecretKeyHex: "",
+        outputMint: params.outputMint,
+        outAmount: out_amount,
+        swapSignature,
+        reshield: true,
+        reshieldRecovered: true,
+        createdAt: Date.now()
+      })
+    }
   }
 
   return {
@@ -630,6 +642,18 @@ export async function privateSwapFromToken(
       params.outputMint,
       onReshielded
     )
+    if (reshielded) {
+      await saveSwapOutput({
+        freshAddress: fresh.publicKey.toBase58(),
+        freshSecretKeyHex: "",
+        outputMint: params.outputMint,
+        outAmount: out_amount,
+        swapSignature,
+        reshield: true,
+        reshieldRecovered: true,
+        createdAt: Date.now()
+      })
+    }
   }
 
   return {

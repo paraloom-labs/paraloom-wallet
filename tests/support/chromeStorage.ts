@@ -63,3 +63,30 @@ export function installFakeChrome(): FakeChrome {
   ;(globalThis as unknown as { chrome: FakeChrome }).chrome = chrome
   return chrome
 }
+
+/**
+ * Seed an unlocked session in the fake session area, so modules that derive
+ * encryption keys from the unlocked session can run (e.g. encrypted swap
+ * outputs #298).
+ */
+export async function seedUnlockedSession(
+  chrome: FakeChrome,
+  opts: { shieldedAddress?: string; spendPrivkeyHex?: string } = {}
+): Promise<void> {
+  await chrome.storage.session.set({
+    paraloom_session: {
+      wallet: {
+        publicKey: "11".repeat(32),
+        secretKey: "22".repeat(32),
+        shieldedAddress: opts.shieldedAddress ?? "paraloom1" + "11".repeat(64),
+        boxPublicKey: "33".repeat(32),
+        boxSecretKey: "44".repeat(32),
+        spendPrivkey: opts.spendPrivkeyHex ?? "55".repeat(32)
+      },
+      accounts: [],
+      currentAccountIndex: 0,
+      seedPhrase: null
+    },
+    paraloom_last_activity: Date.now()
+  })
+}

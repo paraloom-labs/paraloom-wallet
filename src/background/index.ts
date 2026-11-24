@@ -19,6 +19,7 @@ import {
   type ReshieldedNote
 } from "~lib/paraloom/privateSwap"
 import { persistReshieldedNote, recoverReshields } from "~lib/paraloom/reshieldRecovery"
+import { filterSwapJobForOrigin, type SwapJob } from "~lib/paraloom/swapJobScope"
 import { reconcileSwapOutputs } from "~lib/paraloom/swapReconcile"
 import { assetIdForMint, NATIVE_ASSET_HEX } from "~lib/prover"
 
@@ -384,7 +385,9 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     isAuthorizedSender(sender)
       .then((ok) => {
         if (!ok) return sendResponse({ success: false, error: "not authorized" })
-        void setSwapJob({ status: "pending", startedAt: Date.now() })
+        const origin = senderOrigin(sender)
+        if (!origin) return sendResponse({ success: false, error: "unknown origin" })
+        void setSwapJob({ status: "pending", origin, startedAt: Date.now() })
         void runSwapJob(message.params, sender)
         sendResponse({ success: true, pending: true })
       })
@@ -396,9 +399,14 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     isAuthorizedSender(sender)
       .then((ok) => {
         if (!ok) return sendResponse(null)
+        const callerOrigin = senderOrigin(sender)
         chrome.storage.session
           .get("swapJob")
-          .then((r) => sendResponse(r.swapJob ?? null))
+          .then((r) =>
+            sendResponse(
+              filterSwapJobForOrigin(r.swapJob as SwapJob | undefined, callerOrigin)
+            )
+          )
           .catch(() => sendResponse(null))
       })
       .catch(() => sendResponse(null))
@@ -735,15 +743,8 @@ function requestSwapApproval(
 // then execute. No spend happens without BOTH an approved origin AND a fresh
 // user confirmation of the exact amount + output token.
 // Swap job status, persisted so the page can poll it (GET_SWAP_STATUS) even
-// across worker restarts. One swap at a time.
-interface SwapJob {
-  status: "pending" | "done" | "error"
-  result?: unknown
-  error?: string
-  /** When a "pending" job started, so the auto-lock can hold off while a swap is
-   *  genuinely in flight without a hung job blocking the lock forever. */
-  startedAt?: number
-}
+// across worker restarts. One swap at a time, scoped to the initiating origin
+// (paraloom-core#1665).
 async function setSwapJob(job: SwapJob): Promise<void> {
   await chrome.storage.session.set({ swapJob: job }).catch(() => {})
 }
@@ -756,14 +757,14 @@ async function runSwapJob(
   params: SwapRequestParams,
   sender: chrome.runtime.MessageSender
 ): Promise<void> {
+  const origin = senderOrigin(sender) ?? ""
   try {
     // Starting a swap is activity: reset the idle clock so the 15-min auto-lock
     // measured from the LAST popup interaction can't fire in the middle of a
     // swap driven entirely from the dapp (popup closed).
     void recordActivity(Date.now())
-    const origin = senderOrigin(sender)
     if (!origin) {
-      await setSwapJob({ status: "error", error: "unknown origin" })
+      await setSwapJob({ status: "error", origin: "", error: "unknown origin" })
       return
     }
     if (
@@ -771,21 +772,22 @@ async function runSwapJob(
       typeof params.outputMint !== "string" ||
       typeof params.amountLamports !== "string"
     ) {
-      await setSwapJob({ status: "error", error: "invalid params" })
+      await setSwapJob({ status: "error", origin, error: "invalid params" })
       return
     }
     const decision = requestSwapApproval(origin, params, 180_000)
     await openWalletWindow()
     const approved = await decision
     if (!approved) {
-      await setSwapJob({ status: "error", error: "rejected" })
+      await setSwapJob({ status: "error", origin, error: "rejected" })
       return
     }
     const result = await handlePrivateSwap(params)
-    await setSwapJob({ status: "done", result: result.data })
+    await setSwapJob({ status: "done", origin, result: result.data })
   } catch (e) {
     await setSwapJob({
       status: "error",
+      origin,
       error: e instanceof Error ? e.message : String(e)
     })
   }

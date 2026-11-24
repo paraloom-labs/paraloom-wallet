@@ -31,6 +31,7 @@ import { SWAP_ROUTER_URL } from "./constants"
 import type { ShieldedNote } from "./notes"
 import { saveSwapOutput } from "./swapOutputs"
 import { depositV3, spendV3 } from "./transactFlow"
+import { validateSwapTransaction } from "./validateSwapTransaction"
 
 import { WSOL_MINT, isNativeSolOutput } from "./swapReconcileClassify"
 export { WSOL_MINT, isNativeSolOutput }
@@ -188,13 +189,18 @@ async function routeSwap(
   throw lastErr instanceof Error ? lastErr : new Error("swap routing failed")
 }
 
-// Route -> sign -> submit -> confirm a swap of `swapLamports` SOL at `fresh`.
-// Shared by the live swap and the resume/recovery path so both harden identically.
+// Route -> validate -> sign -> submit -> confirm a swap of `swapLamports` SOL
+// at `fresh`.  Shared by the live swap and the resume/recovery path so both
+// harden identically.  The validation step (#300) decodes the router's unsigned
+// transaction and enforces structural invariants (single signer == fresh,
+// program allowlist, simulation) BEFORE signing — a malicious router response
+// is caught here and never reaches the chain.
 async function executeSwapLeg(
   connection: Connection,
   fresh: Keypair,
   outputMint: string,
-  swapLamports: bigint
+  swapLamports: bigint,
+  slippageBps?: number
 ): Promise<{ swapSignature: string; outAmount: number }> {
   const { out_amount, swap_transaction } = await routeSwap(
     fresh.publicKey.toBase58(),
@@ -204,6 +210,18 @@ async function executeSwapLeg(
   const tx = VersionedTransaction.deserialize(
     Uint8Array.from(Buffer.from(swap_transaction, "base64"))
   )
+
+  // (#300) Validate the router-supplied transaction before signing.
+  await validateSwapTransaction({
+    tx,
+    fresh,
+    connection,
+    quotedOutAmount: out_amount,
+    outputMint,
+    inputAmount: swapLamports,
+    slippageBps
+  })
+
   tx.sign([fresh])
   const swapSignature = await connection.sendRawTransaction(tx.serialize(), {
     maxRetries: 5
@@ -371,10 +389,21 @@ export async function privateSwap(
     swapLamports
   )
 
-  // 6. Sign the swap with the fresh key locally and submit it.
+  // 6. Validate the router-supplied transaction BEFORE signing (#300).
   const tx = VersionedTransaction.deserialize(
     Uint8Array.from(Buffer.from(swap_transaction, "base64"))
   )
+  await validateSwapTransaction({
+    tx,
+    fresh,
+    connection,
+    quotedOutAmount: out_amount,
+    outputMint: params.outputMint,
+    inputAmount: swapLamports,
+    slippageBps: params.slippageBps
+  })
+
+  // 7. Sign the swap with the fresh key locally and submit it.
   tx.sign([fresh])
   const swapSignature = await connection.sendRawTransaction(tx.serialize(), {
     maxRetries: 5
@@ -576,7 +605,7 @@ export async function privateSwapFromToken(
   }
 
   // 4. Route the ACTUAL landed token amount (net of the withdraw fee) into the
-  //    output for the fresh address, then sign locally and submit.
+  //    output for the fresh address, then validate (#300), sign locally and submit.
   const { out_amount, swap_transaction } = await routeSwap(
     fresh.publicKey.toBase58(),
     params.outputMint,
@@ -586,6 +615,15 @@ export async function privateSwapFromToken(
   const tx = VersionedTransaction.deserialize(
     Uint8Array.from(Buffer.from(swap_transaction, "base64"))
   )
+  await validateSwapTransaction({
+    tx,
+    fresh,
+    connection,
+    quotedOutAmount: out_amount,
+    outputMint: params.outputMint,
+    inputAmount: tokenLanded,
+    slippageBps: params.slippageBps
+  })
   tx.sign([fresh])
   const swapSignature = await connection.sendRawTransaction(tx.serialize(), {
     maxRetries: 5

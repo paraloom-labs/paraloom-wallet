@@ -8,10 +8,102 @@ import {
   type ShieldedNote
 } from "~lib/paraloom/notes"
 import { beforeEach, describe, expect, it } from "vitest"
-import { installFakeChrome } from "./support/chromeStorage"
+import { installFakeChrome, installUnlockedSession, type FakeChrome } from "./support/chromeStorage"
 
 const ACCOUNT = "paraloom1" + "11".repeat(64)
 const OTHER_ACCOUNT = "paraloom1" + "22".repeat(64)
+
+let fake: FakeChrome
+
+beforeEach(async () => {
+  fake = installFakeChrome()
+  await installUnlockedSession()
+})
+
+describe("sealed at-rest storage (#1724)", () => {
+  it("writes blindings as one opaque sealed blob, never plaintext", async () => {
+    await addNote(ACCOUNT, deposit())
+
+    const raw = fake.storage.local.raw["paraloom_notes"]
+    expect(typeof raw).toBe("string")
+    expect(raw as string).toMatch(/^v1:[0-9a-f]+$/)
+    // The blinding is the bearer secret: it must not appear anywhere in
+    // what hits the disk.
+    expect(raw as string).not.toContain("aa".repeat(32))
+    expect(raw as string).not.toContain("sig-deposit")
+  })
+
+  it("round-trips notes through the seal while unlocked", async () => {
+    await addNote(ACCOUNT, deposit())
+    await addDiscoveredNote(ACCOUNT, received("c0".repeat(32)))
+
+    const notes = await getNotes(ACCOUNT)
+    expect(notes).toHaveLength(2)
+    expect(notes[0].blinding).toBe("aa".repeat(32))
+    expect(await shieldedBalance(ACCOUNT)).toBe(3000n)
+  })
+
+  it("returns nothing while locked, as if the store were empty", async () => {
+    await addNote(ACCOUNT, deposit())
+    // Simulate LOCK_WALLET: the session (and with it the sealing key) is gone.
+    await fake.storage.session.remove("paraloom_session")
+
+    expect(await getNotes(ACCOUNT)).toEqual([])
+    expect(await shieldedBalance(ACCOUNT)).toBe(0n)
+    // The sealed blob itself is still on disk, unreadable — not deleted.
+    expect(typeof fake.storage.local.raw["paraloom_notes"]).toBe("string")
+  })
+
+  it("refuses writes while locked instead of dropping them silently", async () => {
+    await fake.storage.session.remove("paraloom_session")
+
+    await expect(addNote(ACCOUNT, deposit())).rejects.toThrow(/locked/)
+    await expect(addDiscoveredNote(ACCOUNT, received("c0".repeat(32)))).rejects.toThrow(/locked/)
+    // Nothing was persisted in the clear by the refused writes.
+    expect(fake.storage.local.raw["paraloom_notes"]).toBeUndefined()
+  })
+
+  it("seals legacy plaintext rows on the first unlocked read", async () => {
+    // A pre-#1724 wallet: blindings sitting in the clear under the old format.
+    await fake.storage.local.set({
+      paraloom_notes: { [ACCOUNT]: [deposit()] }
+    })
+    expect(typeof fake.storage.local.raw["paraloom_notes"]).not.toBe("string")
+
+    const notes = await getNotes(ACCOUNT)
+    expect(notes).toHaveLength(1)
+    expect(notes[0].blinding).toBe("aa".repeat(32))
+
+    const raw = fake.storage.local.raw["paraloom_notes"]
+    expect(typeof raw).toBe("string")
+    expect(raw as string).toMatch(/^v1:/)
+    expect(raw as string).not.toContain("aa".repeat(32))
+  })
+
+  it("leaves legacy plaintext rows untouched while locked, migrates on unlock", async () => {
+    await fake.storage.local.set({
+      paraloom_notes: { [ACCOUNT]: [deposit()] }
+    })
+    await fake.storage.session.remove("paraloom_session")
+
+    // Locked: the rows are not readable (and not yet migrated).
+    expect(await getNotes(ACCOUNT)).toEqual([])
+    expect(typeof fake.storage.local.raw["paraloom_notes"]).not.toBe("string")
+
+    // Unlock: the next read migrates them.
+    await installUnlockedSession()
+    expect((await getNotes(ACCOUNT)).length).toBe(1)
+    expect(typeof fake.storage.local.raw["paraloom_notes"]).toBe("string")
+  })
+
+  it("refuses to open a store sealed under a different wallet", async () => {
+    await addNote(ACCOUNT, deposit())
+    // A different wallet (different seed) unlocks: same store, wrong key.
+    await installUnlockedSession(9)
+
+    await expect(getNotes(ACCOUNT)).rejects.toThrow(/authentication/)
+  })
+})
 
 function deposit(overrides: Partial<ShieldedNote> = {}): ShieldedNote {
   return {
@@ -39,10 +131,6 @@ function received(commitment: string, overrides: Partial<ShieldedNote> = {}): Sh
     ...overrides
   }
 }
-
-beforeEach(() => {
-  installFakeChrome()
-})
 
 describe("markNoteSpentByIdentity (#718)", () => {
   it("spends only the named received note, leaving the other received notes alone", async () => {

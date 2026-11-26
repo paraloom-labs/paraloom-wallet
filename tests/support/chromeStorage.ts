@@ -1,3 +1,6 @@
+import type { WalletKeyPair } from "~lib/crypto/keyManagement"
+import { saveSession } from "~lib/storage/session"
+
 // Minimal in-memory stand-in for the parts of `chrome.storage` the wallet
 // touches. Deliberately not a mock library: the storage modules only use
 // get/set/remove, and a real object keeps the tests honest about what is
@@ -62,4 +65,23 @@ export function installFakeChrome(): FakeChrome {
   const chrome: FakeChrome = { storage: { local: makeArea(), session: makeArea() } }
   ;(globalThis as unknown as { chrome: FakeChrome }).chrome = chrome
   return chrome
+}
+
+/**
+ * Seed `chrome.storage.session` with an unlocked session (deterministic dummy
+ * keypair), so storage modules that seal under the session key can work. Call
+ * after `installFakeChrome()`. `secretFill` picks a different wallet — a
+ * store sealed under one fill cannot be opened under another, which is how
+ * the wrong-wallet tests get their second wallet.
+ */
+export async function installUnlockedSession(secretFill = 7): Promise<void> {
+  const wallet: WalletKeyPair = {
+    publicKey: new Uint8Array(32).fill(8),
+    secretKey: new Uint8Array(64).fill(secretFill),
+    shieldedAddress: "paraloom1" + "11".repeat(64),
+    boxPublicKey: new Uint8Array(32).fill(9),
+    boxSecretKey: new Uint8Array(32).fill(10),
+    spendPrivkey: new Uint8Array(32).fill(11)
+  }
+  await saveSession({ wallet, accounts: [], currentAccountIndex: 0, seedPhrase: null })
 }

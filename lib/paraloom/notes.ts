@@ -2,6 +2,13 @@
 // extension can scan the pool for its own notes (a viewing-key feature), the
 // shielded balance is tracked here: the sum of unspent deposits. Each note
 // keeps the randomness needed to spend it in a later withdrawal.
+//
+// Sealed at rest (#1724): the whole store is one secretbox blob under the
+// wallet-derived sealing key (`~lib/storage/sealed`), never plaintext. While
+// the wallet is locked the blob is opaque — reads return nothing and writes
+// refuse — and legacy plaintext rows are sealed on the first unlocked read.
+
+import { getSealingKey, isSealedBlob, sealJson, unsealJson } from "~lib/storage/sealed"
 
 // Spend-key note (circuit v2, #293). The note is bound to the account's spend
 // public key (derived from the account seed, not stored here); to spend it the
@@ -35,11 +42,32 @@ type NotesByAccount = Record<string, ShieldedNote[]>
 
 async function readAll(): Promise<NotesByAccount> {
   const stored = await chrome.storage.local.get(NOTES_KEY)
-  return (stored[NOTES_KEY] as NotesByAccount) ?? {}
+  const raw = stored[NOTES_KEY]
+  if (raw === undefined) return {}
+  if (isSealedBlob(raw)) {
+    const key = await getSealingKey()
+    // Locked: the sealed notes are opaque until the next unlock.
+    if (!key) return {}
+    return unsealJson<NotesByAccount>(raw, key)
+  }
+  // Legacy plaintext rows (pre-#1724): seal them on the first unlocked read
+  // so no blinding survives in the clear past one unlock. While locked the
+  // rows stay put — unreadable either way — until unlock migrates them.
+  const legacy = raw as NotesByAccount
+  const key = await getSealingKey()
+  if (!key) return {}
+  await chrome.storage.local.set({ [NOTES_KEY]: sealJson(legacy, key) })
+  return legacy
 }
 
 async function writeAll(all: NotesByAccount): Promise<void> {
-  await chrome.storage.local.set({ [NOTES_KEY]: all })
+  const key = await getSealingKey()
+  // A write while locked cannot seal, and silently dropping a note write
+  // would strand funds — refuse loudly instead. Every caller runs inside an
+  // unlocked flow (deposit / swap / recovery), so this is a bug signal, not
+  // a normal path.
+  if (!key) throw new Error("wallet is locked: cannot persist shielded notes")
+  await chrome.storage.local.set({ [NOTES_KEY]: sealJson(all, key) })
 }
 
 export async function getNotes(account: string): Promise<ShieldedNote[]> {
@@ -106,7 +134,10 @@ export async function setNoteLeafIndex(
 
 // Mark a note spent by its commitment (used for transfer inputs/outputs, which
 // are identified by commitment rather than a deposit signature).
-export async function markNoteSpentByCommitment(account: string, commitment: string): Promise<void> {
+export async function markNoteSpentByCommitment(
+  account: string,
+  commitment: string
+): Promise<void> {
   const all = await readAll()
   const notes = all[account] ?? []
   all[account] = notes.map((n) => (n.commitment === commitment ? { ...n, spent: true } : n))
@@ -136,16 +167,12 @@ export async function markNoteSpentByIdentity(account: string, note: ShieldedNot
 // it carries no `mint`. Use shieldedTokenBalances() for the SPL side.
 export async function shieldedBalance(account: string): Promise<bigint> {
   const notes = await getNotes(account)
-  return notes
-    .filter((n) => !n.spent && !n.mint)
-    .reduce((sum, n) => sum + BigInt(n.amount), 0n)
+  return notes.filter((n) => !n.spent && !n.mint).reduce((sum, n) => sum + BigInt(n.amount), 0n)
 }
 
 // Unspent shielded SPL balances keyed by base58 mint (#779). Each amount is in
 // that mint's own base units, kept separate from the native lamports sum.
-export async function shieldedTokenBalances(
-  account: string
-): Promise<Record<string, bigint>> {
+export async function shieldedTokenBalances(account: string): Promise<Record<string, bigint>> {
   const notes = await getNotes(account)
   const byMint: Record<string, bigint> = {}
   for (const n of notes) {
